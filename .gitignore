@@ -1,0 +1,33 @@
+# ── Secrets & user data — NEVER commit ──────────────────────────────────────
+# Real config carries notification credentials (Telegram token, email app password).
+# Ship config.example.yaml instead; the app runs on defaults when config.yaml is absent.
+config.yaml
+
+# All runtime/user state: saved login cookies, the listings DB, chat history, logs,
+# screenshots, and the persistent webview profile.
+data/
+
+# ── Update machinery ────────────────────────────────────────────────────────
+updates/            # staged/pending downloaded updates
+dist/               # built release zips + latest.json
+build/              # PyInstaller / installer build output
+*.spec.bak
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Editors / OS ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*~

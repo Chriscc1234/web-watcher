@@ -1,0 +1,1360 @@
+"""
+FastAPI dashboard server.
+
+Endpoints
+---------
+GET  /api/health
+GET  /api/status                    service statuses (+ Ollama models)
+POST /api/services/{name}/start|stop|restart
+GET  /api/watches                   list watches + last-run + next-run
+POST /api/watches                   create a watch
+PUT  /api/watches/{name}            update a watch
+DELETE /api/watches/{name}          delete a watch
+POST /api/watches/{name}/run        manual trigger
+GET  /api/history[?watch=&limit=]   run history
+GET  /api/schedule                  next-run times
+GET  /api/oversight                 The Watcher's live narration feed
+POST /api/oversight/chat            talk to The Watcher (the single AI)
+POST /api/oversight/action          run a one-click fix it offered
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import httpx
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from web_watcher.services import ServiceManager
+
+STATIC_DIR      = Path(__file__).parent / "static"
+OLLAMA_URL      = "http://localhost:11434"
+_KNOWN_SERVICES = {"ollama", "server", "scheduler"}
+
+log = logging.getLogger(__name__)
+
+_CHAT_SYSTEM_BASE = """\
+You are the built-in assistant for Web Watcher — a personal, fully offline AI \
+app that monitors websites and takes autonomous actions on them. Everything runs \
+locally using Ollama. No cloud. No subscriptions.
+
+════════════════════════════════════════
+HOW WEB WATCHER WORKS
+════════════════════════════════════════
+Each "watch" is a job that runs on a schedule. It visits one or more URLs, and \
+an AI model reads the page to decide if the user's condition is met. If it is, \
+a notification is sent via Telegram and/or email.
+
+════════════════════════════════════════
+TWO INDEPENDENT CHOICES: how it reads, and how often it runs
+════════════════════════════════════════
+Don't confuse these. Every watch picks one of each.
+
+HOW IT READS THE PAGE (the "autonomous" field)
+  SIMPLE (autonomous: false)
+    Loads the page as-is and reads the text or takes a screenshot. Best for static \
+    pages like weather forecasts, news sites, stock prices, or any page that shows \
+    the information immediately without needing to click around.
+  AUTONOMOUS AGENT (autonomous: true)
+    A browser agent navigates the page like a human — clicking buttons, typing in \
+    search boxes, scrolling, moving between pages. Best for searching (Google, eBay, \
+    Craigslist) and multi-page research. Start it from the site HOMEPAGE and let it \
+    search like a person would.
+
+HOW OFTEN IT RUNS (the "mode" field)
+  SCHEDULE (mode: "schedule") — the default
+    Runs once every interval_minutes (or on a cron_expression), then stops until the \
+    next scheduled time. Best for "check this every 30 min / every morning" tasks.
+  CONTINUOUS (mode: "continuous")
+    An always-on loop that watches a marketplace all day and alerts ONLY on listings \
+    it has never seen before, then idles a few seconds and goes again — nonstop until \
+    the user stops it. Built for feeds whose algorithm hides new items for hours/days, \
+    so periodic checks miss them. Continuous watches do NOT auto-start — the user \
+    presses Start on the watch. Use continuous for "watch this marketplace all day and \
+    ping me the moment a matching item appears" (Facebook Marketplace, eBay, Craigslist).
+
+    A continuous watch comes in two flavours via the "autonomous" field. BOTH read each \
+    new listing's ad page for its attributes (transmission, drivetrain, mileage…) when a \
+    judgment_prompt is set — so attribute filtering works either way. The difference is \
+    only how listings are gathered:
+      • autonomous: false  (PREFERRED for sites with a clean search URL) — a fast scraper \
+        that loads the search-results URL, scrolls, and reads the listings directly. \
+        Best for Craigslist and eBay, where the search URL already lists everything: it's \
+        far faster and more reliable than the agent. Give it a search-results URL for what \
+        the user wants (e.g. a Craigslist search for the item).
+      • autonomous: true — the slower AI AGENT browses each sweep like a person \
+        (scrolling/searching/clicking). Only worth it when the site CANNOT be reached \
+        with a plain URL: e.g. Facebook Marketplace LOGGED IN (search behind a login), or \
+        sites that require clicking/interaction to reveal listings.
+    Default to autonomous: false for Craigslist/eBay and any site with a usable search \
+    URL. Reserve autonomous: true for login- or interaction-gated sites.
+
+════════════════════════════════════════
+AUTONOMOUS AGENT CAPABILITIES
+════════════════════════════════════════
+The agent has these actions available:
+  click     — click a button, link, or element
+  type      — type text into a search box or form field
+  press     — press a key (Enter, Tab, Escape, etc.)
+  navigate  — go to a different URL
+  scroll    — scroll the page up or down
+  remember  — save a fact to working memory for use later in the session
+  done      — finish and report what was found
+
+WORKING MEMORY (the "remember" action)
+  The agent can save facts across multiple pages. For example:
+  - On a Marketplace listing: remember the asking price, product name, and issues
+  - On eBay search results: remember the average sold price
+  - At the end: the judgment step sees all the saved facts and makes a decision
+  This is how multi-page research tasks work.
+
+════════════════════════════════════════
+THE JUDGMENT STEP (judgment_prompt)
+════════════════════════════════════════
+For complex research tasks, you can add a judgment_prompt to a watch. After the \
+agent finishes browsing and saving facts to memory, a second AI call applies your \
+custom reasoning criteria to those facts and decides if the result is a "match" \
+(found=true) worth alerting about.
+
+Example: The agent visits a Facebook Marketplace listing and saves:
+  asking_price: $180
+  product: Samsung 65" TV
+  issues: crack in bottom corner
+  ebay_used_avg: $280
+
+Then the judgment_prompt says: "Is the asking price at least 20% below comparable \
+used market price? Deduct 10% per major defect."
+
+The judgment AI calculates, decides yes/no, and writes a plain-English explanation \
+that becomes the notification text.
+
+When to use judgment_prompt:
+  - Price comparison tasks (is this a good deal?)
+  - Research tasks with specific criteria (is this job a good fit?)
+  - Any task where "found" depends on comparing gathered facts, not just detecting text
+
+════════════════════════════════════════
+LIMITATIONS TO KNOW ABOUT
+════════════════════════════════════════
+- LOGIN REQUIRED SITES: The agent never types passwords. For sites that need a \
+  login, the user does a one-time manual sign-in via the "Connect Facebook" button \
+  (Services → Browser), which saves a browser profile; watches with \
+  use_login_profile: true then reuse that logged-in session. Without it, the watch \
+  only sees what a logged-out visitor sees.
+- BLOCKERS (popups & CAPTCHAs): The agent auto-dismisses login/cookie/consent \
+  popups (like Facebook's "Log in or sign up" modal) and tries to solve \
+  press-and-hold CAPTCHAs — both handled locally, no paid services. If it stays \
+  stuck it runs an offline reasoning pass to recover or exits gracefully.
+- HEAVILY BOT-PROTECTED SITES: Sites like Amazon, Walmart, and eBay have anti-bot \
+  systems. The agent mimics human mouse movements and timing to reduce detection, \
+  but it may occasionally get blocked. It will retry on the next scheduled run.
+- SPEED: An autonomous agent run with 10-15 steps typically takes 1-4 minutes \
+  depending on the page and model. The judgment step adds another 30-60 seconds.
+- NO JAVASCRIPT-HEAVY SPAs THAT NEED LOGIN: If the content only loads after login \
+  and behind dynamic JavaScript that requires authentication, the agent cannot access it.
+
+════════════════════════════════════════
+FACEBOOK MARKETPLACE (important distinction)
+════════════════════════════════════════
+Facebook treats logged-out and logged-in visitors very differently — match the URL \
+and settings to which one applies:
+
+LOGGED OUT (use_login_profile: false) — works, but only the GENERAL feed:
+  - Use the bare feed URL: https://www.facebook.com/marketplace/  (or \
+    https://www.facebook.com/marketplace/CITY/ for a local feed). This DOES render \
+    real listings to logged-out visitors after the login popup is dismissed (the \
+    watch closes it automatically).
+  - A "Log in or sign up" popup appears — it is just an overlay, NOT a CAPTCHA; the \
+    watch clicks it away. Don't worry about it.
+  - The bare feed is a MIXED local feed (trucks, boats, furniture, everything), so \
+    you MUST add a judgment_prompt to filter down to what the user wants.
+  - Search URLs like /marketplace/search/?query=... return ZERO listings when \
+    logged out — never use a search URL for a logged-out watch.
+
+LOGGED IN (use_login_profile: true) — needed for targeted search:
+  - First the user clicks "Connect Facebook" (Services → Browser) and signs in once.
+  - Then you CAN use a targeted search URL, e.g. \
+    https://www.facebook.com/marketplace/category/vehicles?query=4x4%20truck — this \
+    is far more precise than the logged-out mixed feed.
+  - Set use_login_profile: true so the watch reuses the saved login.
+
+Default to LOGGED OUT + bare feed + judgment_prompt unless the user says they want \
+targeted search or has already connected Facebook. Either way, a Marketplace watch \
+should almost always be mode: "continuous" (the feed changes constantly).
+
+════════════════════════════════════════
+WATCH CONFIG FIELDS
+════════════════════════════════════════
+- name             : short label (shown in the UI and notifications)
+- urls             : list of start URLs. The right URL depends on the watch type:
+                     • AUTONOMOUS agent watch → use the site HOMEPAGE \
+                       (https://www.ebay.com, https://www.amazon.com); the agent \
+                       searches from there like a human. General web → \
+                       https://duckduckgo.com.
+                     • CONTINUOUS watch → give the feed/results URL DIRECTLY (the \
+                       extractor reads it as-is, there is no agent). E.g. a bare \
+                       Facebook Marketplace feed, or an eBay search results URL.
+- instruction      : tells the agent WHAT to do and WHAT to look for. For continuous \
+                     watches this describes which listings count as a match.
+- mode             : "schedule" (default) or "continuous" (see scheduling section).
+- interval_minutes : SCHEDULE only — how often to run (30, 60, 120, 1440 common). \
+                     Mutually exclusive with cron_expression. Set null for continuous.
+- cron_expression  : SCHEDULE only — 5-field cron like "0 9 * * 1-5" (weekdays 9am) \
+                     for a specific time. Set null for continuous.
+- perception       : "auto" (default), "text" (DOM only), "vision" (screenshot)
+- autonomous       : true = agent mode, false = simple static read OR continuous \
+                     extractor. Continuous watches use false.
+- max_agent_steps  : how many actions the agent can take (default 15, up to 30 for complex tasks)
+- judgment_prompt  : optional — post-browse reasoning criteria (see above). For a \
+                     logged-out Facebook feed this is REQUIRED to filter the mixed feed.
+- use_login_profile: true to reuse a Connect-Facebook login session (targeted FB \
+                     search). false for logged-out / non-login sites.
+- continuous_idle_seconds : CONTINUOUS only — seconds to pause between sweeps (default 45).
+- continuous_max_alerts   : CONTINUOUS only — cap new-listing alerts per sweep (default 8).
+
+════════════════════════════════════════
+INSTRUCTION WRITING GUIDE
+════════════════════════════════════════
+For simple watches: describe what should trigger an alert.
+  "Alert if the price drops below $X. Ignore third-party sellers."
+  "Alert if there is a frost warning or winter storm watch."
+
+For autonomous agent watches: describe the task as a series of steps.
+  "Search for [thing] on this site. Find the top 3 results. Save each name \
+  and price to memory. Then navigate to eBay and search for the same item to \
+  find the going market rate. Save that too. When done, summarize everything."
+
+For judgment watches: the instruction is the research task; the judgment_prompt \
+is the decision criteria.
+  instruction: "Visit this listing. Save the price, product details, and any \
+  issues to memory. Then search eBay sold listings for the same item and save \
+  those prices."
+  judgment_prompt: "Is the asking price at least 15% below the eBay average \
+  for comparable condition? Factor in any issues as additional discounts (10% each)."
+
+════════════════════════════════════════
+CREATING vs EDITING WATCHES
+════════════════════════════════════════
+You can BOTH create new watches and edit existing ones. The EXISTING WATCHES list \
+at the end of this prompt shows the user's current watches with their full config.
+
+- To CREATE a new watch: set "action": "create" and use a NEW name.
+- To EDIT an existing watch: set "action": "update" and use the EXACT existing \
+  name. Include the FULL config you want it to have (every field, not just the \
+  changed one) — the update replaces the whole watch. Start from the existing \
+  watch's values shown below and change only what the user asked for.
+
+When the user asks to change, fix, retarget, reschedule, pause, or tweak something \
+that matches an existing watch, propose an "update" — do NOT create a duplicate.
+
+════════════════════════════════════════
+RESPONSE FORMAT
+════════════════════════════════════════
+Always reply in this exact JSON — no markdown, no code fences:
+{
+  "message": "<your plain-English reply>",
+  "watch_suggestion": null,
+  "listing_query": null,
+  "watch_actions": null
+}
+
+════════════════════════════════════════
+MANAGING & REVIEWING WATCHES
+════════════════════════════════════════
+The EXISTING WATCHES list below includes a "health:" line for each watch — its state
+(enabled/DISABLED, running/stopped), its last-run result or ERROR, and how many matches
+it has found. USE this to review and advise when asked ("how are my watches doing?",
+"why is X finding nothing?", "review my truck watch"): point out watches that are
+erroring, disabled, stopped, or finding nothing, and suggest a fix (often an
+action:"update" with a better search URL or judgment_prompt).
+
+To CHANGE a watch's lifecycle, set "watch_actions" to a LIST — the app shows the user a
+confirmation before running anything (so it's safe to propose, even bulk):
+  "watch_actions": [
+    {"action": "delete",  "name": "Walmart Featured Items"},
+    {"action": "disable", "name": "RTX 3060 Market Price Check"},
+    {"action": "start",   "name": "Craigslist - 4x4 Trucks (Seattle)"}
+  ]
+Valid actions: "delete", "enable", "disable", "start", "stop" (start/stop apply to
+continuous watches). Use EXACT existing names. For bulk requests like "delete all but
+the truck watch", list a delete for every OTHER watch. Leave watch_actions null when the
+user isn't asking to change watch state.
+
+════════════════════════════════════════
+LOOKING UP WHAT'S BEEN FOUND (listing_query)
+════════════════════════════════════════
+The app stores every listing its watches have found, with parsed attributes (price,
+year, mileage, transmission, drivetrain) and how many duplicate posts each has. When
+the user asks what's been found / seen / what matches some criteria (e.g. "what manual
+4x4 trucks under $8k have shown up?", "show me the matches for my truck watch"), set
+"listing_query" to an object — the app runs it and shows the results below your message.
+You will NOT see the rows yourself, so keep "message" a short intro like "Here's what
+turned up:". Shape (omit/null any filter you don't need):
+{
+  "watch": "<exact watch name, or null for all watches>",
+  "matched_only": true,        // true = only listings that matched the watch's criteria
+  "text": "miata",             // GENERAL keyword search over title + ad body (any item type)
+  "transmission": "manual",    // vehicles only — or "automatic", or null
+  "drivetrain": "4wd",         // vehicles only — or "awd", or null
+  "min_year": 2010,
+  "max_price": 8000,
+  "max_mileage": 150000,
+  "limit": 50
+}
+Prefer "text" for anything that isn't a clean vehicle attribute (brand, model, material,
+colour, condition, keyword). transmission/drivetrain only apply to cars/trucks.
+Only set listing_query when the user is asking about found/seen listings. For anything
+else leave it null.
+
+IMPORTANT — always translate the user's words into the matching filters. If they say
+"manual", set transmission:"manual". "automatic" → transmission:"automatic". "4x4" or
+"4wd" → drivetrain:"4wd". "under $8k" → max_price:8000. "newer than 2015" → min_year:2015.
+"low miles / under 150k" → max_mileage. Do NOT return everything when they asked for a
+specific kind — if they want manuals, the filter MUST include transmission:"manual".
+
+CONFIRM BEFORE CREATING — do NOT dump a watch the instant you're asked. People often
+think out loud or send a half-formed brain-dump. So:
+  • If the request is vague, partial, or could be read more than one way, DON'T emit a
+    watch_suggestion yet. Instead RESTATE what you think they want in one plain sentence
+    and ask them to confirm or fill the gap ("Sounds like: 4x4 trucks under $15k on
+    Craigslist Seattle — want me to set that up?"). Keep watch_suggestion null on that turn.
+  • Ask a clarifying question when a key detail is missing (which site, budget, new vs used,
+    location) rather than guessing and shipping a watch.
+  • Only put a watch_suggestion in your reply once the details are clear AND the user has
+    effectively said yes (an explicit "yes/do it", or a request that was already specific and
+    unambiguous). A clear, complete request ("watch eBay for RTX 3060s under $250") can go
+    straight to a suggestion — don't over-ask on those.
+When you propose creating or editing a watch, replace watch_suggestion with the FULL object:
+{
+  "action": "create" | "update",
+  "name": "...",
+  "urls": ["..."],
+  "instruction": "...",
+  "mode": "schedule" | "continuous",
+  "interval_minutes": 60,
+  "cron_expression": null,
+  "perception": "auto",
+  "autonomous": true,
+  "max_agent_steps": 15,
+  "judgment_prompt": null,
+  "use_login_profile": false,
+  "continuous_idle_seconds": 45,
+  "continuous_max_alerts": 8
+}
+
+RULES:
+- For mode "schedule": set interval_minutes OR cron_expression (never both), and \
+  set mode-irrelevant continuous_* fields to their defaults.
+- For mode "continuous": set interval_minutes AND cron_expression to null. Default to \
+  autonomous: false (fast scraper + ad deep-read) for Craigslist/eBay and any site with \
+  a usable search URL. Use autonomous: true ONLY for login- or interaction-gated sites \
+  (e.g. Facebook Marketplace logged in).
+- For a continuous marketplace watch, give it SEVERAL search-results URLs (the "urls" \
+  list) using DIVERSE, EFFECTIVE terms — not just the user's literal phrase, which often \
+  returns junk. A keyword search matches the words literally, so think like a savvy \
+  shopper and include specific models, synonyms, and common phrasings. Examples: \
+  "sports car" → search "Miata", "Corvette", "Mustang GT", "350Z", "manual coupe" \
+  (searching the literal "sports car" returns SUVs with "Sport" in the name!). \
+  "4x4 truck" → "4x4 truck", "4wd pickup", "four wheel drive truck". "cheap kayak" → \
+  "kayak", "sit-on-top kayak", "fishing kayak". Build one search URL per term (same site, \
+  swapping the query). Then set a judgment_prompt that filters to real matches (it can \
+  use the ad body + attributes). The watch rotates through the URLs across sweeps.
+- Every URL in "urls" MUST be a SEARCH-RESULTS or category page (a page that lists MANY \
+  items) — NEVER a single listing/detail page (e.g. one that ends in a specific item id). \
+  If you are not certain of a site's real search-URL format, use its simplest known search \
+  path or say you'd rather LEARN the site first (Web Watcher can explore a new site's \
+  search page once and remember its layout) instead of guessing a deep URL.
+- CORRECT search-URL formats (do NOT invent others; most sites do NOT use a city subdomain \
+  — that is a Craigslist-only trait, so NEVER write things like "seattle.offerup.com"): \
+  Craigslist = https://<city>.craigslist.org/search/<cat>?query=TERM (city subdomain IS \
+  correct here only); eBay = https://www.ebay.com/sch/i.html?_nkw=TERM; OfferUp = \
+  https://offerup.com/search?q=TERM (one flat domain, no city); CarGurus = \
+  https://www.cargurus.com/Cars/inventorylisting/... ; Facebook = \
+  https://www.facebook.com/marketplace/CITY/search?query=TERM (city is a PATH segment, \
+  not a subdomain); Kijiji = https://www.kijiji.ca/... ; GovDeals = \
+  https://www.govdeals.com/... . If the user corrects a URL, APPLY the correction exactly \
+  and re-emit the watch_suggestion with the fixed urls — do not repeat the bad host.
+- Set judgment_prompt to a string for research/comparison/filtering tasks (and for \
+  any logged-out Facebook feed); null for simple alert watches.
+- Always include "action". If you are unsure whether a watch exists, prefer \
+  "create" with a clearly new name.
+
+════════════════════════════════════════
+TONE — be a friendly, conversational helper
+════════════════════════════════════════
+Talk like a helpful person, not a form. Warm, natural, and a little personable — use \
+plain language and contractions, react to what the user said ("Nice, that Ram looks \
+like a solid find"), and offer a relevant next step or suggestion when it helps. Keep \
+it concise (usually 1-3 sentences) — conversational, not chatty filler. When you run a \
+listing_query, briefly say what you pulled up and, if useful, point something out \
+(e.g. "Most of these are automatics — want me to narrow to manuals?"). When you suggest \
+a watch, say in plain words what it'll do and whether they need to press Start \
+(continuous) or Connect Facebook (logged-in). If the user seems new, explain simply.
+The "message" field is what the user reads — make it sound human."""
+
+
+def create_app(manager: "ServiceManager") -> FastAPI:
+    app = FastAPI(title="Web Watcher", docs_url=None, redoc_url=None)
+
+    # ------------------------------------------------------------------
+    # Health + status
+    # ------------------------------------------------------------------
+
+    @app.get("/api/health")
+    def health():
+        from web_watcher.__version__ import __version__
+        return {"ok": True, "version": __version__}
+
+    @app.get("/api/status")
+    def get_status():
+        return manager.get_statuses()
+
+    # ------------------------------------------------------------------
+    # Service control
+    # ------------------------------------------------------------------
+
+    @app.post("/api/services/{name}/start")
+    def start_service(name: str, bg: BackgroundTasks):
+        _require_known_service(name)
+        bg.add_task(manager.start, name)
+        return {"queued": "start", "service": name}
+
+    @app.post("/api/services/{name}/stop")
+    def stop_service(name: str, bg: BackgroundTasks):
+        _require_known_service(name)
+        bg.add_task(manager.stop, name)
+        return {"queued": "stop", "service": name}
+
+    @app.post("/api/services/{name}/restart")
+    def restart_service(name: str, bg: BackgroundTasks):
+        _require_known_service(name)
+        bg.add_task(manager.restart, name)
+        return {"queued": "restart", "service": name}
+
+    # ------------------------------------------------------------------
+    # Watch CRUD
+    # ------------------------------------------------------------------
+
+    @app.get("/api/watches")
+    def list_watches():
+        from web_watcher.config import load
+        from web_watcher.storage import get_last_run
+
+        cfg      = load()
+        job_map  = {j["watch_name"]: j for j in manager.get_job_info()}
+        result   = []
+        for w in cfg.watches:
+            last = get_last_run(w.name)
+            job  = job_map.get(w.name, {})
+            result.append({
+                "name":             w.name,
+                "enabled":          w.enabled,
+                "urls":             w.urls,
+                "instruction":      w.instruction,
+                "interval_minutes": w.interval_minutes,
+                "cron_expression":  w.cron_expression,
+                "perception":       w.perception,
+                "notify":           w.notify.model_dump(),
+                "click_path":       [s.model_dump() for s in w.click_path],
+                "model_override":   w.model_override,
+                "autonomous":       w.autonomous,
+                "max_agent_steps":  w.max_agent_steps,
+                "judgment_prompt":  w.judgment_prompt,
+                "mode":             w.mode,
+                "continuous_scroll_passes":    w.continuous_scroll_passes,
+                "continuous_idle_seconds":     w.continuous_idle_seconds,
+                "continuous_search_variation": w.continuous_search_variation,
+                "continuous_max_alerts":       w.continuous_max_alerts,
+                "use_login_profile":           w.use_login_profile,
+                "continuous_running": bool(job.get("continuous_running", False)),
+                "last_run":         last,
+                "next_run_utc":     job.get("next_run_utc"),
+            })
+        return result
+
+    # NOTE: the scheduler reload runs as a BackgroundTask, not inline. reload() stops
+    # continuous watches and join()s their threads (up to 30s if an agent watch is
+    # mid-sweep) — doing that inside the request would hang the HTTP call and the UI
+    # would show "server unreachable". Returning first keeps the dashboard responsive;
+    # the reload lands a moment later.
+    @app.post("/api/watches", status_code=201)
+    def create_watch(body: dict, bg: BackgroundTasks):
+        from web_watcher.config import Watch, load, save
+        if isinstance(body.get("urls"), list):
+            body["urls"], _ = _normalize_marketplace_urls(body["urls"])
+        try:
+            new_watch = Watch.model_validate(body)
+        except ValidationError as exc:
+            raise HTTPException(400, detail=exc.errors())
+
+        cfg = load()
+        if any(w.name == new_watch.name for w in cfg.watches):
+            raise HTTPException(409, detail=f"Watch {new_watch.name!r} already exists")
+
+        cfg.watches.append(new_watch)
+        save(cfg)
+        bg.add_task(manager.reload_scheduler)
+        # NOTE: exploration of an unknown site happens when the watch is STARTED (see
+        # scheduler._execute_continuous_watch), not here — creating a watch shouldn't kick
+        # off a browser. `needs_exploring` just lets the UI mention it up front.
+        from web_watcher.sitelearn import unknown_sites
+        return {"ok": True, "name": new_watch.name, "needs_exploring": unknown_sites(new_watch.urls)}
+
+    @app.put("/api/watches/{watch_name}")
+    def update_watch(watch_name: str, body: dict, bg: BackgroundTasks):
+        from web_watcher.config import Watch, load, save
+        if isinstance(body.get("urls"), list):
+            body["urls"], _ = _normalize_marketplace_urls(body["urls"])
+
+        cfg = load()
+        idx = next((i for i, w in enumerate(cfg.watches) if w.name == watch_name), None)
+        if idx is None:
+            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+
+        try:
+            updated = _merge_watch_update(cfg.watches[idx], body, watch_name)
+        except ValidationError as exc:
+            raise HTTPException(400, detail=exc.errors())
+
+        cfg.watches[idx] = updated
+        save(cfg)
+        bg.add_task(manager.reload_scheduler)
+        return {"ok": True, "name": watch_name}
+
+    @app.delete("/api/watches/{watch_name}")
+    def delete_watch(watch_name: str, bg: BackgroundTasks):
+        from web_watcher.config import load, save
+        cfg = load()
+        before = len(cfg.watches)
+        cfg.watches = [w for w in cfg.watches if w.name != watch_name]
+        if len(cfg.watches) == before:
+            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+        save(cfg)
+        bg.add_task(manager.reload_scheduler)
+        return {"ok": True}
+
+    @app.post("/api/watches/{watch_name}/enabled")
+    def set_watch_enabled(watch_name: str, body: dict, bg: BackgroundTasks):
+        """Enable/disable a watch without rewriting its whole config (used by the
+        assistant's lifecycle actions and the dashboard)."""
+        from web_watcher.config import load, save
+        cfg = load()
+        w = next((w for w in cfg.watches if w.name == watch_name), None)
+        if w is None:
+            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+        w.enabled = bool(body.get("enabled", True))
+        save(cfg)
+        bg.add_task(manager.reload_scheduler)
+        return {"ok": True, "name": watch_name, "enabled": w.enabled}
+
+    @app.post("/api/watches/{watch_name}/run")
+    def run_watch_now(watch_name: str, bg: BackgroundTasks):
+        bg.add_task(manager.run_watch_now, watch_name)
+        return {"queued": "run", "watch": watch_name}
+
+    @app.post("/api/watches/{watch_name}/continuous/start")
+    def start_continuous(watch_name: str, bg: BackgroundTasks):
+        bg.add_task(manager.start_continuous, watch_name)
+        return {"queued": "start", "watch": watch_name}
+
+    @app.post("/api/watches/{watch_name}/continuous/stop")
+    def stop_continuous(watch_name: str, bg: BackgroundTasks):
+        bg.add_task(manager.stop_continuous, watch_name)
+        return {"queued": "stop", "watch": watch_name}
+
+    @app.post("/api/connect/facebook")
+    def connect_facebook(bg: BackgroundTasks):
+        bg.add_task(manager.connect_facebook)
+        return {"queued": "connect", "site": "facebook"}
+
+    @app.get("/api/connect/facebook")
+    def connect_facebook_status():
+        return {"status": manager.fb_connect_status()}
+
+    # ------------------------------------------------------------------
+    # History + schedule
+    # ------------------------------------------------------------------
+
+    @app.get("/api/history")
+    def get_history(watch: str | None = None, limit: int = 100):
+        from web_watcher.storage import get_history as _gh
+        return _gh(watch_name=watch, limit=limit)
+
+    @app.get("/api/listings")
+    def get_listings(
+        watch: str | None = None, matched: bool | None = None, q: str | None = None,
+        transmission: str | None = None, drivetrain: str | None = None,
+        min_year: int | None = None, max_price: int | None = None,
+        max_mileage: int | None = None, limit: int = 200,
+    ):
+        """Query the listing store (the Results data). `q` is a general free-text search
+        over title + ad body — works for any kind of item, not just vehicles."""
+        return _run_listing_query({
+            "watch": watch, "matched_only": matched, "text": q, "transmission": transmission,
+            "drivetrain": drivetrain, "min_year": min_year, "max_price": max_price,
+            "max_mileage": max_mileage, "limit": limit,
+        })
+
+    # ── Learned sites ────────────────────────────────────────────────────────
+    @app.get("/api/sites")
+    def list_sites():
+        """Return the learned site profiles — the sites Web Watcher has explored and knows
+        how to read (listing-URL shape, search param, sort options)."""
+        from web_watcher.storage import list_site_profiles
+        return list_site_profiles()
+
+    @app.get("/api/sites/status")
+    def site_status_endpoint(url: str):
+        """Does Web Watcher already know how to read this site? → {domain, known, kind}
+        (kind: builtin | learned | unknown). The assistant/UI uses this to decide whether a
+        site needs exploring before a watch on it will work well."""
+        from web_watcher.sitelearn import site_status
+        return site_status(url)
+
+    @app.post("/api/sites/learn")
+    def learn_site_endpoint(body: dict):
+        """Point Web Watcher at a NEW site so it explores the layout once and saves a
+        profile. Synchronous (drives a real browser); takes ~20-40s. Body:
+        {"url": ..., "use_login_profile": bool}. With use_login_profile it explores using
+        the persistent signed-in profile (for login-gated sites); otherwise as a guest,
+        and a login-only site is reported rather than having its sign-in form touched."""
+        url = (body.get("url") or "").strip()
+        if not url or not url.startswith("http"):
+            raise HTTPException(400, detail="A full http(s) URL is required.")
+        from web_watcher.sitelearn import learn_site
+        cfg = _load_cfg()
+        return learn_site(
+            url,
+            model=cfg.models.effective_council_model,
+            headless=cfg.browser.headless,
+            persistent=bool(body.get("use_login_profile")),
+            profile_dir=cfg.browser.profile_dir,
+        )
+
+    @app.delete("/api/sites/{domain}")
+    def delete_site(domain: str):
+        from web_watcher.storage import delete_site_profile
+        removed = delete_site_profile(domain)
+        if not removed:
+            raise HTTPException(404, detail=f"No learned profile for {domain!r}.")
+        return {"deleted": domain}
+
+    @app.get("/api/schedule")
+    def get_schedule():
+        return manager.get_job_info()
+
+    @app.get("/api/oversight")
+    def get_oversight():
+        """Live narration feed from the oversight agent — the little 'mind' that
+        watches the watches and talks to itself in the Watches tab."""
+        try:
+            return manager.oversight_snapshot()
+        except Exception:
+            return {"running": False, "updated_at": None, "entries": [], "watches": []}
+
+    @app.post("/api/oversight/action")
+    def oversight_action(body: dict, bg: BackgroundTasks):
+        """Run a one-click fix The Watcher offered on a concern (e.g. broaden a watch's
+        search terms). Returns a short result message the panel shows back."""
+        atype = body.get("type")
+        watch_name = body.get("watch")
+        if atype == "broaden_terms":
+            # Optional user-dictated terms (list or comma-separated string); else auto-refresh.
+            raw = body.get("terms")
+            if isinstance(raw, str):
+                raw = [t for t in raw.split(",")]
+            return _action_broaden_terms(watch_name, manager, bg, terms_override=raw)
+        raise HTTPException(400, detail=f"Unknown oversight action: {atype!r}")
+
+    @app.post("/api/oversight/chat")
+    def oversight_chat(body: dict):
+        """Talk to The Watcher — the same brain as the assistant, but in oversight mode:
+        it leads with what it's been observing and can review, look things up, and act."""
+        messages: list[dict] = body.get("messages", [])
+        cfg   = _load_cfg()
+        model = cfg.models.effective_council_model
+
+        try:
+            snap = manager.oversight_snapshot(limit=14)
+        except Exception:
+            snap = {"entries": []}
+        narration = "\n".join(
+            f"  - [{e.get('kind')}] {e.get('text')}" for e in snap.get("entries", [])
+        ) or "  (nothing observed yet)"
+        observed_ctx = (
+            "WHAT YOU'VE RECENTLY OBSERVED (your own narration, newest first):\n" + narration
+        )
+        system = (
+            _WATCHER_SYSTEM + "\n\n" + _CHAT_SYSTEM_BASE + "\n\n"
+            + _build_watches_context(cfg, manager) + "\n\n" + observed_ctx
+        )
+        result = _complete_assistant_turn(system, messages, cfg, model)
+
+        if messages and "raw" in result:
+            history = _load_watcher_history()
+            history.append(messages[-1])
+            history.append({"role": "assistant", "content": result["raw"]})
+            _save_watcher_history(history[-200:])
+        result.pop("raw", None)
+        return result
+
+    @app.get("/api/oversight/chat/history")
+    def get_watcher_history():
+        return _load_watcher_history()
+
+    @app.delete("/api/oversight/chat/history")
+    def clear_watcher_history():
+        _save_watcher_history([])
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Orchestrator — the single driver (opt-in; The Watcher runs your watches)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/orchestrator")
+    def get_orchestrator():
+        try:
+            return manager.orchestrator_status()
+        except Exception:
+            return {"running": False, "current": None, "cycles": 0, "topics": []}
+
+    @app.post("/api/orchestrator/start")
+    def start_orchestrator():
+        try:
+            started = manager.start_orchestrator()
+            return {"ok": True, "running": True, "started": started}
+        except Exception as exc:
+            raise HTTPException(409, detail=str(exc))
+
+    @app.post("/api/orchestrator/stop")
+    def stop_orchestrator():
+        try:
+            manager.stop_orchestrator()
+            return {"ok": True, "running": False}
+        except Exception as exc:
+            raise HTTPException(409, detail=str(exc))
+
+    @app.get("/api/summary")
+    def get_summary():
+        """A compact status snapshot for the assistant's launch greeting: how many
+        watches, which are running, how many matches found, and any recent errors."""
+        from web_watcher.config import load
+        from web_watcher.storage import count_matches, get_history
+        cfg = load()
+        try:
+            job_map = {j["watch_name"]: j for j in manager.get_job_info()}
+        except Exception:
+            job_map = {}
+        watches = []
+        total_matches = 0
+        for w in cfg.watches:
+            m = 0
+            try:
+                m = count_matches(w.id or w.name)
+            except Exception:
+                pass
+            total_matches += m
+            watches.append({
+                "name": w.name, "mode": w.mode, "enabled": w.enabled,
+                "running": bool(job_map.get(w.name, {}).get("continuous_running")),
+                "matches": m,
+            })
+        try:
+            recent = get_history(limit=25)
+        except Exception:
+            recent = []
+        errors = [r for r in recent if r.get("error")]
+        return {
+            "first_run": len(cfg.watches) == 0,
+            "watch_count": len(cfg.watches),
+            "enabled_count": sum(1 for w in cfg.watches if w.enabled),
+            "running_count": sum(1 for w in watches if w["running"]),
+            "total_matches": total_matches,
+            "recent_error_count": len(errors),
+            "last_error": (errors[0].get("error") or "")[:140] if errors else None,
+            "watches": watches,
+        }
+
+    # ------------------------------------------------------------------
+    # Browser settings
+    # ------------------------------------------------------------------
+
+    @app.get("/api/browser")
+    def get_browser_settings():
+        cfg = _load_cfg()
+        return {"headless": cfg.browser.headless, "stealth": cfg.browser.stealth,
+                "show_agent_cursor": cfg.browser.show_agent_cursor}
+
+    @app.post("/api/browser")
+    def set_browser_settings(body: dict):
+        from web_watcher.config import load, save
+        cfg = load()
+        if "headless" in body:
+            cfg.browser.headless = bool(body["headless"])
+        if "stealth" in body:
+            cfg.browser.stealth = bool(body["stealth"])
+        if "show_agent_cursor" in body:
+            cfg.browser.show_agent_cursor = bool(body["show_agent_cursor"])
+        save(cfg)
+        return {"headless": cfg.browser.headless, "stealth": cfg.browser.stealth,
+                "show_agent_cursor": cfg.browser.show_agent_cursor}
+
+    # ------------------------------------------------------------------
+    # Notification preview
+    # ------------------------------------------------------------------
+
+    @app.get("/api/notifications/preview")
+    def notification_preview(watch: str | None = None, run_id: int | None = None):
+        from datetime import datetime, timezone
+        from web_watcher.storage import get_history, get_last_run, get_run_by_id
+        from web_watcher.notify import _format_message, NotificationPayload
+        from web_watcher.reasoning import ReasoningResult
+
+        if run_id:
+            record = get_run_by_id(run_id)
+        elif watch:
+            record = get_last_run(watch)
+        else:
+            record = (get_history(limit=1) or [None])[0]
+        if not record:
+            return {"found": None, "watch_name": watch, "html": None, "telegram": None,
+                    "subject": None, "run_timestamp": None}
+
+        result = ReasoningResult(
+            found=bool(record["found"]),
+            summary=record.get("summary") or "(no summary)",
+            confidence=record.get("confidence") or "low",
+            link=record.get("link"),
+        )
+        ts_raw = record.get("run_timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+        except Exception:
+            ts = datetime.now(timezone.utc)
+
+        payload = NotificationPayload(watch_name=record["watch_name"], result=result, timestamp=ts)
+        cfg = _load_cfg()
+        tg_ok  = bool(cfg.notifications.telegram.bot_token and cfg.notifications.telegram.chat_id)
+        em_ok  = bool(cfg.notifications.email.from_address and cfg.notifications.email.app_password
+                      and cfg.notifications.email.to_address)
+
+        return {
+            "watch_name":    record["watch_name"],
+            "run_timestamp": ts_raw,
+            "found":         bool(record["found"]),
+            "confidence":    record.get("confidence"),
+            "subject":       f"[Web Watcher] {record['watch_name']} — match found",
+            "html":          _format_message(payload, html=True),
+            "telegram":      _format_message(payload, html=False),
+            "telegram_configured": tg_ok,
+            "email_configured":    em_ok,
+            "has_screenshot":      bool(record.get("screenshot_path")),
+        }
+
+    # ------------------------------------------------------------------
+    # Static files — must be last
+    # ------------------------------------------------------------------
+
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+    return app
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _require_known_service(name: str) -> None:
+    if name not in _KNOWN_SERVICES:
+        raise HTTPException(status_code=404, detail=f"Unknown service: {name!r}")
+
+
+def _load_cfg():
+    from web_watcher.config import load
+    return load()
+
+
+# Sites that serve ONE flat domain (no per-city subdomain). The local model tends to
+# pattern-match from Craigslist ("seattle.craigslist.org") and invent bogus city
+# subdomains like "seattle.offerup.com" — a host that doesn't resolve. We rewrite those
+# deterministically on watch create/update so a model hallucination can't ship a dead URL.
+# Craigslist / Kijiji are intentionally ABSENT — they DO use real city subdomains.
+_FLAT_SITES = frozenset({
+    "offerup.com", "ebay.com", "cargurus.com", "cars.com", "autotrader.com",
+    "facebook.com", "govdeals.com", "publicsurplus.com", "mercari.com", "nextdoor.com",
+    "gumtree.com",
+})
+
+
+def _merge_watch_update(existing, body: dict, watch_name: str):
+    """Apply a partial update `body` onto an EXISTING watch and return a validated Watch.
+
+    Merging (rather than validating `body` as a standalone Watch) is what makes the
+    assistant's "update" suggestions work: they usually carry only the changed fields
+    (e.g. urls + instruction) and omit mode/interval/id. Validated alone, such a body
+    defaults mode to "schedule" and then fails "must specify interval_minutes or
+    cron_expression". Here everything untouched is preserved, the stable id is kept (so
+    listing history isn't orphaned), the name is authoritative, and assistant-only extras
+    like "action"/"search_terms" are ignored (not Watch fields)."""
+    from web_watcher.config import Watch
+    merged = existing.model_dump()
+    for k, v in (body or {}).items():
+        if k in Watch.model_fields and k != "id":
+            merged[k] = v
+    merged["name"] = watch_name
+    merged["id"]   = existing.id
+    return Watch.model_validate(merged)
+
+
+def _normalize_marketplace_urls(urls) -> tuple[list, list]:
+    """Rewrite obviously-wrong hosts (a city/geo subdomain on a flat site → the bare
+    domain). Returns (normalized_urls, changes) where changes is a list of (before, after)."""
+    from urllib.parse import urlparse, urlunparse
+    from web_watcher.storage import site_key
+    out, changes = [], []
+    for u in urls or []:
+        try:
+            p = urlparse(u)
+            host = (p.netloc or "").lower()
+            sk = site_key(u)
+            if sk in _FLAT_SITES and host not in (sk, "www." + sk):
+                nu = urlunparse(p._replace(netloc=sk))
+                changes.append((u, nu))
+                out.append(nu)
+                continue
+        except Exception:
+            pass
+        out.append(u)
+    return out, changes
+
+
+_WATCHER_SYSTEM = """\
+You are THE WATCHER — the oversight agent of Web Watcher. You run in the background and
+keep an eye on the user's watches all day, narrating what you see. The user is now talking
+to you directly in the Watches tab.
+
+Voice: first person, warm, concise, a little watchful — you're the one who's been keeping
+vigil. Lead with what you've actually OBSERVED (see "WHAT YOU'VE RECENTLY OBSERVED" below
+and the health lines) rather than generic answers. If a watch is finding nothing, erroring,
+or stopped, say so plainly and offer the fix.
+
+You have EVERY ability the main assistant has — create/edit watches (watch_suggestion),
+manage them (watch_actions: start/stop/enable/disable/delete), and look up what's been
+found (listing_query). Use them to actually help, not just describe. When the user asks you
+to fix or change something, propose the concrete action. Reply in the SAME JSON format
+described below."""
+
+
+_WATCHER_HISTORY_PATH = Path(__file__).parent.parent.parent / "data" / "watcher_history.json"
+
+
+def _load_watcher_history() -> list:
+    try:
+        if _WATCHER_HISTORY_PATH.exists():
+            return json.loads(_WATCHER_HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _save_watcher_history(history: list) -> None:
+    try:
+        _WATCHER_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _WATCHER_HISTORY_PATH.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.warning("Could not save watcher history: %s", exc)
+
+
+def _action_broaden_terms(watch_name: str, manager, bg, terms_override=None) -> dict:
+    """Change a watch's search terms and rebuild its URLs (one per term), then reload.
+    Two modes:
+      • terms_override given  → set EXACTLY those terms (user dictated them).
+      • otherwise             → regenerate a FRESH, different set via the learning engine,
+        bypassing the cache (force) and steering away from the terms already in use — so
+        asking to 'change/broaden' actually produces something new instead of the cached set.
+    Backs The Watcher's 'matched none of them' concern button and chat term-change requests."""
+    from urllib.parse import urlparse, parse_qsl, unquote_plus
+    from web_watcher.config import load, save
+    from web_watcher.search_terms import expand_search_terms, build_search_urls, _search_param
+
+    cfg = load()
+    w = next((x for x in cfg.watches if x.name.lower() == str(watch_name or "").lower()), None)
+    if w is None:
+        raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+
+    base = next((u for u in (w.urls or [])
+                 if _search_param(dict(parse_qsl(urlparse(u).query, keep_blank_values=True)))), None)
+    if not base:
+        return {"ok": False, "message": f"'{w.name}' doesn't use a keyword-search URL, so "
+                "there are no search terms to change. I can adjust its judgment filter instead "
+                "if you'd like — just ask."}
+
+    # The terms currently baked into the watch's URLs (so a refresh can avoid repeating them).
+    current: list[str] = []
+    for u in (w.urls or []):
+        q = dict(parse_qsl(urlparse(u).query, keep_blank_values=True))
+        p = _search_param(q)
+        if p and q.get(p):
+            current.append(unquote_plus(q[p]))
+
+    override = [t.strip() for t in (terms_override or []) if str(t).strip()]
+    if override:
+        terms, verb = override, "set"
+    else:
+        intent = (w.instruction or w.name or "").strip()
+        terms = expand_search_terms(intent, cfg.models.effective_council_model,
+                                    force=True, avoid=current)
+        verb = "refreshed"
+        if not terms:
+            return {"ok": False, "message": "I couldn't come up with better terms right now — the "
+                    "local model didn't return any. Worth trying again in a moment."}
+
+    w.urls = build_search_urls(base, terms)
+    save(cfg)
+    bg.add_task(manager.reload_scheduler)
+    return {
+        "ok": True,
+        "terms": terms,
+        "message": f"{verb.capitalize()} '{w.name}' to search {len(terms)} ways: "
+                   f"{', '.join(terms)}. It'll use these (each explored a few different ways — "
+                   f"newest, price, etc.) on the next sweep.",
+    }
+
+
+def _watch_search_terms(w) -> list[str]:
+    """Decode the actual search terms baked into a watch's URLs (the query= values),
+    de-duplicated in order. So when the user asks 'what are our search terms?' the answer
+    is plain text in the prompt — not something the model has to parse out of raw URLs
+    (which it gets wrong: it read 'what are our terms?' as 'terms of service')."""
+    from urllib.parse import urlparse, parse_qsl, unquote_plus
+    from web_watcher.search_terms import _search_param
+    terms: list[str] = []
+    for u in (w.urls or []):
+        try:
+            q = dict(parse_qsl(urlparse(u).query, keep_blank_values=True))
+            p = _search_param(q)
+            if p and q.get(p):
+                t = unquote_plus(q[p]).strip()
+                if t and t not in terms:
+                    terms.append(t)
+        except Exception:
+            continue
+    return terms
+
+
+def _build_watches_context(cfg, manager) -> str:
+    """Render the user's watches IN FULL, each with a HEALTH line (state + last-run
+    result/error + matches found), for the assistant/Watcher system prompt. Shared by
+    the main assistant and the oversight Watcher so both review against the same facts."""
+    from web_watcher.storage import get_last_run, count_matches
+    try:
+        job_map = {j["watch_name"]: j for j in manager.get_job_info()}
+    except Exception:
+        job_map = {}
+
+    def _health_line(w) -> str:
+        # Defensive: a DB/scheduler hiccup here must not 500 the whole assistant.
+        try:
+            state = "enabled" if w.enabled else "DISABLED"
+            if w.mode == "continuous":
+                state += ", running" if job_map.get(w.name, {}).get("continuous_running") else ", stopped"
+            last = get_last_run(w.name)
+            if not last:
+                health = "never run"
+            elif last.get("error"):
+                health = f"last run ERROR: {str(last['error'])[:90]}"
+            else:
+                health = f"last run: {str(last.get('summary') or '')[:90]}"
+            return f"      health: {state} | {health} | {count_matches(w.id or w.name)} matches found"
+        except Exception:
+            return "      health: (unavailable)"
+
+    def _watch_summary(w) -> str:
+        sched = (
+            "continuous" if w.mode == "continuous"
+            else (f"every {w.interval_minutes}m" if w.interval_minutes
+                  else f"cron {w.cron_expression}")
+        )
+        lines = [
+            f"  • {w.name}",
+        ]
+        # The decoded search terms first — this is what the user means by "what are we
+        # searching for / what are our terms", so make it the most prominent, plain line.
+        terms = _watch_search_terms(w)
+        if terms:
+            lines.append(f"      search terms ({len(terms)}): {', '.join(terms)}")
+        lines += [
+            f"      urls: {', '.join(w.urls)}",
+            f"      mode: {w.mode} ({sched}) | autonomous: {w.autonomous} | "
+            f"perception: {w.perception} | use_login_profile: {w.use_login_profile}",
+            f"      instruction: {w.instruction[:200]}",
+            _health_line(w),
+        ]
+        if w.judgment_prompt:
+            lines.append(f"      judgment_prompt: {w.judgment_prompt[:200]}")
+        return "\n".join(lines)
+
+    body = (
+        "EXISTING WATCHES: none configured yet." if not cfg.watches else
+        "EXISTING WATCHES (edit one via action:\"update\"; manage via watch_actions; "
+        "use the health line to review/advise; don't duplicate). When the user asks what "
+        "you're searching for / what the search terms are / which cars/items you're "
+        "looking for, ANSWER DIRECTLY from the 'search terms' line below — just read them "
+        "back in plain words. Do NOT run a listing_query for that (a listing_query looks up "
+        "what's been FOUND, not what you're searching for), and do NOT propose an update "
+        "unless they ask to change something:\n"
+        + "\n".join(_watch_summary(w) for w in cfg.watches)
+    )
+    return body + "\n\n" + _learned_sites_context()
+
+
+def _learned_sites_context() -> str:
+    """A short line telling the assistant which sites Web Watcher has already explored
+    (and can read reliably) vs. needing a learn pass. The 3 built-ins always work."""
+    try:
+        from web_watcher.storage import list_site_profiles
+        learned = [p.get("display_name") or p.get("domain") for p in list_site_profiles()]
+    except Exception:
+        learned = []
+    builtins = "Craigslist, eBay, Facebook Marketplace (built-in)"
+    extra = ("; learned: " + ", ".join(learned)) if learned else ""
+    return (
+        "KNOWN SITES Web Watcher can already read: " + builtins + extra + ".\n"
+        "When the user asks to watch a site that is NOT in that known list:\n"
+        "  1. Tell them you haven't explored that site yet and will need to look at how it's "
+        "laid out before you can watch it well.\n"
+        "  2. ASK the simple question that matters: does that site require you to be LOGGED IN "
+        "to see listings? (If yes, set use_login_profile:true on the watch; if no, leave it "
+        "false.) Ask any other quick thing you genuinely need, but keep it to a question or two.\n"
+        "  3. Then propose the watch. Web Watcher does NOT explore on creation — the FIRST time "
+        "the watch is STARTED it does a quick exploration round of any new site before it begins "
+        "watching (with an on-screen heads-up). So tell the user: it'll explore the site the first "
+        "time they start the watch. You never type a login/password yourself — a login-gated site "
+        "uses the saved signed-in profile."
+    )
+
+
+# Keys that mark a dict as a BARE watch object the local model emitted without the
+# {"message", "watch_suggestion"} envelope (a frequent qwen mistake).
+_WATCH_SHAPE_KEYS = {"urls", "instruction", "judgment_prompt", "mode", "autonomous",
+                     "perception", "interval_minutes", "cron_expression", "max_agent_steps"}
+
+
+def _normalize_turn(data: dict) -> dict:
+    """
+    Repair the common shape mistakes the local model makes so the chat NEVER shows raw JSON:
+      • a bare watch object at the top level (no 'message', no 'watch_suggestion') is adopted
+        as a watch_suggestion — this is the "garbled gook" the user saw (raw JSON dumped into
+        the bubble because 'message' was missing);
+      • watch_suggestion_2 / _3 / … (the model's way of proposing several watches) are
+        collected alongside watch_suggestion so multi-watch updates aren't silently dropped;
+      • a missing 'message' is always synthesized.
+    Returns a dict that always has a 'message' and, when applicable, 'watch_suggestion' +
+    'watch_suggestions' (the full list).
+    """
+    if not isinstance(data, dict):
+        return {"message": str(data), "watch_suggestion": None}
+
+    # Collect every watch_suggestion* the model produced, in stable order.
+    suggestions = []
+    if isinstance(data.get("watch_suggestion"), dict):
+        suggestions.append(data["watch_suggestion"])
+    for k in sorted(k for k in data if k.startswith("watch_suggestion_")):
+        if isinstance(data[k], dict):
+            suggestions.append(data[k])
+
+    # The model sometimes returns a BARE watch object (no envelope) → adopt it as the suggestion.
+    bare_watch = ("message" not in data and not suggestions and
+                  (data.get("name") or data.get("action") == "update"
+                   or bool(_WATCH_SHAPE_KEYS & set(data.keys()))))
+    if bare_watch:
+        suggestions = [data]
+        out = {}
+    else:
+        out = dict(data)
+
+    if suggestions:
+        out["watch_suggestion"]  = suggestions[0]
+        out["watch_suggestions"] = suggestions
+
+    if not out.get("message"):
+        if suggestions:
+            names = [s.get("name") for s in suggestions if s.get("name")]
+            verb  = "update" if any(s.get("action") == "update" for s in suggestions) else "set up"
+            out["message"] = (f"Here's how I'd {verb} {', '.join(names) or 'that watch'} — "
+                              "review and apply below.")
+        else:
+            out["message"] = "Done."
+    return out
+
+
+def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> dict:
+    """Run one assistant turn against Ollama and post-process it: parse the JSON reply,
+    run any listing_query, validate watch_actions against real watch names, and expand a
+    proposed marketplace watch's search into effective terms. Returns the response dict
+    (plus a private "raw" the caller persists then drops). Powers the oversight Watcher
+    chat — the single AI with full create/manage/lookup capabilities. Never raises."""
+    payload = {
+        "model":    model,
+        "messages": [{"role": "system", "content": system}, *messages],
+        "stream":   False,
+        "format":   "json",
+    }
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+            r.raise_for_status()
+        resp_json    = r.json()
+        raw          = resp_json["message"]["content"]
+        eval_count   = resp_json.get("eval_count", 0)
+        prompt_count = resp_json.get("prompt_eval_count", 0)
+        duration_ns  = resp_json.get("eval_duration", 0)
+
+        data = _normalize_turn(_parse_chat_response(raw))
+
+        listings = None
+        lq = data.get("listing_query")
+        if isinstance(lq, dict):
+            listings = _run_listing_query(lq)
+
+        _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop"}
+        _existing = {w.name for w in cfg.watches}
+        watch_actions = [
+            {"action": a.get("action"), "name": a.get("name")}
+            for a in (data.get("watch_actions") or [])
+            if isinstance(a, dict) and a.get("action") in _VALID_ACTIONS
+            and a.get("name") in _existing
+        ] or None
+
+        message = data["message"]   # _normalize_turn guarantees a message (never raw JSON)
+        suggestions = data.get("watch_suggestions") or (
+            [data["watch_suggestion"]] if isinstance(data.get("watch_suggestion"), dict) else [])
+        # Confirm-before-creating: if the assistant is ASKING the user something (its reply
+        # contains a question), don't ALSO drop a brand-new watch on them — hold any 'create'
+        # suggestion until they answer, so a half-formed request gets clarified first instead
+        # of instantly spawning a watch. (Edits the user explicitly asked for still go through.)
+        if "?" in message:
+            suggestions = [s for s in suggestions
+                           if isinstance(s, dict) and (s.get("action") or "create") != "create"]
+        # Expand each proposed marketplace watch's search into effective terms.
+        all_terms = []
+        for sug in suggestions:
+            if isinstance(sug, dict) and sug.get("mode") == "continuous" and sug.get("urls"):
+                all_terms += _expand_watch_search(sug, messages, model)
+        if all_terms:
+            seen = set(); uniq = [t for t in all_terms if not (t in seen or seen.add(t))]
+            message += "\n\nI'll search a few ways to catch more of these: " + ", ".join(uniq) + "."
+
+        return {
+            "message":           message,
+            "watch_suggestion":  suggestions[0] if suggestions else None,
+            "watch_suggestions": suggestions or None,
+            "listings":          listings,
+            "watch_actions":     watch_actions,
+            "tokens":            eval_count,
+            "prompt_tokens":     prompt_count,
+            "duration_ms":       duration_ns // 1_000_000,
+            "raw":               raw,
+        }
+    except httpx.ConnectError:
+        return {"message": "Ollama is not reachable. Start the Ollama service and try again.",
+                "watch_suggestion": None}
+    except Exception as exc:
+        log.warning("Assistant turn error: %s", exc)
+        return {"message": f"Assistant error: {exc}", "watch_suggestion": None}
+
+
+def _expand_watch_search(ws: dict, messages: list, model: str) -> list[str]:
+    """
+    If a suggested continuous watch points at a marketplace SEARCH URL, expand the
+    shopper's intent into several effective search terms and rebuild ws['urls'] (one URL
+    per term). Returns the terms used (for the message), or [] if not applicable / failed.
+    Mutates ws in place. Never raises.
+    """
+    try:
+        from urllib.parse import urlparse, parse_qsl
+        from web_watcher.search_terms import expand_search_terms, build_search_urls, _search_param
+        urls = ws.get("urls") or []
+        if not urls:
+            return []
+        base = urls[0]
+        query = dict(parse_qsl(urlparse(base).query, keep_blank_values=True))
+        if not _search_param(query):
+            return []                          # not a keyword-search URL (e.g. a feed/page)
+        last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+        intent = (ws.get("instruction") or last_user or "").strip()
+        terms = expand_search_terms(intent, model)
+        if not terms:
+            return []
+        ws["urls"] = build_search_urls(base, terms)
+        return terms
+    except Exception as exc:
+        log.warning("Watch search-term expansion failed: %s", exc)
+        return []
+
+
+def _run_listing_query(params: dict, db_path=None) -> list[dict]:
+    """
+    Resolve a listing-query request (from the /api/listings endpoint or an assistant
+    `listing_query`) and return matching rows from the global store. A watch name is
+    resolved to its stable id; an unresolvable name returns [] rather than querying all.
+    """
+    from web_watcher.config import load
+    from web_watcher.storage import query_listings
+
+    def _int(v):
+        try:
+            return int(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    watch_id = None
+    wname = params.get("watch")
+    if wname:
+        w = next((x for x in load().watches if x.name.lower() == str(wname).lower()), None)
+        if not w:
+            return []
+        watch_id = w.id or w.name
+
+    try:
+        return query_listings(
+            watch_id=watch_id,
+            matched=params.get("matched_only"),          # True / False / None
+            text=(params.get("text") or None),
+            transmission=(params.get("transmission") or None),
+            drivetrain=(params.get("drivetrain") or None),
+            min_year=_int(params.get("min_year")),
+            max_price=_int(params.get("max_price")),
+            max_mileage=_int(params.get("max_mileage")),
+            limit=min(_int(params.get("limit")) or 200, 500),
+            db_path=db_path,
+        )
+    except Exception as exc:
+        log.warning("Listing query failed: %s", exc)
+        return []
+
+
+def _parse_chat_response(raw: str) -> dict:
+    """Extract the JSON object from the model's response, tolerating extra text."""
+    import re
+    text = raw.strip()
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find the outermost {...} block
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    # Fallback: treat raw text as the message
+    return {"message": text, "watch_suggestion": None}

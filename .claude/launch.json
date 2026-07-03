@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-watcher-dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["_preview_server.py"],
+      "port": 7878
+    }
+  ]
+}

@@ -1,0 +1,1998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Web Watcher</title>
+<style>
+:root {
+  --bg:      #0f1117; --surface: #1a1d27; --surface2: #22263a;
+  --border:  #2e3450; --text: #e2e8f0;    --dim: #8892a4;
+  --green:   #4ade80; --yellow: #fbbf24;  --red: #f87171; --blue: #60a5fa;
+  --accent:  #60a5fa; --orange: #fb923c;
+  --zoom: 1;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.5;height:calc(100vh / var(--zoom));display:flex;flex-direction:column}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+a:visited{color:#a78bfa}
+#splash{position:fixed;top:0;left:0;width:calc(100vw / var(--zoom));height:calc(100vh / var(--zoom));background:var(--bg);z-index:1000;display:flex;align-items:center;justify-content:center;transition:opacity .4s}
+#splash.hide{opacity:0;pointer-events:none}
+.splash-title{font-size:26px;font-weight:600;letter-spacing:1px;margin-bottom:18px;text-align:center}
+.splash-spinner{width:30px;height:30px;border:3px solid var(--border);border-top-color:var(--blue);border-radius:50%;margin:0 auto 14px;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.splash-msg{font-size:13px;color:var(--dim);text-align:center}
+
+/* ---- header ---- */
+header{background:var(--surface);border-bottom:1px solid var(--border);height:52px;padding:0 20px;display:flex;align-items:center;gap:14px;flex-shrink:0}
+header h1{font-size:15px;font-weight:600;letter-spacing:.4px}
+.hdr-status{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim)}
+.hdr-time{margin-left:auto;font-size:11px;color:var(--dim)}
+
+/* ---- tab nav ---- */
+nav{background:var(--surface);border-bottom:1px solid var(--border);display:flex;padding:0 20px;flex-shrink:0}
+nav button{background:none;border:none;color:var(--dim);padding:10px 16px;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s}
+nav button:hover{color:var(--text)}
+nav button.active{color:var(--blue);border-bottom-color:var(--blue)}
+
+/* ---- layout ---- */
+.tab-panel{display:none;flex:1;overflow-y:auto;padding:24px}
+.tab-panel.active{display:block}
+section{margin-bottom:32px}
+section h2{font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);margin-bottom:12px}
+
+/* ---- oversight (the watcher) ---- */
+.oversight{display:flex;gap:16px;align-items:flex-start;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+.oversight-avatar{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:7px;width:52px}
+.oversight-orb{width:40px;height:40px;border-radius:50%;background:radial-gradient(circle at 34% 30%,#93c5fd,#3b82f6 62%,#1e40af);box-shadow:0 0 14px rgba(96,165,250,.5)}
+.oversight-orb.idle{background:radial-gradient(circle at 34% 30%,#7c879b,#3a4254 62%);box-shadow:none}
+.oversight-orb.live{animation:orbPulse 2.6s ease-in-out infinite}
+@keyframes orbPulse{0%,100%{box-shadow:0 0 10px rgba(96,165,250,.4)}50%{box-shadow:0 0 22px rgba(96,165,250,.8)}}
+.oversight-label{font-size:10px;color:var(--dim);text-align:center;letter-spacing:.5px}
+.oversight-main{flex:1;display:flex;flex-direction:column;gap:11px;min-width:0}
+.oversight-feed{display:flex;flex-direction:column;gap:7px;max-height:280px;overflow-y:auto}
+.watcher-ask{align-self:flex-start;font-size:12px;color:var(--blue);background:none;border:1px dashed var(--border);padding:6px 12px}
+.watcher-ask:hover{border-color:var(--blue);background:none}
+.ov-action{margin-left:10px;font-size:11px;padding:2px 9px;border-color:var(--orange);color:var(--orange)}
+.ov-action:hover:not(:disabled){background:var(--orange);color:#1a1206;border-color:var(--orange)}
+.ov-entry{border-left:2px solid var(--border);padding:3px 0 3px 11px;font-size:13px;color:var(--text);animation:ovIn .35s ease}
+@keyframes ovIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.ov-entry .ov-time{font-size:10px;color:var(--dim);margin-left:8px;white-space:nowrap}
+.ov-entry.find{border-left-color:var(--green)}
+.ov-entry.concern{border-left-color:var(--orange)}
+.ov-entry.decision{border-left-color:var(--blue)}
+.ov-entry.review{border-left-color:var(--yellow)}
+.ov-entry.review .ov-text{font-style:italic;color:#e7e0c4}
+
+/* ---- omnipresent Watcher launcher + chat dock (present on every view) ---- */
+.watcher-launcher{position:fixed;right:22px;bottom:22px;z-index:900;width:54px;height:54px;border-radius:50%;background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.45);transition:transform .15s,border-color .15s}
+.watcher-launcher:hover{transform:translateY(-2px);border-color:var(--blue);background:var(--surface)}
+.launcher-orb{width:30px;height:30px;border-radius:50%;background:radial-gradient(circle at 34% 30%,#93c5fd,#3b82f6 62%,#1e40af);box-shadow:0 0 12px rgba(96,165,250,.55)}
+.launcher-orb.idle{background:radial-gradient(circle at 34% 30%,#7c879b,#3a4254 62%);box-shadow:none}
+.launcher-orb.live{animation:orbPulse 2.6s ease-in-out infinite}
+.launcher-orb.sm{width:15px;height:15px;box-shadow:none}
+.launcher-badge{position:absolute;top:-2px;right:-2px;min-width:18px;height:18px;border-radius:9px;background:var(--orange);color:#1a1206;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 5px;border:2px solid var(--bg)}
+/* Height is AUTO so the window grows with its content (a big response makes it longer),
+   floored at min-height and capped at max-height (then the convo scrolls). The top grip
+   lets the user drag it taller/shorter manually (sets an inline height). */
+.watcher-dock{position:fixed;right:22px;bottom:86px;z-index:901;width:380px;max-width:calc((100vw - 44px) / var(--zoom));height:auto;min-height:min(150px, calc((100vh - 130px) / var(--zoom)));max-height:calc((100vh - 130px) / var(--zoom));background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 44px rgba(0,0,0,.55);display:flex;flex-direction:column;overflow:hidden;animation:ovIn .2s ease}
+/* Drag handle along the top edge — the dock is bottom-anchored, so dragging UP grows it. */
+.dock-resize-grip{flex-shrink:0;height:11px;display:flex;align-items:center;justify-content:center;cursor:ns-resize;touch-action:none}
+.dock-resize-grip::before{content:"";width:38px;height:3px;border-radius:3px;background:var(--border)}
+.dock-resize-grip:hover::before{background:var(--dim)}
+/* Left-edge grip: drag to widen (the dock is right-anchored, so dragging left grows it out). */
+.dock-resize-grip-x{position:absolute;left:0;top:11px;bottom:0;width:9px;cursor:ew-resize;touch-action:none;z-index:6;display:flex;align-items:center}
+.dock-resize-grip-x::before{content:"";width:3px;height:40px;border-radius:3px;background:transparent;margin-left:2px}
+.dock-resize-grip-x:hover::before{background:var(--dim)}
+.dock-head{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+.dock-title{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px}
+.dock-close{background:none;border:none;color:var(--dim);font-size:20px;line-height:1;padding:0 5px;cursor:pointer}
+.dock-close:hover{color:var(--text);background:none}
+/* flex:1 1 auto so the convo sizes to its content (driving the dock's auto height) and
+   scrolls once the dock hits its max-height. */
+.dock-convo{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.dock-inputrow{display:flex;gap:8px;padding:11px;border-top:1px solid var(--border);flex-shrink:0}
+.dock-inputrow input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 11px;border-radius:6px;font-size:13px}
+.dock-inputrow input:focus{outline:none;border-color:var(--blue)}
+
+/* ---- dot ---- */
+.dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.dot.running{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot.starting{background:var(--yellow);animation:blink 1s ease-in-out infinite}
+.dot.stopped{background:var(--dim)}
+.dot.error{background:var(--red);box-shadow:0 0 6px var(--red)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ---- service cards ---- */
+.service-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px}
+.service-card{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:8px;padding:14px 18px;display:flex;align-items:center;gap:14px;transition:border-left-color .3s}
+.service-card.running{border-left-color:var(--green)}
+.service-card.error{border-left-color:var(--red)}
+.toggle-track{width:44px;height:24px;background:var(--surface2);border-radius:12px;position:relative;cursor:pointer;transition:background .2s;border:1px solid var(--border)}
+.toggle-track.on{background:var(--accent)}
+.toggle-thumb{width:18px;height:18px;background:#fff;border-radius:50%;position:absolute;top:2px;left:2px;transition:left .2s}
+.toggle-track.on .toggle-thumb{left:22px}
+.svc-info{flex:1;min-width:0}
+.svc-name{font-weight:600}
+.svc-meta{font-size:12px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svc-error{font-size:12px;color:var(--red);margin-top:2px}
+.svc-actions{display:flex;gap:6px;flex-shrink:0}
+
+/* ---- buttons ---- */
+button{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 12px;border-radius:5px;font-size:12px;cursor:pointer;transition:background .15s,border-color .15s}
+button:hover:not(:disabled){background:var(--border);border-color:var(--dim)}
+button.danger{border-color:#7f3030;color:var(--red)}
+button.danger:hover:not(:disabled){background:#3d1a1a}
+button.primary{border-color:#1d4a7f;color:var(--blue)}
+button.primary:hover:not(:disabled){background:#1a2d4a}
+button.success{border-color:#1a5c35;color:var(--green)}
+button.success:hover:not(:disabled){background:#0f3320}
+button:disabled{opacity:.35;cursor:not-allowed}
+.hdr-shutdown{background:transparent;border:1px solid #7f3030;color:var(--red);padding:4px 12px;font-size:12px}
+.hdr-shutdown:hover:not(:disabled){background:#3d1a1a}
+
+/* ---- watches table ---- */
+.toolbar{display:flex;gap:8px;margin-bottom:14px;align-items:center}
+.toolbar .spacer{flex:1}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+th{text-align:left;padding:10px 14px;font-size:11px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--border)}
+td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface2)}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge.enabled{background:#1a3a20;color:var(--green)}
+.badge.disabled{background:#2a2a2a;color:var(--dim)}
+.badge.match{background:#1a3a20;color:var(--green);margin-left:6px}
+.badge.dupe{background:#3a2f1a;color:#e0b050;margin-left:6px}
+.found-yes{color:var(--green);font-weight:600}
+.found-no{color:var(--dim)}
+.found-err{color:var(--red)}
+.conf-high{color:var(--green)}
+.conf-medium{color:var(--yellow)}
+.conf-low{color:var(--red)}
+.actions-cell{display:flex;gap:5px;white-space:nowrap}
+/* ---- active / paused watch sections ---- */
+.watch-section{margin-bottom:22px}
+.watch-section-head{display:flex;align-items:center;gap:8px;margin:0 2px 8px}
+.watch-section-head h3{margin:0;font-size:13px;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.watch-section-head .count{font-size:12px;color:var(--dim)}
+.watch-section.active .dot{color:var(--green)}
+.watch-section.inactive .dot{color:var(--dim)}
+.watch-section.inactive table{opacity:.72}
+.watch-section-empty{padding:12px 14px;border:1px dashed var(--border);border-radius:8px;color:var(--dim);font-size:13px;background:var(--surface)}
+
+/* ---- history filter ---- */
+select{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:5px;font-size:12px;cursor:pointer}
+input[type=text],input[type=number],input[type=url],textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:5px;font-size:13px;width:100%;font-family:inherit}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
+.empty-state{text-align:center;padding:40px;color:var(--dim);font-size:13px}
+
+/* ---- modal ---- */
+.modal-overlay{position:fixed;top:0;left:0;width:calc(100vw / var(--zoom));height:calc(100vh / var(--zoom));background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px;width:560px;max-width:calc(95vw / var(--zoom));max-height:calc(85vh / var(--zoom));overflow-y:auto}
+.modal h3{font-size:15px;font-weight:600;margin-bottom:18px}
+.form-row{margin-bottom:14px}
+.form-row label{display:block;font-size:12px;color:var(--dim);margin-bottom:5px;font-weight:500}
+.form-row textarea{min-height:80px;resize:vertical}
+.form-row.inline{display:flex;gap:10px;align-items:flex-end}
+.form-row.inline>*{flex:1}
+.checkbox-row{display:flex;align-items:center;gap:8px;padding:4px 0}
+.checkbox-row input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--blue)}
+.modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+.advanced-toggle{font-size:12px;color:var(--blue);cursor:pointer;background:none;border:none;padding:0;margin-top:4px}
+.advanced-section{display:none;margin-top:10px;padding:12px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)}
+.advanced-section.open{display:block}
+
+/* ---- chat bubbles (shared by The Watcher dock) ---- */
+.msg{max-width:82%;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.5}
+.msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:3px}
+.msg.assistant{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:3px}
+.msg.thinking{color:var(--dim);font-style:italic}
+.thinking-wave{display:inline-flex}
+.thinking-wave span{display:inline-block;animation:twave 1s ease-in-out infinite}
+@keyframes twave{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-5px)}}
+.bounce-letter{display:inline-block;white-space:pre;animation:twave 1.1s ease-in-out infinite}
+.watch-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-top:10px;font-size:12px}
+.watch-card h4{font-size:13px;font-weight:600;margin-bottom:6px}
+.watch-card .kv{display:flex;gap:8px;margin-bottom:3px;align-items:baseline}
+.watch-card .k{color:var(--dim);min-width:80px;flex-shrink:0}
+.watch-card .kv>span:last-child{min-width:0;overflow-wrap:anywhere;word-break:break-word}
+.watch-card .actions{margin-top:10px;display:flex;gap:6px}
+.msg-stats{font-size:11px;color:var(--dim);margin-top:5px;opacity:.7}
+/* Saved-info: the cached ad body, kept so a removed post stays readable in Results. */
+.saved-info{margin-top:7px;font-size:12px}
+.saved-info>summary{cursor:pointer;color:var(--blue);font-size:11px;list-style:none;user-select:none}
+.saved-info>summary::-webkit-details-marker{display:none}
+.saved-info>summary::before{content:"▸ ";color:var(--dim)}
+.saved-info[open]>summary::before{content:"▾ "}
+.saved-info-body{margin-top:6px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);white-space:pre-wrap;max-height:220px;overflow-y:auto;line-height:1.45}
+
+/* ---- notification preview ---- */
+.notif-channel-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:3px 9px;border-radius:4px;font-weight:500}
+.notif-channel-badge.ok{background:#1a3a20;color:var(--green)}
+.notif-channel-badge.warn{background:#3a2e10;color:var(--yellow)}
+</style>
+</head>
+<body>
+
+<div id="splash">
+  <div>
+    <div class="splash-title">Web Watcher</div>
+    <div class="splash-spinner"></div>
+    <div class="splash-msg">Starting up…</div>
+  </div>
+</div>
+
+<header>
+  <h1>Web Watcher <span id="hdr-version"></span></h1>
+  <div class="hdr-status"><span class="dot" id="hdr-dot"></span><span id="hdr-label">connecting...</span></div>
+  <button class="hdr-shutdown" onclick="shutdownAll()">Shutdown All</button>
+  <span class="hdr-time" id="hdr-time"></span>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('watches',this)">Watches</button>
+  <button onclick="showTab('results',this)">Results</button>
+  <button onclick="showTab('history',this)">Activity</button>
+  <button onclick="showTab('services',this)">Settings</button>
+</nav>
+
+<!-- ================================================================ SERVICES -->
+<div id="tab-services" class="tab-panel">
+  <section>
+    <h2>Services &amp; Status</h2>
+    <div class="service-grid" id="services-grid"></div>
+  </section>
+  <section style="margin-top:24px">
+    <h2>The Watcher</h2>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Let The Watcher run my watches</div>
+        <div style="font-size:12px;color:var(--dim)">One driver cycles through all your always-on watches like a person — choosing what to check next and telling you why in the dock — instead of each watch running on its own. Turn off to go back to starting watches individually.
+          <span id="orch-current" style="color:var(--blue);display:block;margin-top:4px"></span></div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+        <div class="toggle-wrap">
+          <input type="checkbox" id="orch-chk" onchange="setOrchestrator(this.checked)" style="display:none">
+          <div class="toggle-track" id="orch-track" onclick="document.getElementById('orch-chk').click()">
+            <div class="toggle-thumb"></div>
+          </div>
+        </div>
+        <span id="orch-label" style="font-size:13px;color:var(--dim)">Off</span>
+      </label>
+    </div>
+  </section>
+  <section style="margin-top:24px">
+    <h2>Accessibility</h2>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Text size</div>
+        <div style="font-size:12px;color:var(--dim)">Scales all text and UI elements. Preference is saved automatically.</div>
+      </div>
+      <div style="display:flex;gap:4px;align-items:baseline">
+        <button id="fs-small"  onclick="setFontSize('small')"  style="font-size:11px;width:36px;padding:5px 0;text-align:center">A</button>
+        <button id="fs-normal" onclick="setFontSize('normal')" style="font-size:14px;width:36px;padding:5px 0;text-align:center">A</button>
+        <button id="fs-large"  onclick="setFontSize('large')"  style="font-size:17px;width:36px;padding:5px 0;text-align:center">A</button>
+        <button id="fs-xlarge" onclick="setFontSize('xlarge')" style="font-size:20px;width:36px;padding:5px 0;text-align:center">A</button>
+        <button id="fs-xxlarge" onclick="setFontSize('xxlarge')" style="font-size:24px;width:40px;padding:5px 0;text-align:center">A</button>
+        <button id="fs-huge"   onclick="setFontSize('huge')"   style="font-size:28px;width:44px;padding:5px 0;text-align:center">A</button>
+      </div>
+    </div>
+  </section>
+  <section style="margin-top:24px">
+    <h2>Browser</h2>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Show browser window</div>
+        <div style="font-size:12px;color:var(--dim)">When on, a Chromium window opens during each watch run so you can watch the agent navigate and interact with the page.</div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+        <div class="toggle-wrap">
+          <input type="checkbox" id="browser-visible-chk" onchange="setBrowserVisible(this.checked)" style="display:none">
+          <div class="toggle-track" id="browser-visible-track" onclick="document.getElementById('browser-visible-chk').click()">
+            <div class="toggle-thumb"></div>
+          </div>
+        </div>
+        <span id="browser-visible-label" style="font-size:13px;color:var(--dim)">Headless</span>
+      </label>
+    </div>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:10px" id="stealth-row">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Stealth mode</div>
+        <div style="font-size:12px;color:var(--dim)">Human-like mouse movements and timing to avoid bot detection. Disable only for simple trusted sites that don't need it.</div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+        <div class="toggle-wrap">
+          <input type="checkbox" id="stealth-chk" onchange="setStealth(this.checked)" style="display:none">
+          <div class="toggle-track" id="stealth-track" onclick="document.getElementById('stealth-chk').click()">
+            <div class="toggle-thumb"></div>
+          </div>
+        </div>
+        <span id="stealth-label" style="font-size:13px;color:var(--dim)">Off</span>
+      </label>
+    </div>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:10px" id="cursor-row">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Show agent cursor</div>
+        <div style="font-size:12px;color:var(--dim)">Draws a red cursor in the agent's browser so you can watch where it clicks. Only visible when the browser is visible (turn off Headless above). Slightly reduces stealth, so keep it off for normal watching.</div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+        <div class="toggle-wrap">
+          <input type="checkbox" id="cursor-chk" onchange="setAgentCursor(this.checked)" style="display:none">
+          <div class="toggle-track" id="cursor-track" onclick="document.getElementById('cursor-chk').click()">
+            <div class="toggle-thumb"></div>
+          </div>
+        </div>
+        <span id="cursor-label" style="font-size:13px;color:var(--dim)">Off</span>
+      </label>
+    </div>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:10px">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Connect Facebook</div>
+        <div style="font-size:12px;color:var(--dim)">Opens a browser window so you can log into Facebook once. The saved session is reused by watches that have "Use saved login profile" enabled (e.g. Marketplace). Log in, then close the window.</div>
+        <div id="fb-connect-status" style="font-size:12px;color:var(--dim);margin-top:6px"></div>
+      </div>
+      <button class="primary" id="fb-connect-btn" onclick="connectFacebook()" style="white-space:nowrap">Connect Facebook</button>
+    </div>
+  </section>
+</div>
+
+<!-- ================================================================ WATCHES -->
+<div id="tab-watches" class="tab-panel active">
+  <section id="oversight-section">
+    <h2>The Watcher</h2>
+    <div class="oversight">
+      <div class="oversight-avatar">
+        <div class="oversight-orb idle" id="oversight-orb"></div>
+        <div class="oversight-label" id="oversight-label">asleep</div>
+      </div>
+      <div class="oversight-main">
+        <div class="oversight-feed" id="oversight-feed">
+          <div class="empty-state">Waking up…</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button id="watches-run-btn" onclick="toggleWatcherRun()"
+                  title="Start or stop The Watcher driving your watches">▶ Start watching</button>
+          <button class="watcher-ask" onclick="openWatcherDock()">💬 Ask The Watcher</button>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section>
+    <h2>Watches</h2>
+    <div class="toolbar">
+      <button class="success" onclick="openWatchModal()">+ Add Watch</button>
+    </div>
+    <div id="watches-body">
+      <div class="empty-state">Loading watches...</div>
+    </div>
+  </section>
+</div>
+
+<!-- ================================================================ RESULTS -->
+<div id="tab-results" class="tab-panel">
+  <section>
+    <h2>Found Listings</h2>
+    <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+      <select id="res-watch" onchange="loadResults()"><option value="">All watches</option></select>
+      <input id="res-search" type="text" placeholder="Search title or details…" style="width:200px"
+             onkeydown="if(event.key==='Enter')loadResults()">
+      <input id="res-maxprice" type="number" placeholder="Max $" style="width:90px" onchange="loadResults()">
+      <label style="color:var(--dim);font-size:12px"><input id="res-matched" type="checkbox" checked onchange="loadResults()"> Matches only</label>
+      <label style="color:var(--dim);font-size:12px">Sort
+        <select id="res-sort" onchange="rerenderResults()" style="margin-left:4px">
+          <option value="newest">Newest found</option>
+          <option value="matched">Matches first</option>
+          <option value="price-asc">Price: low → high</option>
+          <option value="price-desc">Price: high → low</option>
+          <option value="ppm-asc">Price per mile: best</option>
+          <option value="year-desc">Year: newest</option>
+          <option value="year-asc">Year: oldest</option>
+          <option value="mileage-asc">Mileage: lowest</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <button onclick="loadResults()">Search</button>
+    </div>
+    <div id="results-body">
+      <div class="empty-state">Loading...</div>
+    </div>
+  </section>
+</div>
+
+<!-- ================================================================ ACTIVITY (runs + alert preview) -->
+<div id="tab-history" class="tab-panel">
+  <section>
+    <h2>Activity</h2>
+    <div class="toolbar">
+      <label style="color:var(--dim);font-size:12px;margin-right:4px">Watch:</label>
+      <select id="history-filter" onchange="loadHistory()">
+        <option value="">All watches</option>
+      </select>
+      <span class="spacer"></span>
+      <button onclick="loadHistory()">Refresh</button>
+    </div>
+    <div id="history-body">
+      <div class="empty-state">Loading activity...</div>
+    </div>
+    <p style="font-size:12px;color:var(--dim);margin-top:10px">Click a run to preview the alert it would send.</p>
+  </section>
+
+  <section id="notif-section" style="display:none;margin-top:24px">
+    <h2>Alert preview</h2>
+    <div id="notif-pin" style="display:none;margin-bottom:14px;padding:7px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--dim);align-items:center;gap:8px">
+      <span>📌</span><span id="notif-pin-label"></span>
+      <span class="spacer"></span>
+      <button style="font-size:11px;padding:2px 8px" onclick="currentRunId=null;document.getElementById('notif-pin').style.display='none';loadNotifPreview()">× View latest</button>
+    </div>
+
+    <div id="notif-meta" style="display:none;margin-bottom:20px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:13px;color:var(--dim)">Last run:</span>
+        <span id="notif-run-time" style="font-size:13px"></span>
+        <span id="notif-found-badge" class="badge"></span>
+        <span id="notif-conf-badge" style="font-size:12px"></span>
+        <span style="flex:1"></span>
+        <span id="notif-tg-status" class="notif-channel-badge"></span>
+        <span id="notif-em-status" class="notif-channel-badge"></span>
+      </div>
+      <p id="notif-screenshot-note" style="display:none;font-size:12px;color:var(--dim);margin-top:6px">
+        A screenshot would be attached to this notification (vision path was used).
+      </p>
+    </div>
+
+    <div id="notif-empty" class="empty-state" style="display:none">No run history for this watch yet. Click "Run now" on the Watches tab to trigger one.</div>
+
+    <div id="notif-previews" style="display:none;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--dim);margin-bottom:8px">Email Preview</div>
+        <div style="font-size:12px;color:var(--dim);margin-bottom:6px">Subject: <span id="notif-subject" style="color:var(--text)"></span></div>
+        <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;height:340px">
+          <iframe id="notif-email-frame" style="width:100%;height:100%;border:none;background:#fff"></iframe>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--dim);margin-bottom:8px">Telegram Preview</div>
+        <div style="font-size:12px;color:var(--dim);margin-bottom:6px">Sent as plain text message</div>
+        <div style="border:1px solid var(--border);border-radius:8px;background:#17212b;padding:16px;height:340px;overflow-y:auto">
+          <div style="display:flex;gap:10px;align-items:flex-start">
+            <div style="width:36px;height:36px;border-radius:50%;background:#2b5278;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">🔭</div>
+            <div style="background:#182533;border-radius:4px 12px 12px 12px;padding:10px 14px;font-size:13px;color:#e2e8f0;line-height:1.6;white-space:pre-wrap;max-width:360px" id="notif-tg-text"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+
+<!-- ================================================================ WATCH MODAL -->
+<div class="modal-overlay" id="modal-overlay" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3 id="modal-title">Add Watch</h3>
+
+    <!-- ── Essentials ─────────────────────────────────────────── -->
+    <div class="form-row">
+      <label>Name</label>
+      <input type="text" id="f-name" placeholder="e.g. 4x4 trucks on Craigslist">
+    </div>
+    <div class="form-row">
+      <label>What to watch <span style="color:var(--dim);font-weight:400">— a page or search URL (one per line)</span></label>
+      <textarea id="f-urls" rows="2" placeholder="https://seattle.craigslist.org/search/cta?query=4x4+truck"></textarea>
+    </div>
+    <div class="form-row" id="f-terms-row">
+      <label>Search terms <span style="color:var(--dim);font-weight:400">— optional, comma-separated; each is searched (and explored a few ways) on the URL above</span></label>
+      <input type="text" id="f-terms" placeholder="e.g. 4x4 truck, lifted truck, diesel 4x4, Tacoma 4wd">
+      <div style="font-size:11px;color:var(--dim);margin-top:4px">Leave blank to just use the URL as-is. Fill this in to search several ways from one site.</div>
+    </div>
+    <div class="form-row">
+      <label>What to look for</label>
+      <textarea id="f-instruction" rows="3" placeholder="4x4 / 4WD pickup trucks under $15k. Skip parts, trailers, and 2WD."></textarea>
+    </div>
+    <div class="form-row">
+      <label>How often</label>
+      <select id="f-mode" onchange="onModeChange()">
+        <option value="schedule">Check on a timer</option>
+        <option value="continuous">Watch all day (continuous)</option>
+      </select>
+    </div>
+    <div class="form-row" id="f-schedule-row">
+      <label>Check every (minutes)</label>
+      <input type="number" id="f-interval" min="1" value="30">
+    </div>
+    <div class="form-row">
+      <label>Notifications</label>
+      <div class="checkbox-row"><input type="checkbox" id="f-tg" checked><label for="f-tg">Telegram</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="f-email" checked><label for="f-email">Email</label></div>
+    </div>
+    <div class="form-row">
+      <div class="checkbox-row"><input type="checkbox" id="f-enabled" checked><label for="f-enabled">Enabled</label></div>
+    </div>
+
+    <!-- ── Advanced (smart defaults otherwise) ────────────────── -->
+    <button class="advanced-toggle" onclick="toggleAdvanced()">+ Advanced options</button>
+    <div class="advanced-section" id="advanced-section">
+      <div class="form-row">
+        <label>How it reads the page</label>
+        <div class="checkbox-row">
+          <input type="checkbox" id="f-autonomous" onchange="document.getElementById('f-autonomous-opts').style.display=this.checked?'block':'none'">
+          <label for="f-autonomous">Let the AI click &amp; explore — slower, for sites that need interaction (e.g. Facebook logged in). Off = fast scraper (best for Craigslist/eBay).</label>
+        </div>
+      </div>
+      <div id="f-autonomous-opts" style="display:none;margin:-4px 0 8px;padding:10px 12px;background:var(--surface);border-radius:6px;border:1px solid var(--border);font-size:12px;color:var(--dim)">
+        Max steps: <input type="number" id="f-max-steps" value="15" min="3" max="40" style="width:70px;display:inline;padding:3px 6px;font-size:12px">
+        <span style="margin-left:10px">The AI will take up to this many actions before stopping.</span>
+      </div>
+      <div class="form-row">
+        <label>Perception</label>
+        <select id="f-perception">
+          <option value="auto">auto (text first, vision fallback)</option>
+          <option value="text">text only</option>
+          <option value="vision">vision (screenshot)</option>
+        </select>
+      </div>
+      <div id="f-continuous-opts" style="display:none;margin-bottom:8px;padding:10px 12px;background:var(--surface);border-radius:6px;border:1px solid var(--border);font-size:12px;color:var(--dim)">
+        <div style="margin-bottom:6px;color:var(--text)">Continuous (always-on) settings</div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+          <span>Scroll passes/sweep <input type="number" id="f-cont-scroll" value="4" min="1" max="20" style="width:60px;display:inline;padding:3px 6px;font-size:12px"></span>
+          <span>Idle between sweeps (s) <input type="number" id="f-cont-idle" value="45" min="5" style="width:70px;display:inline;padding:3px 6px;font-size:12px"></span>
+          <span>Max alerts/sweep <input type="number" id="f-cont-maxalerts" value="8" min="1" style="width:60px;display:inline;padding:3px 6px;font-size:12px"></span>
+        </div>
+        <div class="checkbox-row" style="margin-top:8px"><input type="checkbox" id="f-cont-variation" checked><label for="f-cont-variation">Vary the search each sweep (fight the feed algorithm)</label></div>
+        <div class="checkbox-row" style="margin-top:4px"><input type="checkbox" id="f-login-profile"><label for="f-login-profile">Use saved login profile (for sites that require sign-in, e.g. Facebook)</label></div>
+      </div>
+      <div class="form-row">
+        <label>Cron expression (overrides interval)</label>
+        <input type="text" id="f-cron" placeholder="e.g. 0 8 * * * (daily at 8 AM)">
+      </div>
+      <div class="form-row">
+        <label>Model override (leave blank for default)</label>
+        <input type="text" id="f-model" placeholder="e.g. qwen2.5:14b">
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="saveWatch()" id="modal-save-btn">Save Watch</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================ THE WATCHER — omnipresent dock -->
+<!-- One AI, present on every view: a floating launcher that opens the single Watcher
+     conversation. The Watches home shows the ambient feed; full chat lives here. -->
+<button id="watcher-launcher" class="watcher-launcher" onclick="toggleWatcherDock()" title="The Watcher" aria-label="Open The Watcher">
+  <span class="launcher-orb idle" id="launcher-orb"></span>
+  <span class="launcher-badge" id="launcher-badge" style="display:none"></span>
+</button>
+<div id="watcher-dock" class="watcher-dock" style="display:none">
+  <div class="dock-resize-grip" id="dock-resize-grip" title="Drag to resize height · double-click to auto-fit"></div>
+  <div class="dock-resize-grip-x" id="dock-resize-grip-x" title="Drag to resize width · double-click to auto-fit"></div>
+  <div class="dock-head">
+    <span class="dock-title"><span class="launcher-orb sm idle" id="dock-orb"></span> The Watcher</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button id="dock-run-btn" onclick="toggleWatcherRun()" title="Start or stop The Watcher driving your watches"
+              style="font-size:11px;padding:4px 11px">▶ Start watching</button>
+      <button class="dock-close" onclick="closeWatcherDock()" title="Close">×</button>
+    </div>
+  </div>
+  <div class="dock-convo" id="dock-convo"></div>
+  <div class="dock-inputrow">
+    <input id="watcher-input" type="text" autocomplete="off"
+           placeholder="Talk to The Watcher — e.g. “how's the sports-car watch doing?”"
+           onkeydown="if(event.key==='Enter')watcherSend()">
+    <button class="success" onclick="watcherSend()">Send</button>
+  </div>
+</div>
+
+<script>
+// ============================================================ STATE
+const POLL_MS = 3000;
+let activeTab = 'watches';
+let editingWatchName = null;   // null = create, string = edit
+let watcherHistory = [];       // [{role, content}] — the single conversation with The Watcher
+let watchNames = [];           // for history filter
+let currentRunId = null;       // when navigating from history to notifications
+
+// ============================================================ TABS
+function showTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  activeTab = name;
+  if (name === 'watches')  { loadWatches(); loadOversight(); }
+  if (name === 'results')  loadResults();
+  if (name === 'history')  loadHistory();
+  if (name === 'services') loadOrchestrator();
+}
+
+// Poll The Watcher on EVERY view (not just Watches) so the omnipresent launcher pulses
+// and badges new narration wherever you are. Refresh the orchestrator card while it's open.
+// Refresh narration + the orchestrator run-state on every view (the dock's Start/Stop
+// button and launcher live on all tabs, so this can't be services-only).
+setInterval(() => { loadOversight(); loadOrchestrator(); }, 8000);
+
+// ============================================================ RESULTS
+async function loadResults() {
+  const body = document.getElementById('results-body');
+  // Refresh the watch dropdown EVERY load (preserving selection) so newly-added watches
+  // appear — it used to populate only once.
+  const sel = document.getElementById('res-watch');
+  const chosen = sel.value;
+  try {
+    const ws = await api('/api/watches');
+    sel.innerHTML = '<option value="">All watches</option>';
+    ws.forEach(w => {
+      const o = document.createElement('option');
+      o.value = w.name; o.textContent = w.name;
+      if (w.name === chosen) o.selected = true;
+      sel.appendChild(o);
+    });
+  } catch(_) {}
+  const q = new URLSearchParams();
+  if (sel.value) q.set('watch', sel.value);
+  const s = document.getElementById('res-search').value.trim(); if (s) q.set('q', s);
+  const p = document.getElementById('res-maxprice').value; if (p) q.set('max_price', p);
+  if (document.getElementById('res-matched').checked) q.set('matched', 'true');
+  q.set('limit', '300');
+  body.innerHTML = '<div class="empty-state">Loading...</div>';
+  try {
+    const rows = await api('/api/listings?' + q.toString());
+    renderResults(rows);
+  } catch(e) {
+    body.innerHTML = `<div class="empty-state">Could not load listings: ${e.message}</div>`;
+  }
+}
+
+let _lastResultRows = [];   // keep the loaded rows so the Sort control can re-render instantly
+
+// Re-render the already-loaded results with the current Sort selection (no refetch).
+function rerenderResults() { renderResults(_lastResultRows); }
+
+// Sort a copy of the rows by the chosen key. Missing values sort last so blanks don't
+// crowd the top. 'newest' uses when the listing was last observed (then first seen).
+function _sortResults(rows) {
+  const mode = document.getElementById('res-sort')?.value || 'newest';
+  const num = (v) => (v == null || v === '' || isNaN(Number(v))) ? null : Number(v);
+  const cmpNum = (a, b, dir) => {   // nulls always last regardless of direction
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return dir === 'asc' ? a - b : b - a;
+  };
+  const when = (r) => Date.parse(r.observed_at || r.last_seen || r.first_seen || '') || 0;
+  const ppm  = (r) => {   // $ per mile — only meaningful when both price & mileage are present
+    const p = num(r.price_value), m = num(r.mileage);
+    return (p != null && m != null && m > 0) ? p / m : null;
+  };
+  const out = rows.slice();
+  out.sort((r1, r2) => {
+    switch (mode) {
+      case 'matched':     // matched listings first, then newest within each group
+        if (!!r1.matched !== !!r2.matched) return r1.matched ? -1 : 1;
+        return when(r2) - when(r1);
+      case 'price-asc':   return cmpNum(num(r1.price_value), num(r2.price_value), 'asc');
+      case 'price-desc':  return cmpNum(num(r1.price_value), num(r2.price_value), 'desc');
+      case 'ppm-asc':     return cmpNum(ppm(r1), ppm(r2), 'asc');
+      case 'year-desc':   return cmpNum(num(r1.year), num(r2.year), 'desc');
+      case 'year-asc':    return cmpNum(num(r1.year), num(r2.year), 'asc');
+      case 'mileage-asc': return cmpNum(num(r1.mileage), num(r2.mileage), 'asc');
+      default:            return when(r2) - when(r1);   // newest found
+    }
+  });
+  return out;
+}
+
+function renderResults(rows) {
+  const body = document.getElementById('results-body');
+  _lastResultRows = rows || [];
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  if (!rows || !rows.length) {
+    body.innerHTML = '<div class="empty-state">No listings yet. Start a watch and they\'ll show up here as it finds them.</div>';
+    return;
+  }
+  const price = (r) => r.price_value != null ? '$' + Number(r.price_value).toLocaleString() : (r.price_text || '—');
+  const attrs = (r) => [
+    r.year, r.mileage != null ? Number(r.mileage).toLocaleString() + ' mi' : null,
+    r.transmission, r.drivetrain, r.source,
+  ].filter(Boolean).join(' · ');
+  // Posted = when the seller posted it (from the ad page); Saved = when we first scraped it.
+  const fmtDate = (v) => {
+    if (!v) return null;
+    const d = new Date(v); if (isNaN(d)) return String(v).slice(0, 16);
+    return d.toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'});
+  };
+  const dateLine = (r) => {
+    const p = fmtDate(r.posted_at), s = fmtDate(r.first_seen || r.observed_at);
+    const bits = [];
+    if (p) bits.push('Posted ' + p);
+    if (s) bits.push('Saved ' + s);
+    return bits.join(' · ');
+  };
+  const sorted = _sortResults(rows);
+  body.innerHTML = `<div class="msg-stats" style="margin-bottom:8px">${sorted.length} listing${sorted.length===1?'':'s'}</div>` +
+    sorted.map(r => `
+    <div class="watch-card" style="margin-top:8px;display:flex;gap:12px;align-items:flex-start">
+      <div style="min-width:84px;font-weight:600;color:var(--green)">${esc(price(r))}</div>
+      ${r.image ? `<a href="${esc(r.url)}" target="_blank" rel="noopener" style="flex-shrink:0">
+        <img src="${esc(r.image)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+             style="width:88px;height:66px;object-fit:cover;border-radius:6px;background:var(--surface2);display:block"
+             onerror="this.parentElement.style.display='none'"></a>` : ''}
+      <div style="flex:1">
+        <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title || '(untitled)')}</a>
+        ${r.matched ? '<span class="badge match">match</span>' : ''}
+        ${r.dup_count > 1 ? `<span class="badge dupe" title="duplicate posts of this item">×${r.dup_count} dupes</span>` : ''}
+        ${r.watches ? `<span class="badge" style="background:#22263a;color:var(--dim);margin-left:6px" title="found by">${esc(r.watches)}</span>` : ''}
+        ${attrs(r) ? `<div class="msg-stats">${esc(attrs(r))}</div>` : ''}
+        ${dateLine(r) ? `<div class="msg-stats">${esc(dateLine(r))}</div>` : ''}
+        ${r.judge_reason ? `<div class="msg-stats">${esc(r.judge_reason)}</div>` : ''}
+        ${r.details ? `<details class="saved-info"><summary>Saved info (kept even if the post is removed)</summary><div class="saved-info-body">${esc(r.details)}</div></details>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+// ============================================================ API
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: {'Content-Type':'application/json'}, ...opts });
+  if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status}: ${t}`); }
+  return r.json();
+}
+
+// ============================================================ SERVICES
+function uptime(s) {
+  if (s == null) return '';
+  if (s < 60)   return `up ${s}s`;
+  if (s < 3600) return `up ${Math.floor(s/60)}m ${s%60}s`;
+  return `up ${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`;
+}
+
+function renderServices(statuses) {
+  const grid = document.getElementById('services-grid');
+  grid.innerHTML = '';
+  for (const [key, svc] of Object.entries(statuses)) {
+    const running  = svc.status === 'running';
+    const starting = svc.status === 'starting';
+    const stopped  = svc.status === 'stopped';
+
+    let metaText = running ? uptime(svc.uptime_seconds) : svc.status;
+    if (key === 'ollama' && running && svc.models?.length)
+      metaText += ` — ${svc.models.length} model${svc.models.length!==1?'s':''} loaded`;
+    if (key === 'ollama' && svc.adopted) metaText += ' (external)';
+
+    const card = document.createElement('div');
+    card.className = `service-card ${svc.status}`;
+    card.innerHTML = `
+      <span class="dot ${svc.status}"></span>
+      <div class="svc-info">
+        <div class="svc-name">${svc.name}</div>
+        ${svc.error
+          ? `<div class="svc-error">${svc.error}</div>`
+          : `<div class="svc-meta">${metaText}</div>`}
+      </div>
+      <div class="svc-actions">
+        <button onclick="svcAction('${key}','restart')" ${stopped?'disabled':''}>Restart</button>
+        ${running||starting
+          ? `<button class="danger" onclick="svcAction('${key}','stop')">Stop</button>`
+          : `<button class="primary" onclick="svcAction('${key}','start')">Start</button>`}
+      </div>`;
+    grid.appendChild(card);
+  }
+}
+
+function updateHeader(statuses) {
+  const all = Object.values(statuses);
+  const dot = document.getElementById('hdr-dot');
+  const lbl = document.getElementById('hdr-label');
+  if (all.every(s => s.status === 'running')) {
+    dot.className = 'dot running'; lbl.textContent = 'All services running';
+  } else if (all.some(s => s.status === 'error')) {
+    dot.className = 'dot error'; lbl.textContent = 'Service error';
+  } else {
+    dot.className = 'dot stopped'; lbl.textContent = 'Services partially stopped';
+  }
+}
+
+async function svcAction(svc, cmd) {
+  try {
+    await api(`/api/services/${svc}/${cmd}`, {method:'POST'});
+    setTimeout(pollServices, 600);
+    setTimeout(pollServices, 2000);
+  } catch(e) { console.error(e); }
+}
+
+async function shutdownAll() {
+  if (!confirm('Stop all services and close Web Watcher?')) return;
+  await Promise.allSettled([
+    api('/api/services/scheduler/stop',{method:'POST'}),
+    api('/api/services/server/stop',{method:'POST'}),
+  ]);
+  window.close();
+}
+
+function hideSplash() {
+  const s = document.getElementById('splash');
+  if (s) { s.classList.add('hide'); setTimeout(() => s.remove(), 500); }
+}
+
+async function pollServices() {
+  try {
+    const statuses = await api('/api/status');
+    renderServices(statuses);
+    updateHeader(statuses);
+    hideSplash();   // services are responding — drop the splash
+    document.getElementById('hdr-time').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(_) {
+    document.getElementById('hdr-dot').className = 'dot error';
+    document.getElementById('hdr-label').textContent = 'Server unreachable';
+  }
+}
+
+// ============================================================ WATCHES
+function timeAgo(iso) {
+  if (!iso) return '—';
+  const secs = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (secs < 5)    return 'just now';   // also guards tiny client/server clock skew
+  if (secs < 60)   return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+  return `${Math.floor(secs/3600)}h ago`;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ============================================================ OVERSIGHT (the watcher)
+async function loadOversight() {
+  const feed  = document.getElementById('oversight-feed');
+  const orb   = document.getElementById('oversight-orb');
+  const label = document.getElementById('oversight-label');
+  try {
+    const data = await api('/api/oversight');
+    // The global launcher mirrors the watching state on EVERY view.
+    setLauncherState(data.running);
+    if (feed) {
+      if (orb)   orb.className = 'oversight-orb ' + (data.running ? 'live' : 'idle');
+      if (label) label.textContent = data.running ? 'on watch' : 'asleep';
+      if (!data.entries || !data.entries.length) {
+        feed.innerHTML = `<div class="empty-state">${data.running
+          ? 'On watch. Nothing to report yet…'
+          : 'The watcher is asleep — start the scheduler and a watch to wake it.'}</div>`;
+      } else {
+        feed.innerHTML = data.entries.map(e => {
+          const act = e.action
+            ? `<button class="ov-action" onclick='watcherAction(${JSON.stringify(e.action)}, this)'>${escapeHtml(e.action.label || 'Fix this')}</button>`
+            : '';
+          return `<div class="ov-entry ${e.kind || 'status'}">` +
+            `<span class="ov-text">${escapeHtml(e.text)}</span>${act}` +
+            `<span class="ov-time">${timeAgo(e.ts)}</span>` +
+          `</div>`;
+        }).join('');
+      }
+    }
+    _lastOversightEntries = data.entries || [];
+    updateWatcherBadge(_lastOversightEntries);
+  } catch (e) { /* keep last rendered state on a transient error */ }
+}
+
+// Narration kinds worth interrupting the user for. Routine status/decision/review chatter
+// (e.g. "checking Trucks next") is NOT badged — that was the phantom-badge cause.
+const _NOTEWORTHY_KINDS = new Set(['find', 'concern']);
+let _lastOversightEntries = [];
+
+function setLauncherState(running) {
+  const lo = document.getElementById('launcher-orb');
+  const dl = document.getElementById('dock-orb');
+  if (lo) lo.className = 'launcher-orb ' + (running ? 'live' : 'idle');
+  if (dl) dl.className = 'launcher-orb sm ' + (running ? 'live' : 'idle');
+}
+
+// Show a count badge on the launcher when new narration has arrived since the user last
+// had the dock open — so The Watcher can get your attention from any view.
+function updateWatcherBadge(entries) {
+  const newest = entries.length ? entries[0].ts : null;   // newest-first
+  _latestNarrationTs = newest;
+  const badge = document.getElementById('launcher-badge');
+  if (!badge) return;
+  if (_watcherSeenTs === null) { _watcherSeenTs = newest; return; }  // don't badge the backlog
+  if (isWatcherDockOpen()) { _watcherSeenTs = newest; badge.style.display = 'none'; return; }
+  // Only count NOTEWORTHY unseen narration (a find or a concern) — not routine chatter.
+  const unseen = entries.filter(e => e.ts && e.ts > _watcherSeenTs && _NOTEWORTHY_KINDS.has(e.kind)).length;
+  if (unseen > 0) { badge.textContent = unseen > 9 ? '9+' : String(unseen); badge.style.display = ''; }
+  else { badge.style.display = 'none'; }
+}
+
+// --- The Watcher dock: one floating chat surface, present on every view. The launcher
+// orb opens/closes it; an unread badge appears when new narration arrives while it's shut.
+let _watcherSeenTs = null;     // newest narration ts the user has "seen" (dock open)
+let _latestNarrationTs = null; // newest narration ts currently known (from loadOversight)
+let _watcherInit = false;      // greeting/history loaded into the dock yet?
+function isWatcherDockOpen() {
+  return document.getElementById('watcher-dock').style.display !== 'none';
+}
+function openWatcherDock() {
+  const dock = document.getElementById('watcher-dock');
+  dock.style.display = 'flex';
+  document.getElementById('launcher-badge').style.display = 'none';
+  if (!_watcherInit) { _watcherInit = true; loadWatcherHistory(); }
+  loadOrchestrator();   // make sure the Start/Stop button reflects the live state
+  // Pay off the badge: if noteworthy things happened while the dock was shut, surface them
+  // here (the dock shows chat, the narration feed lives on the Watches tab — this bridges them).
+  _showUnseenNarration();
+  const i = document.getElementById('watcher-input'); if (i) i.focus();
+  const convo = document.getElementById('dock-convo'); convo.scrollTop = convo.scrollHeight;
+  _markWatcherSeen();
+}
+function closeWatcherDock() {
+  document.getElementById('watcher-dock').style.display = 'none';
+}
+function toggleWatcherDock() {
+  isWatcherDockOpen() ? closeWatcherDock() : openWatcherDock();
+}
+function _markWatcherSeen() {
+  // Stamp "seen" at the latest known narration so the badge only counts what arrives next.
+  _watcherSeenTs = _latestNarrationTs || _watcherSeenTs;
+  document.getElementById('launcher-badge').style.display = 'none';
+}
+
+// When the dock opens, briefly recap the noteworthy narration (finds/concerns) that arrived
+// while it was closed — so a badge always corresponds to something the user can see here.
+function _showUnseenNarration() {
+  if (_watcherSeenTs === null) return;   // first ever open — nothing to recap
+  const unseen = _lastOversightEntries.filter(
+    e => e.ts && e.ts > _watcherSeenTs && _NOTEWORTHY_KINDS.has(e.kind));
+  if (!unseen.length) return;
+  const lines = unseen.slice(0, 6).reverse().map(e => '• ' + e.text).join('\n');
+  appendMsg('assistant', 'Since you last looked:\n' + lines, 'dock-convo');
+}
+
+// Run a one-click fix The Watcher offered on a concern (e.g. broaden search terms).
+async function watcherAction(action, btn) {
+  openWatcherDock();     // surface the conversation so the result is visible
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Working…';
+  // Immediately confirm the click IN THE CHAT — the action itself can take a while (a slow
+  // model call), so echo what was clicked and show a live "looking" bubble right away rather
+  // than leaving the chat silent until it finishes.
+  const label = action.label
+    || (action.type === 'broaden_terms'
+        ? `Broaden the search terms${action.watch ? ` for “${action.watch}”` : ''}`
+        : (orig || 'Run that').replace(/…$/, ''));
+  appendMsg('user', label, 'dock-convo');
+  const thinking = appendMsg('assistant', '', 'dock-convo');
+  thinking.classList.add('thinking');
+  _fillBouncingText(thinking, 'The Watcher is on it…');
+  try {
+    const res = await api('/api/oversight/action', { method: 'POST', body: JSON.stringify(action) });
+    thinking.remove();
+    appendMsg('assistant', res.message || (res.ok ? 'Done.' : 'Nothing to do.'), 'dock-convo');
+    btn.textContent = res.ok ? 'Done ✓' : orig;
+    if (!res.ok) btn.disabled = false;
+    loadOversight();
+    if (activeTab === 'watches') loadWatches();
+  } catch (e) {
+    thinking.remove();
+    btn.disabled = false; btn.textContent = orig;
+    appendMsg('assistant', `Could not do that: ${e.message}`, 'dock-convo');
+  }
+}
+
+// Let the user drag the top grip to resize the WHOLE dock window. It's bottom-anchored, so
+// dragging the grip UP makes it taller (grows upward) and DOWN shorter — matching the cursor.
+// Sets an inline height (overriding the auto height); double-click clears it to auto-fit again.
+// CSS max-height still caps it to the viewport, and min keeps it usable.
+function _initDockResize() {
+  const dock = document.getElementById('watcher-dock');
+  const grip = document.getElementById('dock-resize-grip');
+  if (!dock || !grip || grip._init) return;
+  grip._init = true;
+  let startY = 0, startH = 0, dragging = false;
+  const move = (e) => {
+    if (!dragging) return;
+    dock.style.height = Math.max(240, Math.min(startH + (startY - e.clientY), 2000)) + 'px';
+    e.preventDefault();
+  };
+  const up = () => {
+    dragging = false;
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+  };
+  grip.addEventListener('pointerdown', (e) => {
+    dragging = true; startY = e.clientY; startH = dock.offsetHeight;
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+    e.preventDefault();
+  });
+  // Double-click → drop the manual height so the window auto-fits its content again.
+  grip.addEventListener('dblclick', () => { dock.style.height = ''; });
+}
+
+// Drag the LEFT edge to widen the dock (it's anchored to the right, so dragging left grows
+// it OUT). Sets an inline width; CSS max-width still caps it to the viewport. Marks the width
+// as user-set so auto-grow yields to it; double-click clears back to auto.
+function _initDockResizeX() {
+  const dock = document.getElementById('watcher-dock');
+  const grip = document.getElementById('dock-resize-grip-x');
+  if (!dock || !grip || grip._init) return;
+  grip._init = true;
+  let startX = 0, startW = 0, dragging = false;
+  const move = (e) => {
+    if (!dragging) return;
+    dock.style.width = Math.max(300, Math.min(startW + (startX - e.clientX), 3000)) + 'px';
+    dock.dataset.manualW = '1';
+    e.preventDefault();
+  };
+  const up = () => {
+    dragging = false;
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+  };
+  grip.addEventListener('pointerdown', (e) => {
+    dragging = true; startX = e.clientX; startW = dock.offsetWidth;
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+    e.preventDefault();
+  });
+  grip.addEventListener('dblclick', () => { dock.style.width = ''; delete dock.dataset.manualW; });
+}
+
+// Auto-grow the dock's WIDTH to fit content that doesn't wrap (wide cards, listing rows,
+// long unbroken lines) — so it expands OUT as well as up. Never shrinks, never past the CSS
+// max-width, and yields entirely once the user has dragged the width themselves.
+function _growDockWidth() {
+  const dock = document.getElementById('watcher-dock');
+  const convo = document.getElementById('dock-convo');
+  if (!dock || !convo || dock.dataset.manualW) return;
+  const overflow = convo.scrollWidth - convo.clientWidth;
+  if (overflow > 2) dock.style.width = (dock.offsetWidth + overflow + 8) + 'px';
+}
+
+// Render text as individually-bouncing letters for the "looking" bubble.
+function _fillBouncingText(el, text) {
+  el.textContent = '';
+  [...text].forEach((ch, i) => {
+    const s = document.createElement('span');
+    s.className = 'bounce-letter';
+    s.textContent = ch === ' ' ? ' ' : ch;
+    s.style.animationDelay = (i * 0.05) + 's';
+    el.appendChild(s);
+  });
+}
+
+// Talk to The Watcher — same brain as the assistant, in oversight mode.
+async function watcherSend() {
+  const input = document.getElementById('watcher-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  appendMsg('user', text, 'dock-convo');
+  watcherHistory.push({ role: 'user', content: text });
+
+  const thinking = appendMsg('assistant', '', 'dock-convo');
+  thinking.classList.add('thinking');
+  _fillBouncingText(thinking, 'The Watcher is looking…');
+  try {
+    const resp = await api('/api/oversight/chat', {
+      method: 'POST', body: JSON.stringify({ messages: watcherHistory }),
+    });
+    thinking.remove();
+    const replyText = resp.message || '(no response)';
+    appendMsg('assistant', replyText, 'dock-convo');
+    watcherHistory.push({ role: 'assistant', content: replyText });
+    // The Watcher can propose more than one watch at once (e.g. "broaden both") — render each.
+    const suggestions = resp.watch_suggestions || (resp.watch_suggestion ? [resp.watch_suggestion] : []);
+    suggestions.forEach(s => appendWatchCard(s, 'dock-convo'));
+    if (resp.listings)         appendListingResults(resp.listings, 'dock-convo');
+    if (resp.watch_actions && resp.watch_actions.length)
+      appendWatchActionsCard(resp.watch_actions, 'dock-convo');
+  } catch (e) {
+    thinking.remove();
+    appendMsg('assistant', `Error: ${e.message}`, 'dock-convo');
+  }
+}
+
+// Render saved-history content WITHOUT ever dumping raw JSON into the dock. Older assistant
+// turns were persisted as raw JSON, and some are BARE watch objects with no "message" field
+// (the pre-_normalize_turn shape) — those used to render as "garbled chat" when the dock
+// opened. This mirrors the server's _normalize_turn: use the message if present, synthesize a
+// friendly line for a bare watch object, and only fall back to the text when it isn't JSON.
+function historyText(content) {
+  let o;
+  try { o = JSON.parse(content); } catch (_) { return content; }   // plain text → as-is
+  if (!o || typeof o !== 'object') return content;
+  if (o.message) return o.message;
+  const isWatch = o.name || o.action === 'update' || o.urls || o.instruction;
+  if (isWatch) {
+    const verb = o.action === 'update' ? 'updated' : 'set up';
+    return `(I ${verb} ${o.name ? `“${o.name}”` : 'a watch'} for you.)`;
+  }
+  return content;   // unknown JSON shape (rare) — last resort
+}
+
+// The Watcher is now the single AI — load its conversation on boot, or greet on first run.
+async function loadWatcherHistory() {
+  try {
+    const history = await api('/api/oversight/chat/history');
+    if (history && history.length) {
+      watcherHistory = history;
+      const box = document.getElementById('dock-convo');
+      box.innerHTML = '';
+      for (const m of history) {
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        appendMsg(m.role, historyText(m.content || ''), 'dock-convo');
+      }
+    } else {
+      showWatcherGreeting();
+    }
+  } catch (_) { /* offline — the feed still shows */ }
+}
+
+async function showWatcherGreeting() {
+  let s;
+  try { s = await api('/api/summary'); } catch (_) { return; }
+  let msg;
+  if (s.first_run || !s.watch_count) {
+    msg = "I'm The Watcher. I keep an eye on your watches all day and surface what actually "
+        + "matters. Tell me what to look for — for example: \"watch Craigslist Seattle for 4x4 "
+        + "manual trucks under $15k\" — and I'll set it up and start watching.";
+  } else {
+    const p = [`I'm watching over your ${s.watch_count} watch${s.watch_count===1?'':'es'}`
+               + (s.running_count ? ` (${s.running_count} running right now)` : '') + '.'];
+    if (s.total_matches) p.push(`${s.total_matches} match${s.total_matches===1?'':'es'} found so far.`);
+    if (s.recent_error_count) p.push(`⚠ ${s.recent_error_count} recent error${s.recent_error_count===1?'':'s'}`
+               + (s.last_error ? ` — latest: ${s.last_error}` : '') + '.');
+    p.push("Ask me to review a watch, broaden one that's finding nothing, or look up what's turned up.");
+    msg = p.join(' ');
+  }
+  appendMsg('assistant', msg, 'dock-convo');
+}
+
+function timeUntil(iso) {
+  if (!iso) return '—';
+  const secs = Math.floor((new Date(iso) - Date.now()) / 1000);
+  if (secs < 0)    return 'now';
+  if (secs < 60)   return `${secs}s`;
+  if (secs < 3600) return `in ${Math.floor(secs/60)}m`;
+  return `in ${Math.floor(secs/3600)}h`;
+}
+
+async function loadWatches() {
+  const body = document.getElementById('watches-body');
+  try {
+    const watches = await api('/api/watches');
+    watchNames = watches.map(w => w.name);
+    populateHistoryFilter();
+    populateNotifFilter();
+
+    if (!watches.length) {
+      body.innerHTML = '<div class="empty-state">No watches configured. Click "+ Add Watch" to create one.</div>';
+      return;
+    }
+    // Active = enabled (on, will run / be driven). Inactive = disabled (kept, ignored).
+    // One click moves a watch between the two sections (setWatchActive → /enabled).
+    const active   = watches.filter(w => w.enabled);
+    const inactive = watches.filter(w => !w.enabled);
+    body.innerHTML =
+      renderWatchSection('Active', active, true,
+        'Nothing active yet — activate an inactive watch below, or add one.') +
+      renderWatchSection('Inactive', inactive, false,
+        'Nothing inactive. Watches you turn off are kept here, not running.');
+  } catch(e) {
+    body.innerHTML = `<div class="empty-state" style="color:var(--red)">Failed to load watches: ${e.message}</div>`;
+  }
+}
+
+// Render one Active/Paused section: a header with a live count, then either the watches
+// table or an empty-note. isActive drives the styling and which row controls show.
+function renderWatchSection(title, list, isActive, emptyNote) {
+  const cls  = isActive ? 'active' : 'inactive';
+  const head = `<div class="watch-section-head">
+      <span class="dot">${isActive ? '●' : '○'}</span>
+      <h3>${title}</h3><span class="count">${list.length}</span>
+    </div>`;
+  const inner = list.length
+    ? `<table>
+        <thead><tr>
+          <th>Name</th><th>Status</th><th>Last Run</th><th>Result</th><th>Next Run</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${list.map(w => watchRowHtml(w, isActive)).join('')}</tbody>
+      </table>`
+    : `<div class="watch-section-empty">${emptyNote}</div>`;
+  return `<div class="watch-section ${cls}">${head}${inner}</div>`;
+}
+
+// One watch row. In the Active section the run controls (Start/Stop, Run Now) show and the
+// toggle is "Pause"; in the Paused section those are hidden (a paused watch doesn't run) and
+// the primary action is "Activate".
+function watchRowHtml(w, isActive) {
+  const lr = w.last_run;
+  const foundBadge = !lr ? '<span style="color:var(--dim)">—</span>'
+    : lr.error ? `<span class="found-err">Error</span>`
+    : lr.found ? `<span class="found-yes">Found</span>`
+    : `<span class="found-no">—</span>`;
+  const agentBadge = w.autonomous ? ' <span class="badge" style="background:#1a2d4a;color:var(--blue)">agent</span>' : '';
+  const isContinuous = w.mode === 'continuous';
+  const modeBadge = isContinuous ? ' <span class="badge" style="background:#1a3a2d;color:#34d399">continuous</span>' : '';
+  // Status column: run-state for continuous, schedule note for scheduled, "inactive" when off.
+  const statusCell = !isActive
+    ? '<span style="color:var(--dim)">inactive</span>'
+    : isContinuous
+      ? (w.continuous_running
+          ? '<span style="color:#34d399">● running</span>'
+          : '<span style="color:var(--dim)">○ stopped</span>')
+      : '<span style="color:var(--dim)">scheduled</span>';
+  // Next-run column: timer for scheduled, blank for continuous (state is in Status now).
+  const nextCell = isActive && !isContinuous ? timeUntil(w.next_run_utc)
+    : '<span style="color:var(--dim)">—</span>';
+  // Attribute-safe name for inline onclick handlers. The name can contain ' AND " (e.g.
+  // 'Refrigerators … 36" wide') — a bare " closes the onclick="…" attribute and silently
+  // breaks the button. Escape for BOTH layers: JS single-quoted string, then HTML attribute.
+  const nm = w.name
+    .replace(/\\/g, '\\\\').replace(/'/g, "\\'")   // JS string: backslash, single quote
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;'); // HTML attr: ampersand, double quote
+  // Active-only run control: Start/Stop loop (continuous) or Run Now (scheduled).
+  const runBtn = !isActive ? '' : (isContinuous
+    ? (w.continuous_running
+        ? `<button class="danger" onclick="stopContinuous('${nm}')">Stop</button>`
+        : `<button class="primary" onclick="startContinuous('${nm}')">Start</button>`)
+    : `<button class="primary" onclick="runNow('${nm}')">Run Now</button>`);
+  // The transfer control: moves the watch between Active and Inactive.
+  const toggleBtn = isActive
+    ? `<button onclick="setWatchActive('${nm}', false)" title="Make inactive — keep it but stop running">Deactivate</button>`
+    : `<button class="primary" onclick="setWatchActive('${nm}', true)" title="Activate — turn it on">▶ Activate</button>`;
+  return `<tr>
+    <td><strong>${w.name}</strong>${agentBadge}${modeBadge}<br><small style="color:var(--dim)">${w.urls[0]||''}</small></td>
+    <td>${statusCell}</td>
+    <td style="color:var(--dim)">${lr ? timeAgo(lr.run_timestamp) : '—'}</td>
+    <td>${foundBadge}</td>
+    <td style="color:var(--dim)">${nextCell}</td>
+    <td><div class="actions-cell">
+      ${toggleBtn}
+      ${runBtn}
+      <button onclick="editWatch(${JSON.stringify(w).replace(/"/g,'&quot;')})">Edit</button>
+      <button class="danger" onclick="deleteWatch('${nm}')">Delete</button>
+    </div></td>
+  </tr>`;
+}
+
+// Flip a watch's enabled flag (active ⇄ paused) via the existing endpoint, then reload so
+// the row hops to the other section. Pausing a running continuous watch also stops its loop
+// (reload_scheduler won't restore a disabled watch).
+async function setWatchActive(name, enabled) {
+  try {
+    await api(`/api/watches/${encodeURIComponent(name)}/enabled`, {
+      method: 'POST', body: JSON.stringify({ enabled }),
+    });
+    setTimeout(() => loadWatches(), 600);
+  } catch(e) {
+    alert(`Could not ${enabled ? 'activate' : 'pause'} the watch: ${e.message}`);
+  }
+}
+
+async function runNow(name) {
+  try {
+    await api(`/api/watches/${encodeURIComponent(name)}/run`, {method:'POST'});
+    setTimeout(() => loadWatches(), 1000);
+  } catch(e) { alert(`Could not run watch: ${e.message}`); }
+}
+
+async function startContinuous(name) {
+  try {
+    await api(`/api/watches/${encodeURIComponent(name)}/continuous/start`, {method:'POST'});
+    setTimeout(() => loadWatches(), 1000);
+  } catch(e) { alert(`Could not start watch: ${e.message}`); }
+}
+
+async function stopContinuous(name) {
+  try {
+    await api(`/api/watches/${encodeURIComponent(name)}/continuous/stop`, {method:'POST'});
+    setTimeout(() => loadWatches(), 1500);
+  } catch(e) { alert(`Could not stop watch: ${e.message}`); }
+}
+
+async function deleteWatch(name) {
+  if (!confirm(`Delete watch "${name}"?`)) return;
+  try {
+    await api(`/api/watches/${encodeURIComponent(name)}`, {method:'DELETE'});
+    loadWatches();
+  } catch(e) { alert(`Delete failed: ${e.message}`); }
+}
+
+// ============================================================ WATCH MODAL
+// Search-term helpers (mirror web_watcher/search_terms + monitor._SEARCH_TERM_PARAMS) so the
+// "Search terms" field can read terms out of a watch's URLs and rebuild one URL per term.
+const _WW_SEARCH_PARAMS = ['query','_nkw','q','keywords','search_query','st'];
+function _wwSearchParam(usp) { return _WW_SEARCH_PARAMS.find(k => usp.has(k)) || null; }
+function wwExtractTerms(urls) {
+  // Pull the search term out of each URL that has one (for prefilling the field).
+  const terms = [];
+  for (const u of (urls || [])) {
+    try { const usp = new URL(u).searchParams; const p = _wwSearchParam(usp);
+      if (p && usp.get(p)) terms.push(usp.get(p)); } catch(_) {}
+  }
+  return terms;
+}
+function wwBuildSearchUrls(base, terms) {
+  // One URL per term: swap the search param to each term, keep other filters.
+  try {
+    const url = new URL(base); const p = _wwSearchParam(url.searchParams);
+    if (!p) return null;                 // base has no recognizable search param
+    return terms.map(t => { const u = new URL(base); u.searchParams.set(p, t); return u.toString(); });
+  } catch(_) { return null; }
+}
+
+function openWatchModal(prefill = null) {
+  editingWatchName = null;
+  document.getElementById('modal-title').textContent = 'Add Watch';
+  document.getElementById('modal-save-btn').textContent = 'Save Watch';
+  document.getElementById('f-name').value = prefill?.name || '';
+  document.getElementById('f-urls').value = (prefill?.urls || ['']).join('\n');
+  // Prefill Search terms from the watch's URLs (if they're keyword searches). Only show
+  // multiple distinct terms — a single term usually just means "no extra terms set".
+  const _terms = wwExtractTerms(prefill?.urls || []);
+  document.getElementById('f-terms').value = _terms.length > 1 ? _terms.join(', ') : '';
+  document.getElementById('f-instruction').value = prefill?.instruction || '';
+  document.getElementById('f-interval').value = prefill?.interval_minutes ?? 30;
+  document.getElementById('f-perception').value = prefill?.perception || 'auto';
+  document.getElementById('f-tg').checked = prefill?.notify?.telegram ?? true;
+  document.getElementById('f-email').checked = prefill?.notify?.email ?? true;
+  document.getElementById('f-enabled').checked = prefill?.enabled ?? true;
+  const auto = prefill?.autonomous ?? true;
+  document.getElementById('f-autonomous').checked = auto;
+  document.getElementById('f-autonomous-opts').style.display = auto ? 'block' : 'none';
+  document.getElementById('f-max-steps').value = prefill?.max_agent_steps ?? 15;
+  document.getElementById('f-cron').value = prefill?.cron_expression || '';
+  document.getElementById('f-model').value = prefill?.model_override || '';
+  // Mode + continuous settings
+  document.getElementById('f-mode').value = prefill?.mode || 'schedule';
+  document.getElementById('f-cont-scroll').value = prefill?.continuous_scroll_passes ?? 4;
+  document.getElementById('f-cont-idle').value = prefill?.continuous_idle_seconds ?? 45;
+  document.getElementById('f-cont-maxalerts').value = prefill?.continuous_max_alerts ?? 8;
+  document.getElementById('f-cont-variation').checked = prefill?.continuous_search_variation ?? true;
+  document.getElementById('f-login-profile').checked = prefill?.use_login_profile ?? false;
+  onModeChange();
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+// Show/hide schedule vs continuous controls based on the selected mode.
+function onModeChange() {
+  const continuous = document.getElementById('f-mode').value === 'continuous';
+  document.getElementById('f-continuous-opts').style.display = continuous ? 'block' : 'none';
+  document.getElementById('f-schedule-row').style.display = continuous ? 'none' : 'block';
+}
+
+function editWatch(watch) {
+  openWatchModal(watch);          // resets editingWatchName to null — must set it AFTER
+  editingWatchName = watch.name;  // so saveWatch() issues a PUT (update), not a POST (create)
+  document.getElementById('modal-title').textContent = 'Edit Watch';
+  document.getElementById('modal-save-btn').textContent = 'Update Watch';
+  document.getElementById('f-name').disabled = true;
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').style.display = 'none';
+  document.getElementById('f-name').disabled = false;
+  document.getElementById('advanced-section').classList.remove('open');
+}
+
+function toggleAdvanced() {
+  document.getElementById('advanced-section').classList.toggle('open');
+}
+
+async function saveWatch() {
+  const name = document.getElementById('f-name').value.trim();
+  if (!name) { alert('Name is required'); return; }
+
+  const rawUrls = document.getElementById('f-urls').value;
+  let urls = rawUrls.split('\n').map(u => u.trim()).filter(Boolean);
+  if (!urls.length) { alert('At least one URL is required'); return; }
+
+  // If the user listed Search terms, rebuild the URLs as one-per-term off the first search
+  // URL (each term still gets explored multiple ways per sweep by the sort/filter rotation).
+  const termList = document.getElementById('f-terms').value.split(',').map(t => t.trim()).filter(Boolean);
+  if (termList.length) {
+    const built = wwBuildSearchUrls(urls[0], termList);
+    if (built && built.length) urls = built;
+    else alert("The first URL isn't a keyword-search URL, so I kept your URLs as-is and ignored the search terms.");
+  }
+
+  const instruction = document.getElementById('f-instruction').value.trim();
+  if (!instruction) { alert('Instruction is required'); return; }
+
+  const cron = document.getElementById('f-cron').value.trim();
+  const interval = parseInt(document.getElementById('f-interval').value) || null;
+  const model = document.getElementById('f-model').value.trim() || null;
+  const mode = document.getElementById('f-mode').value;
+
+  const body = {
+    name,
+    enabled:           document.getElementById('f-enabled').checked,
+    urls,
+    instruction,
+    perception:        document.getElementById('f-perception').value,
+    notify: {
+      telegram: document.getElementById('f-tg').checked,
+      email:    document.getElementById('f-email').checked,
+    },
+    model_override:  model,
+    autonomous:      document.getElementById('f-autonomous').checked,
+    max_agent_steps: parseInt(document.getElementById('f-max-steps').value) || 15,
+    click_path: [],
+    mode,
+  };
+
+  if (mode === 'continuous') {
+    // Continuous watches have no timer; they run a perpetual sweep loop.
+    body.continuous_scroll_passes    = parseInt(document.getElementById('f-cont-scroll').value) || 4;
+    body.continuous_idle_seconds     = parseInt(document.getElementById('f-cont-idle').value) || 45;
+    body.continuous_max_alerts       = parseInt(document.getElementById('f-cont-maxalerts').value) || 8;
+    body.continuous_search_variation = document.getElementById('f-cont-variation').checked;
+    body.use_login_profile           = document.getElementById('f-login-profile').checked;
+  } else if (cron) {
+    body.cron_expression = cron;
+  } else {
+    body.interval_minutes = interval || 30;
+  }
+
+  const method = editingWatchName ? 'PUT' : 'POST';
+  const url    = editingWatchName
+    ? `/api/watches/${encodeURIComponent(editingWatchName)}`
+    : '/api/watches';
+
+  try {
+    await api(url, { method, body: JSON.stringify(body) });
+    closeModal();
+    loadWatches();
+  } catch(e) { alert(`Save failed: ${e.message}`); }
+}
+
+// ============================================================ HISTORY
+function populateHistoryFilter() {
+  const sel = document.getElementById('history-filter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All watches</option>';
+  watchNames.forEach(n => {
+    const opt = document.createElement('option');
+    opt.value = n; opt.textContent = n;
+    if (n === current) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+async function loadHistory() {
+  const body = document.getElementById('history-body');
+  const watch = document.getElementById('history-filter').value;
+  const url = '/api/history' + (watch ? `?watch=${encodeURIComponent(watch)}&limit=100` : '?limit=100');
+  try {
+    const rows = await api(url);
+    if (!rows.length) {
+      body.innerHTML = '<div class="empty-state">No history yet — run a watch to see results here.</div>';
+      return;
+    }
+    body.innerHTML = `
+      <table>
+        <thead><tr><th>Time</th><th>Watch</th><th>Found</th><th>Confidence</th><th>Summary / Error</th></tr></thead>
+        <tbody>
+        ${rows.map(r => {
+          const ts = new Date(r.run_timestamp).toLocaleString();
+          const foundCell = r.error
+            ? `<span class="found-err">Error</span>`
+            : r.found ? `<span class="found-yes">Found</span>` : `<span class="found-no">—</span>`;
+          const confClass = {high:'conf-high',medium:'conf-medium',low:'conf-low'}[r.confidence] || '';
+          const detail = r.error || r.summary || '—';
+          const wn = r.watch_name.replace(/'/g, "\\'");
+          const tsRaw = r.run_timestamp ? r.run_timestamp.replace(/'/g,"\\'") : '';
+          return `<tr style="cursor:pointer" title="View notification preview" onclick="showNotifForRun(${r.id},'${wn}','${tsRaw}')">
+            <td style="white-space:nowrap;color:var(--dim)">${ts}</td>
+            <td>${r.watch_name}</td>
+            <td>${foundCell}</td>
+            <td class="${confClass}">${(r.confidence||'—').toUpperCase()}</td>
+            <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detail}">${detail}</td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    body.innerHTML = `<div class="empty-state" style="color:var(--red)">Failed to load history: ${e.message}</div>`;
+  }
+}
+
+// ============================================================ THE WATCHER — chat rendering
+// Shared render helpers (also used by the dock). appendMsg/cards default to the dock's
+// conversation container.
+function appendMsg(role, content, boxId = 'dock-convo') {
+  const box = document.getElementById(boxId);
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.textContent = content;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  if (boxId === 'dock-convo') _growDockWidth();
+  return div;
+}
+
+function appendWatchCard(suggestion, boxId = 'dock-convo') {
+  const box = document.getElementById(boxId);
+  const card = document.createElement('div');
+  card.className = 'msg assistant';
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const isUpdate = suggestion.action === 'update';
+  const scheduleText = suggestion.mode === 'continuous'
+    ? 'continuous (always-on sweep)'
+    : (suggestion.interval_minutes ? `every ${suggestion.interval_minutes} min`
+        : (suggestion.cron_expression ? `cron: ${suggestion.cron_expression}` : ''));
+  const extras = [];
+  if (suggestion.mode === 'continuous') extras.push('continuous');
+  if (suggestion.use_login_profile) extras.push('logged-in (Facebook)');
+  if (suggestion.judgment_prompt) extras.push('judgment filter');
+  const verb = isUpdate ? 'Update' : 'Create';
+  // Show the search TERMS (decoded from the query params), not a wall of 8 long URLs —
+  // that wall was what squished the card. Falls back to the raw URLs if we can't decode.
+  const urls = suggestion.urls || [];
+  const terms = urls.map(u => {
+    try { const q = new URL(u).searchParams; return decodeURIComponent(q.get('query') || q.get('q') || q.get('_nkw') || q.get('keywords') || ''); }
+    catch (e) { return ''; }
+  }).filter(Boolean);
+  const site = (() => { try { return new URL(urls[0]).hostname.replace(/^www\./, ''); } catch (e) { return ''; } })();
+  const searchLine = terms.length
+    ? `<span>${esc(terms.join(' · '))}${site ? ` <span style="color:var(--dim)">on ${esc(site)}</span>` : ''}</span>`
+    : `<span>${esc(urls.join(' '))}</span>`;
+  const searchLabel = terms.length ? `Searches (${terms.length})` : 'URL';
+  card.innerHTML = `
+    <div class="watch-card">
+      <h4>${isUpdate ? '✏️ Edit: ' : ''}${esc(suggestion.name)}</h4>
+      <div class="kv"><span class="k">${searchLabel}</span>${searchLine}</div>
+      <div class="kv"><span class="k">Instruction</span><span>${suggestion.instruction||''}</span></div>
+      <div class="kv"><span class="k">Schedule</span><span>${scheduleText}</span></div>
+      <div class="kv"><span class="k">Perception</span><span>${suggestion.perception||'auto'}</span></div>
+      ${extras.length ? `<div class="kv"><span class="k">Options</span><span>${extras.join(' · ')}</span></div>` : ''}
+      <div class="actions">
+        <button class="success" onclick="createWatchFromSuggestion(${JSON.stringify(suggestion).replace(/"/g,'&quot;')}, this, '${boxId}')">
+          ${verb} this watch
+        </button>
+        <button onclick="editSuggestionInModal(${JSON.stringify(suggestion).replace(/"/g,'&quot;')})">
+          Edit before ${isUpdate ? 'saving' : 'creating'}
+        </button>
+      </div>
+    </div>`;
+  box.appendChild(card);
+  box.scrollTop = box.scrollHeight;
+}
+
+// Open the suggestion in the watch modal for manual tweaks before saving. For an
+// "update" suggestion, route through editWatch() so the modal is in edit mode
+// (name locked, save issues a PUT) — otherwise saving would POST and 409 on the
+// existing name.
+function editSuggestionInModal(suggestion) {
+  if (suggestion.action === 'update') {
+    editWatch(suggestion);
+  } else {
+    openWatchModal(suggestion);
+  }
+}
+
+// Apply an assistant watch suggestion. Passes the WHOLE suggestion through (the
+// backend Watch model fills any missing field with its default) rather than
+// hand-picking a few fields — so mode, continuous_*, judgment_prompt,
+// use_login_profile, autonomous, cron, etc. are never silently dropped. Honors
+// action:"update" by issuing a PUT to the existing watch instead of a POST.
+async function createWatchFromSuggestion(suggestion, btn, boxId = 'dock-convo') {
+  const isUpdate = suggestion.action === 'update';
+  btn.disabled = true;
+  btn.textContent = isUpdate ? 'Updating...' : 'Creating...';
+  try {
+    const body = Object.assign({
+      enabled:        true,
+      notify:         { telegram: true, email: true },
+      click_path:     [],
+      model_override: null,
+    }, suggestion);
+    delete body.action;   // not a Watch field
+    body.urls = suggestion.urls || [];
+
+    if (isUpdate) {
+      await api('/api/watches/' + encodeURIComponent(suggestion.name),
+                { method: 'PUT', body: JSON.stringify(body) });
+      btn.textContent = 'Updated!';
+      appendMsg('assistant', `Watch "${suggestion.name}" has been updated.`, boxId);
+    } else {
+      await api('/api/watches', { method: 'POST', body: JSON.stringify(body) });
+      btn.textContent = 'Created!';
+      appendMsg('assistant', `Watch "${suggestion.name}" has been created`
+        + (suggestion.mode === 'continuous'
+            ? ' — open the Watches tab and press Start to begin the always-on sweep.'
+            : ' and scheduled.'), boxId);
+    }
+    btn.className = 'success';
+    if (activeTab === 'watches') loadWatches();
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = (isUpdate ? 'Update' : 'Create') + ' this watch';
+    appendMsg('assistant', `Could not ${isUpdate ? 'update' : 'create'} the watch: ${e.message}`, boxId);
+  }
+}
+
+// Render the rows returned for a listing_query as a compact result list.
+function appendListingResults(rows, boxId = 'dock-convo') {
+  const box = document.getElementById(boxId);
+  const card = document.createElement('div');
+  card.className = 'msg assistant';
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  if (!rows.length) {
+    card.innerHTML = `<div class="watch-card"><em>No matching listings found yet.</em></div>`;
+    box.appendChild(card); box.scrollTop = box.scrollHeight; return;
+  }
+  const fmtPrice = (r) => r.price_value != null ? '$' + Number(r.price_value).toLocaleString()
+                                                : (r.price_text || '');
+  const attrs = (r) => [
+    r.year, r.mileage != null ? Number(r.mileage).toLocaleString() + ' mi' : null,
+    r.transmission, r.drivetrain,
+  ].filter(Boolean).join(' · ');
+  const items = rows.slice(0, 50).map(r => `
+    <div class="kv" style="align-items:flex-start">
+      <span class="k" style="min-width:64px">${esc(fmtPrice(r))}</span>
+      <span>
+        <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title || '(untitled)')}</a>
+        ${r.dup_count > 1 ? `<span class="badge dupe" title="duplicate posts of this item">×${r.dup_count} dupes</span>` : ''}
+        ${r.matched ? `<span class="badge match">match</span>` : ''}
+        ${attrs(r) ? `<div class="msg-stats">${esc(attrs(r))}</div>` : ''}
+      </span>
+    </div>`).join('');
+  card.innerHTML = `<div class="watch-card">
+      <h4>${rows.length} listing${rows.length===1?'':'s'}</h4>${items}
+    </div>`;
+  box.appendChild(card);
+  box.scrollTop = box.scrollHeight;
+}
+
+// Render proposed lifecycle actions (delete/enable/disable/start/stop) as a single
+// confirmation card — nothing runs until the user clicks Confirm (delete is destructive).
+function appendWatchActionsCard(actions, boxId = 'dock-convo') {
+  const box = document.getElementById(boxId);
+  const card = document.createElement('div');
+  card.className = 'msg assistant';
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const verbClass = (a) => a === 'delete' ? 'danger' : '';
+  const rows = actions.map(a =>
+    `<div class="kv"><span class="k" style="text-transform:capitalize">${esc(a.action)}</span>` +
+    `<span>${esc(a.name)}</span></div>`).join('');
+  const hasDelete = actions.some(a => a.action === 'delete');
+  card.innerHTML = `
+    <div class="watch-card">
+      <h4>Confirm ${actions.length} change${actions.length===1?'':'s'}</h4>
+      ${rows}
+      <div class="actions">
+        <button class="${hasDelete ? 'danger' : 'success'}" id="wa-confirm">Confirm</button>
+        <button id="wa-cancel">Cancel</button>
+      </div>
+    </div>`;
+  box.appendChild(card);
+  box.scrollTop = box.scrollHeight;
+
+  const confirmBtn = card.querySelector('#wa-confirm');
+  card.querySelector('#wa-cancel').onclick = () => {
+    card.querySelector('.actions').innerHTML = '<span class="msg-stats">Cancelled.</span>';
+  };
+  confirmBtn.onclick = async () => {
+    confirmBtn.disabled = true; confirmBtn.textContent = 'Working…';
+    const results = [];
+    for (const a of actions) {
+      const name = encodeURIComponent(a.name);
+      try {
+        if (a.action === 'delete')       await api(`/api/watches/${name}`, { method:'DELETE' });
+        else if (a.action === 'enable')  await api(`/api/watches/${name}/enabled`, { method:'POST', body: JSON.stringify({enabled:true}) });
+        else if (a.action === 'disable') await api(`/api/watches/${name}/enabled`, { method:'POST', body: JSON.stringify({enabled:false}) });
+        else if (a.action === 'start')   await api(`/api/watches/${name}/continuous/start`, { method:'POST' });
+        else if (a.action === 'stop')    await api(`/api/watches/${name}/continuous/stop`, { method:'POST' });
+        results.push(`✓ ${a.action} ${a.name}`);
+      } catch(e) {
+        results.push(`✗ ${a.action} ${a.name}: ${e.message}`);
+      }
+    }
+    card.querySelector('.actions').innerHTML =
+      `<span class="msg-stats">${results.map(esc).join('<br>')}</span>`;
+    if (activeTab === 'watches') loadWatches();
+  };
+}
+
+// ============================================================ NOTIFICATIONS
+function showNotifForRun(runId, watchName, timestamp) {
+  currentRunId = runId;
+  const pin = document.getElementById('notif-pin');
+  const pinLabel = document.getElementById('notif-pin-label');
+  const ts = timestamp ? new Date(timestamp).toLocaleString() : '';
+  pinLabel.textContent = `Pinned to run: ${watchName}${ts ? ' · ' + ts : ''}`;
+  pin.style.display = 'flex';
+  // Render the alert preview inline within the Activity tab (no longer a separate tab).
+  document.getElementById('notif-section').style.display = 'block';
+  loadNotifPreview();
+  document.getElementById('notif-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function populateNotifFilter() {
+  const sel = document.getElementById('notif-watch-select');
+  if (!sel) return;                       // removed in the merged Activity tab
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Most recent run (any watch)</option>';
+  watchNames.forEach(n => {
+    const opt = document.createElement('option');
+    opt.value = n; opt.textContent = n;
+    if (n === current) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+async function loadNotifPreview() {
+  const sel = document.getElementById('notif-watch-select');   // removed in the merged UI
+  const watch = sel ? sel.value : '';
+  const section = document.getElementById('notif-section');
+  if (section) section.style.display = 'block';
+  let url = '/api/notifications/preview';
+  if (currentRunId)       url += `?run_id=${currentRunId}`;
+  else if (watch)         url += `?watch=${encodeURIComponent(watch)}`;
+  const meta     = document.getElementById('notif-meta');
+  const empty    = document.getElementById('notif-empty');
+  const previews = document.getElementById('notif-previews');
+  try {
+    const d = await api(url);
+    if (!d.html) {
+      meta.style.display = 'none';
+      empty.style.display = 'block';
+      previews.style.display = 'none';
+      return;
+    }
+    meta.style.display = 'block';
+    empty.style.display = 'none';
+    previews.style.display = 'grid';
+
+    document.getElementById('notif-run-time').textContent = new Date(d.run_timestamp).toLocaleString();
+
+    const foundBadge = document.getElementById('notif-found-badge');
+    foundBadge.textContent = d.found ? 'Match found' : 'No match';
+    foundBadge.className = 'badge ' + (d.found ? 'enabled' : 'disabled');
+
+    const confBadge = document.getElementById('notif-conf-badge');
+    const confClass = {high:'conf-high', medium:'conf-medium', low:'conf-low'}[d.confidence] || '';
+    confBadge.textContent = d.confidence ? d.confidence.toUpperCase() + ' confidence' : '';
+    confBadge.className = confClass;
+
+    const tgBadge = document.getElementById('notif-tg-status');
+    tgBadge.textContent = d.telegram_configured ? '✓ Telegram ready' : '⚠ Telegram not set up';
+    tgBadge.className = 'notif-channel-badge ' + (d.telegram_configured ? 'ok' : 'warn');
+
+    const emBadge = document.getElementById('notif-em-status');
+    emBadge.textContent = d.email_configured ? '✓ Email ready' : '⚠ Email not set up';
+    emBadge.className = 'notif-channel-badge ' + (d.email_configured ? 'ok' : 'warn');
+
+    document.getElementById('notif-screenshot-note').style.display = d.has_screenshot ? 'block' : 'none';
+    document.getElementById('notif-subject').textContent = d.subject;
+
+    const frame = document.getElementById('notif-email-frame');
+    frame.srcdoc = d.html;
+
+    document.getElementById('notif-tg-text').textContent = d.telegram;
+  } catch(e) {
+    empty.style.display = 'block';
+    empty.textContent = `Failed to load preview: ${e.message}`;
+    meta.style.display = 'none';
+    previews.style.display = 'none';
+  }
+}
+
+// ============================================================ ACCESSIBILITY
+const _ZOOM = {small: 0.85, normal: 1, large: 1.2, xlarge: 1.4, xxlarge: 1.6, huge: 1.85};
+
+let _currentZoom = 1;   // last applied zoom — re-applied to the native window once the pywebview bridge is ready
+function setFontSize(size) {
+  const zoom = _ZOOM[size] ?? 1;
+  _currentZoom = zoom;
+  document.body.style.zoom = zoom;
+  document.documentElement.style.setProperty('--zoom', zoom);
+  localStorage.setItem('ww-font-size', size);
+  ['small','normal','large','xlarge','xxlarge','huge'].forEach(s => {
+    document.getElementById('fs-' + s)?.classList.toggle('primary', s === size);
+  });
+  // Size the NATIVE window to fit the chosen text size — but only when it isn't maximized
+  // (the Python side skips a maximized window so we never fight it). Scaling itself is still
+  // pure CSS zoom + --zoom counter-scaling; this just gives the layout a right-sized window.
+  _resizeNativeWindow(zoom);
+}
+
+function _resizeNativeWindow(zoom) {
+  try {
+    if (window.pywebview && window.pywebview.api && window.pywebview.api.resize_for_zoom) {
+      window.pywebview.api.resize_for_zoom(zoom);
+    }
+  } catch (e) { /* running in a plain browser / preview — no native window to size */ }
+}
+// The pywebview bridge isn't ready at boot, so the initial setFontSize can't resize yet.
+// Re-apply the current zoom to the window once the bridge announces itself.
+window.addEventListener('pywebviewready', () => _resizeNativeWindow(_currentZoom));
+
+function loadAccessibilitySettings() {
+  // Default to the LARGEST size — the app ships to users who find small text hard to read.
+  // A saved preference (any size, set via the A buttons) always wins on return visits.
+  setFontSize(localStorage.getItem('ww-font-size') || 'xlarge');
+}
+
+// ============================================================ ORCHESTRATOR
+async function setOrchestrator(on) {
+  try {
+    const r = await api('/api/orchestrator/' + (on ? 'start' : 'stop'), { method: 'POST' });
+    _applyOrchState(r.running);
+    loadOversight();   // surface The Watcher's "taking the wheel" line right away
+  } catch (e) {
+    _applyOrchState(!on);   // revert the toggle on failure
+  }
+}
+let _orchRunning = false;   // is The Watcher currently driving the watches?
+function _applyOrchState(running) {
+  _orchRunning = !!running;
+  const chk = document.getElementById('orch-chk');
+  const track = document.getElementById('orch-track');
+  const label = document.getElementById('orch-label');
+  if (chk) chk.checked = !!running;
+  if (track) running ? track.classList.add('on') : track.classList.remove('on');
+  if (label) { label.textContent = running ? 'On' : 'Off'; label.style.color = running ? 'var(--green)' : 'var(--dim)'; }
+  // The Start/Stop run buttons — the always-accessible run control (dock + Watches panel).
+  ['dock-run-btn', 'watches-run-btn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.textContent = running ? '⏸ Stop watching' : '▶ Start watching';
+      btn.className = running ? 'danger' : 'success';
+      btn.disabled = false;
+    }
+  });
+}
+// Toggle The Watcher driving the watches (Start/Stop button — dock + Watches panel; mirrors
+// the Settings toggle). All three controls reflect the one state via _applyOrchState.
+async function toggleWatcherRun() {
+  ['dock-run-btn', 'watches-run-btn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) { btn.disabled = true; btn.textContent = _orchRunning ? 'Stopping…' : 'Starting…'; }
+  });
+  await setOrchestrator(!_orchRunning);
+}
+async function loadOrchestrator() {
+  try {
+    const s = await api('/api/orchestrator');
+    _applyOrchState(s.running);
+    const cur = document.getElementById('orch-current');
+    if (cur) cur.textContent = (s.running && s.current) ? `Currently checking: ${s.current}` : '';
+  } catch (_) {}
+}
+
+// ============================================================ BROWSER SETTINGS
+async function loadBrowserSettings() {
+  try {
+    const s = await api('/api/browser');
+    _applyBrowserSettings(s.headless, s.stealth, s.show_agent_cursor);
+  } catch(_) {}
+}
+
+function _applyBrowserSettings(headless, stealth, cursor) {
+  const track = document.getElementById('browser-visible-track');
+  const label = document.getElementById('browser-visible-label');
+  const chk   = document.getElementById('browser-visible-chk');
+  const stealthChk   = document.getElementById('stealth-chk');
+  const stealthTrack = document.getElementById('stealth-track');
+  const stealthLabel = document.getElementById('stealth-label');
+  if (stealthChk) stealthChk.checked = !!stealth;
+  if (stealthTrack) { stealth ? stealthTrack.classList.add('on') : stealthTrack.classList.remove('on'); }
+  if (stealthLabel) stealthLabel.textContent = stealth ? 'On' : 'Off';
+  if (cursor !== undefined) {
+    const cChk = document.getElementById('cursor-chk');
+    const cTrack = document.getElementById('cursor-track');
+    const cLabel = document.getElementById('cursor-label');
+    if (cChk) cChk.checked = !!cursor;
+    if (cTrack) { cursor ? cTrack.classList.add('on') : cTrack.classList.remove('on'); }
+    if (cLabel) cLabel.textContent = cursor ? 'On' : 'Off';
+  }
+  if (!headless) {
+    track.classList.add('on');
+    chk.checked = true;
+    label.textContent = 'Visible';
+    label.style.color = 'var(--green)';
+  } else {
+    track.classList.remove('on');
+    chk.checked = false;
+    label.textContent = 'Headless';
+    label.style.color = 'var(--dim)';
+  }
+}
+
+async function setBrowserVisible(visible) {
+  const headless = !visible;
+  const stealth  = document.getElementById('stealth-chk')?.checked ?? true;
+  try {
+    const s = await api('/api/browser', {method:'POST', body:JSON.stringify({headless, stealth})});
+    _applyBrowserSettings(s.headless, s.stealth, s.show_agent_cursor);
+  } catch(e) { console.error('browser setting failed', e); }
+}
+
+async function setStealth(val) {
+  const headless = !document.getElementById('browser-visible-chk').checked;
+  try {
+    const s = await api('/api/browser', {method:'POST', body:JSON.stringify({headless, stealth: val})});
+    _applyBrowserSettings(s.headless, s.stealth, s.show_agent_cursor);
+  } catch(e) { console.error('stealth setting failed', e); }
+}
+
+async function setAgentCursor(val) {
+  try {
+    const s = await api('/api/browser', {method:'POST', body:JSON.stringify({show_agent_cursor: val})});
+    _applyBrowserSettings(s.headless, s.stealth, s.show_agent_cursor);
+  } catch(e) { console.error('cursor setting failed', e); }
+}
+
+// ============================================================ FACEBOOK CONNECT
+let _fbPoll = null;
+async function connectFacebook() {
+  const btn = document.getElementById('fb-connect-btn');
+  const status = document.getElementById('fb-connect-status');
+  try {
+    await api('/api/connect/facebook', {method:'POST'});
+    btn.disabled = true;
+    status.textContent = 'Opening browser — log into Facebook, then close the window.';
+    if (_fbPoll) clearInterval(_fbPoll);
+    _fbPoll = setInterval(async () => {
+      try {
+        const s = await api('/api/connect/facebook');   // GET status
+        if (s.status === 'waiting_for_login') {
+          status.textContent = 'Waiting — log in, then close the browser window.';
+        } else if (s.status === 'done') {
+          status.textContent = '✓ Connected. Watches using the login profile will reuse this session.';
+          status.style.color = 'var(--green)';
+          btn.disabled = false;
+          clearInterval(_fbPoll); _fbPoll = null;
+        } else if (s.status === 'error') {
+          status.textContent = '✗ Connection failed — see logs. Make sure no watch is using the profile.';
+          status.style.color = 'var(--red)';
+          btn.disabled = false;
+          clearInterval(_fbPoll); _fbPoll = null;
+        }
+      } catch(_) {}
+    }, 2000);
+  } catch(e) {
+    status.textContent = `Could not start: ${e.message}`;
+    btn.disabled = false;
+  }
+}
+
+// ============================================================ POLLING
+pollServices();
+setInterval(pollServices, POLL_MS);
+setTimeout(hideSplash, 12000);   // safety: never leave the splash stuck if status fails
+
+// Fetch version + browser settings once on load
+api('/api/health').then(h => {
+  if (h.version) {
+    const el  = document.getElementById('hdr-version');
+    const v   = h.version;
+    const pre = /alpha|beta|rc/i.test(v);
+    el.textContent = 'v' + v;
+    if (pre) {
+      el.style.cssText = 'font-size:10px;font-weight:700;background:var(--blue);color:#fff;padding:2px 7px;border-radius:10px;margin-left:8px;vertical-align:middle;letter-spacing:.3px';
+    } else {
+      el.style.cssText = 'font-size:12px;font-weight:400;color:var(--dim);margin-left:6px;vertical-align:middle';
+    }
+  }
+}).catch(() => {});
+loadBrowserSettings();
+loadAccessibilitySettings();
+loadWatches();          // Watches is home — load it + The Watcher's ambient feed on boot
+loadOversight();        // (the dock's conversation loads lazily the first time it's opened)
+loadOrchestrator();     // reflect whether The Watcher is currently driving
+_initDockResize();      // top grip resizes the whole chat window (auto-grows with content otherwise)
+_initDockResizeX();     // left grip resizes the width (auto-grows to fit wide content otherwise)
+</script>
+</body>
+</html>

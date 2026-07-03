@@ -1,0 +1,32 @@
+# Web Watcher configuration template.
+# Copy this to config.yaml (the installer does this on first run). config.yaml is
+# git-ignored because it holds your personal watches and notification credentials.
+
+notifications:
+  telegram:
+    bot_token: ''        # from @BotFather; leave blank to disable Telegram alerts
+    chat_id: ''
+  email:
+    smtp_server: smtp.gmail.com
+    smtp_port: 587
+    from_address: ''     # your sending address
+    app_password: ''     # an app password, NOT your login password
+    to_address: ''       # where alerts are sent
+
+models:
+  text_model: qwen2.5:14b     # the installer picks a tier-appropriate default
+  vision_model: qwen2.5vl:7b
+  council_model: qwen2.5:14b  # blank = reuse text_model
+  ocr_threshold: 200
+
+browser:
+  headless: true         # false = show the browser so you can watch the agent work
+  stealth: true
+  show_agent_cursor: false
+  profile_dir: null      # persistent login profile dir (for sites needing sign-in)
+
+# Cross-watch matching: a listing one watch stumbles on is offered to your other watches.
+cross_watch_matching: true
+
+# No watches by default — create them from the dashboard (or ask The Watcher in chat).
+watches: []

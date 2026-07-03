@@ -15,6 +15,7 @@ own running files are never mid-flight when they're replaced.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RESTART_FLAG = ROOT / "updates" / "RESTART_REQUESTED"
 RESET_FLAG   = ROOT / "updates" / "RESET_REQUESTED"
+
+
+def _child_python() -> str:
+    """Prefer pythonw.exe so the app runs windowless (no console flash) when started from a
+    shortcut. Falls back to whatever launched us."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "python.exe":
+        cand = exe.with_name("pythonw.exe")
+        if cand.exists():
+            return str(cand)
+    return str(exe)
+
+
+def _run_app() -> int:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    return subprocess.run([_child_python(), "-m", "web_watcher.main"],
+                          cwd=str(ROOT), creationflags=flags).returncode
 
 
 def _apply_pending() -> None:
@@ -55,7 +73,7 @@ def _do_reset(root: Path = ROOT) -> None:
 def main() -> int:
     while True:
         _apply_pending()
-        proc = subprocess.run([sys.executable, "-m", "web_watcher.main"], cwd=str(ROOT))
+        code = _run_app()
         # A fresh-install reset takes priority, then an update-and-restart. Both close the
         # window and drop a flag on the way out; we act on it here, then relaunch.
         if RESET_FLAG.exists():
@@ -67,7 +85,7 @@ def main() -> int:
             RESTART_FLAG.unlink(missing_ok=True)
             print("  Restarting to apply update…")
             continue
-        return proc.returncode
+        return code
 
 
 if __name__ == "__main__":

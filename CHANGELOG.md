@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.17.2-alpha] — 2026-07-02 (Consolidated start methods: Desktop + Start Menu only)
+
+### Changed
+- **The only ways to start Web Watcher are now a Desktop shortcut and a Start Menu entry** — both
+  launch it **windowless** (`pythonw launcher.py`, no console flash). Replaced the installer's optional
+  "start at Windows login" Task Scheduler registration (`register_startup`) with `create_shortcuts`,
+  which creates both shortcuts (resolving the OneDrive-redirected Desktop correctly) and removes any
+  legacy auto-start task from older installs. `launcher.py` now runs the app via `pythonw` +
+  `CREATE_NO_WINDOW`. Flag renamed `--skip-startup` → `--skip-shortcuts` (old name kept as an alias).
+
+---
+
 ## [0.17.1-alpha] — 2026-07-02 (Reset to a fresh install)
 
 ### Added

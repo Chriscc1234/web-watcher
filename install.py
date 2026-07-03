@@ -11,7 +11,8 @@ Options
 --skip-models       Skip model pulls (useful for dev re-runs when models are
                     already present).
 --skip-playwright   Skip Playwright Chromium install.
---skip-startup      Skip Windows startup registration prompt.
+--skip-shortcuts    Skip creating the Desktop + Start Menu shortcuts.
+                    (--skip-startup is kept as an alias.)
 --tier NAME         Override tier (48GB+, 24GB, 16GB, 8-12GB, 6GB, CPU). Skips GPU probe.
 --no-validate       Skip post-pull inference validation.
 --yes               Accept all prompts non-interactively (credentials stay blank).
@@ -436,40 +437,54 @@ def write_config(tier: "TierInfo", args) -> None:
         info("You can edit config.yaml manually after installation.")
 
 
-def register_startup(args) -> None:
+def create_shortcuts(args) -> None:
+    """Create the ONLY two ways to start Web Watcher: a Desktop shortcut and a Start Menu
+    entry. Both launch it windowless (pythonw launcher.py) so there's no console flash. Also
+    removes any legacy auto-start-at-login Task Scheduler entry from older installs — the app
+    should start when the user asks, not on boot."""
     total_step = TOTAL_STEPS
-    step(total_step, total_step, "Windows startup registration (optional)")
-
-    if args.yes:
-        info("--yes: skipping startup registration")
-        return
+    step(total_step, total_step, "Desktop + Start Menu shortcuts")
 
     if platform.system() != "Windows":
-        info("Not on Windows — skipping Task Scheduler registration")
+        info("Not on Windows — skipping shortcut creation")
         return
 
-    answer = input("    Register Web Watcher to start on Windows login? [y/N]: ").strip().lower()
-    if answer not in ("y", "yes"):
-        info("Skipped — you can run start.bat manually whenever you want the app")
-        return
+    # Clean up the old auto-start-at-login task if a previous install created one.
+    subprocess.run(["schtasks", "/delete", "/tn", "WebWatcher", "/f"],
+                   capture_output=True)
 
-    start_bat = ROOT / "start.bat"
-    task_name = "WebWatcher"
-    cmd = [
-        "schtasks", "/create",
-        "/tn",  task_name,
-        "/tr",  f'"{start_bat}"',
-        "/sc",  "ONLOGON",
-        "/rl",  "HIGHEST",
-        "/f",          # overwrite if exists
-    ]
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    target = str(pyw if pyw.exists() else sys.executable)
+    launcher = str(ROOT / "launcher.py")
+    icon = str(pyw if pyw.exists() else sys.executable)
+
+    def q(s: str) -> str:            # PowerShell single-quote escaping
+        return s.replace("'", "''")
+
+    # Resolve Desktop + Start Menu via the shell (handles OneDrive-redirected Desktop) and
+    # create both shortcuts in one PowerShell call.
+    ps = (
+        "$W = New-Object -COM WScript.Shell;"
+        "$targets = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'));"
+        "foreach ($d in $targets) {"
+        "  $lnk = Join-Path $d 'Web Watcher.lnk';"
+        "  $s = $W.CreateShortcut($lnk);"
+        f"  $s.TargetPath = '{q(target)}';"
+        f"  $s.Arguments = '\"{q(launcher)}\"';"
+        f"  $s.WorkingDirectory = '{q(str(ROOT))}';"
+        f"  $s.IconLocation = '{q(icon)},0';"
+        "  $s.Description = 'Web Watcher';"
+        "  $s.Save();"
+        "}"
+    )
     try:
-        _run(cmd, capture_output=True)
-        ok(f"Task Scheduler entry created: {task_name}")
-        info("Web Watcher will start automatically at next login.")
+        _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+             capture_output=True)
+        ok("Desktop and Start Menu shortcuts created")
+        info("Start Web Watcher from the Desktop icon or the Start Menu.")
     except subprocess.CalledProcessError as exc:
-        warn("schtasks failed — you can add start.bat to Startup manually")
-        info(f"  Error: {exc.stderr.decode(errors='ignore').strip()[:200]}")
+        warn("Could not create shortcuts automatically")
+        info(f"  {exc.stderr.decode(errors='ignore').strip()[:200] if exc.stderr else ''}")
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +495,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Web Watcher Installer")
     p.add_argument("--skip-models",    action="store_true")
     p.add_argument("--skip-playwright", action="store_true")
-    p.add_argument("--skip-startup",   action="store_true")
+    p.add_argument("--skip-shortcuts", "--skip-startup", dest="skip_shortcuts",
+                   action="store_true")
     p.add_argument("--tier",           default=None,
                    help="Override tier: '48GB+', '24GB', '16GB', '8-12GB', '6GB', 'CPU'")
     p.add_argument("--no-validate",    action="store_true")
@@ -494,8 +510,8 @@ def _compute_steps(args) -> int:
     n = 8  # base: python, deps, ollama, gpu, models, validate, playwright, config
     if args.no_validate or args.tier == "CPU":
         n -= 1  # skip validate step
-    if not args.skip_startup and platform.system() == "Windows":
-        n += 1  # startup registration
+    if not args.skip_shortcuts and platform.system() == "Windows":
+        n += 1  # shortcut creation
     return n
 
 
@@ -527,8 +543,8 @@ def main() -> None:
     install_playwright(skip=args.skip_playwright)
     write_config(tier, args)
 
-    if not args.skip_startup:
-        register_startup(args)
+    if not args.skip_shortcuts:
+        create_shortcuts(args)
 
     print()
     print(_c("1;32", "=" * 50))

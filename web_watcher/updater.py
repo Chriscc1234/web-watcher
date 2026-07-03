@@ -40,8 +40,8 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ── Source config (set once for your repo) ──────────────────────────────────
-GITHUB_OWNER = os.environ.get("WW_UPDATE_OWNER", "").strip()
+# ── Source config (your GitHub repo; env vars override for testing) ─────────
+GITHUB_OWNER = os.environ.get("WW_UPDATE_OWNER", "Chriscc1234").strip()
 GITHUB_REPO  = os.environ.get("WW_UPDATE_REPO", "web-watcher").strip()
 
 ROOT        = Path(__file__).resolve().parent.parent      # the app folder (holds web_watcher/)

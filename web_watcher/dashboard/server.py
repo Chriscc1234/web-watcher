@@ -806,6 +806,32 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "show_agent_cursor": cfg.browser.show_agent_cursor}
 
     # ------------------------------------------------------------------
+    # Auto-update
+    # ------------------------------------------------------------------
+
+    @app.get("/api/update/status")
+    def update_status():
+        """Current version + whether a newer release is downloaded and ready to apply."""
+        try:
+            return manager.update_status()
+        except Exception as exc:
+            return {"current": "", "available": None, "staged": False,
+                    "configured": False, "error": str(exc)}
+
+    @app.post("/api/update/check")
+    def update_check():
+        """Force an immediate check (+ download/stage if a newer release exists)."""
+        return manager.check_updates_now()
+
+    @app.post("/api/update/apply")
+    def update_apply():
+        """Apply the staged update: flag a restart and close the window so launcher.py swaps
+        the new code in and relaunches. 409 if nothing is staged."""
+        if manager.request_restart():
+            return {"ok": True, "restarting": True}
+        raise HTTPException(409, detail="No update is staged to apply.")
+
+    # ------------------------------------------------------------------
     # Notification preview
     # ------------------------------------------------------------------
 

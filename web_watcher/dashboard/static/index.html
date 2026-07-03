@@ -193,6 +193,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .thinking-wave span{display:inline-block;animation:twave 1s ease-in-out infinite}
 @keyframes twave{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-5px)}}
 .bounce-letter{display:inline-block;white-space:pre;animation:twave 1.1s ease-in-out infinite}
+.update-banner{display:flex;align-items:center;gap:12px;padding:9px 20px;font-size:13px;background:linear-gradient(90deg,#12385f,#0f2c4a);border-bottom:1px solid var(--border);color:#dbeafe}
 .watch-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-top:10px;font-size:12px}
 .watch-card h4{font-size:13px;font-weight:600;margin-bottom:6px}
 .watch-card .kv{display:flex;gap:8px;margin-bottom:3px;align-items:baseline}
@@ -230,6 +231,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   <button class="hdr-shutdown" onclick="shutdownAll()">Shutdown All</button>
   <span class="hdr-time" id="hdr-time"></span>
 </header>
+
+<div id="update-banner" class="update-banner" style="display:none">
+  <span style="font-size:15px">⬆️</span>
+  <span id="update-banner-text" style="flex:1"></span>
+  <button onclick="showUpdateNotes()" style="font-size:12px;padding:5px 10px">What's new</button>
+  <button class="success" onclick="applyUpdate(this)" style="font-size:12px;padding:5px 12px">Update &amp; restart</button>
+  <button onclick="dismissUpdateBanner()" title="Dismiss" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:18px;line-height:1">×</button>
+</div>
 
 <nav>
   <button class="active" onclick="showTab('watches',this)">Watches</button>
@@ -613,6 +622,49 @@ function showTab(name, btn) {
 // Refresh narration + the orchestrator run-state on every view (the dock's Start/Stop
 // button and launcher live on all tabs, so this can't be services-only).
 setInterval(() => { loadOversight(); loadOrchestrator(); }, 8000);
+
+// ---- Auto-update: poll status; show a banner when a newer release is downloaded + ready.
+let _updateInfo = null;
+async function pollUpdate() {
+  try {
+    const s = await api('/api/update/status');
+    const hv = document.getElementById('hdr-version');
+    if (hv && s.current) hv.textContent = 'v' + s.current;
+    const banner = document.getElementById('update-banner');
+    if (!banner) return;
+    if (s.staged && s.available && banner.dataset.dismissed !== '1') {
+      _updateInfo = s.available;
+      document.getElementById('update-banner-text').textContent =
+        `Version ${s.available.version} is ready to install.`;
+      banner.style.display = 'flex';
+    } else if (!s.staged) {
+      banner.style.display = 'none';
+    }
+  } catch (_) {}
+}
+function showUpdateNotes() {
+  if (!_updateInfo) return;
+  // Surface the changelog in the chat dock (nicer than an alert; it's already a scrollable log).
+  openWatcherDock();
+  appendMsg('assistant', `What's new in ${_updateInfo.version}:\n\n${_updateInfo.notes || '(no notes)'}`, 'dock-convo');
+}
+async function applyUpdate(btn) {
+  btn.disabled = true; btn.textContent = 'Restarting…';
+  try {
+    await api('/api/update/apply', { method: 'POST' });
+    document.getElementById('update-banner-text').textContent =
+      'Installing update and restarting… this window will close and reopen.';
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Update & restart';
+    alert('Could not apply the update: ' + e.message);
+  }
+}
+function dismissUpdateBanner() {
+  const b = document.getElementById('update-banner');
+  b.style.display = 'none'; b.dataset.dismissed = '1';
+}
+setInterval(pollUpdate, 60000);
+pollUpdate();
 
 // ============================================================ RESULTS
 async function loadResults() {

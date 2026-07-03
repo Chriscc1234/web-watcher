@@ -64,6 +64,11 @@ class ServiceManager:
         self._ollama_adopted  = False   # True when we adopted an existing instance
         # Facebook (login-profile) connect flow state, surfaced via get_statuses().
         self._fb_connect_status = "idle"  # idle | opening | waiting_for_login | done | error
+        # Auto-update state (populated by the background checker; surfaced via /api/update).
+        self._window          = None    # pywebview window — set by main.py, used to restart
+        self._update_available = None   # dict {version, notes} when a newer release is staged
+        self._update_thread:  Optional[threading.Thread] = None
+        self._update_stop     = threading.Event()
 
     # ------------------------------------------------------------------
     # Bulk lifecycle
@@ -73,11 +78,85 @@ class ServiceManager:
         self._start_ollama()    # first: scheduler needs Ollama available
         self._start_server()
         self._start_scheduler()
+        self._start_update_checker()
 
     def stop_all(self) -> None:
+        self._update_stop.set()
         self._stop_scheduler()
         self._stop_server()
         self._stop_ollama()     # last: don't kill Ollama while scheduler is live
+
+    # ------------------------------------------------------------------
+    # Auto-update (checks GitHub Releases; stages in the background; the UI
+    # notifies and a one-click restart applies it via launcher.py)
+    # ------------------------------------------------------------------
+
+    _UPDATE_CHECK_INTERVAL = 6 * 3600   # re-check every 6 hours
+    _UPDATE_CHECK_DELAY    = 25         # first check shortly after launch (let the UI settle)
+
+    def _start_update_checker(self) -> None:
+        def _loop():
+            # Check on launch (after a short delay) and then periodically.
+            if self._update_stop.wait(self._UPDATE_CHECK_DELAY):
+                return
+            while not self._update_stop.is_set():
+                try:
+                    self.check_updates_now()
+                except Exception as exc:
+                    log.debug("update check failed: %s", exc)
+                if self._update_stop.wait(self._UPDATE_CHECK_INTERVAL):
+                    return
+        self._update_thread = threading.Thread(target=_loop, daemon=True, name="ww-updater")
+        self._update_thread.start()
+
+    def check_updates_now(self) -> dict:
+        """Check GitHub for a newer release; if found, download + stage it so a one-click
+        restart can apply it. Returns the current update status. Safe to call anytime."""
+        from web_watcher import updater
+        from web_watcher.__version__ import __version__
+        # Already staged? then we're done — surface it.
+        staged = updater.pending_update()
+        if staged:
+            self._update_available = {"version": staged, "notes": (self._update_available or {}).get("notes", "")}
+            return self.update_status()
+        info = updater.check_for_update(__version__)
+        if info is None:
+            return self.update_status()
+        if updater.download_and_stage(info) is not None:
+            self._update_available = {"version": info.version, "notes": info.notes}
+            log.info("update %s staged and ready to apply", info.version)
+        return self.update_status()
+
+    def update_status(self) -> dict:
+        from web_watcher import updater
+        from web_watcher.__version__ import __version__
+        staged = updater.pending_update()
+        return {
+            "current":   __version__,
+            "available": self._update_available,     # {version, notes} or None
+            "staged":    bool(staged),               # downloaded + ready to apply on restart
+            "configured": bool(updater.GITHUB_OWNER),
+        }
+
+    def request_restart(self) -> bool:
+        """Flag a restart and close the window so launcher.py applies the staged update and
+        relaunches. Returns True if a staged update exists to apply."""
+        from web_watcher import updater
+        if not updater.pending_update():
+            return False
+        try:
+            updater.UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+            updater.RESTART_FLAG.write_text("1", encoding="utf-8")
+        except Exception as exc:
+            log.warning("could not write restart flag: %s", exc)
+            return False
+        # Closing the window triggers the normal shutdown; launcher sees the flag + relaunches.
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except Exception as exc:
+                log.debug("window destroy failed: %s", exc)
+        return True
 
     # ------------------------------------------------------------------
     # Individual service control (called by API routes)

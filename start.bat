@@ -6,7 +6,7 @@ echo  Web Watcher
 echo  -----------
 echo  Starting services and opening dashboard...
 echo.
-python -m web_watcher.main
+python launcher.py
 if %errorlevel% neq 0 (
     echo.
     echo  Web Watcher exited with an error. See output above.

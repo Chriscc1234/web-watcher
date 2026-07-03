@@ -164,6 +164,7 @@ def main() -> None:
         js_api=window_api,   # exposes window.pywebview.api.resize_for_zoom(zoom) to the UI
     )
     window_api.bind(window)
+    manager._window = window   # lets the update flow close+relaunch the app
 
     def _on_closed() -> None:
         log.info("Window closed — shutting down services")

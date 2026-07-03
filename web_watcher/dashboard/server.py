@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -841,6 +841,25 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             raise HTTPException(400, detail="Reset not confirmed.")
         manager.request_reset()
         return {"ok": True, "resetting": True}
+
+    # ------------------------------------------------------------------
+    # In-app console (the app runs windowless — this is the "shell window")
+    # ------------------------------------------------------------------
+
+    @app.post("/api/console/run")
+    def console_run(body: dict, request: Request):
+        """Run a shell command from the Console tab. Requires the app-only header
+        'X-WW-Console: 1' — a cross-site page can't set a custom header without a CORS
+        preflight (which this server doesn't allow), so a random website can't drive the
+        shell. Same-origin (the app's own UI) sets it and is fine."""
+        if request.headers.get("x-ww-console") != "1":
+            raise HTTPException(403, detail="Console commands must come from the app.")
+        return manager.console_run((body or {}).get("cmd", ""))
+
+    @app.get("/api/console/log")
+    def console_log(lines: int = 300):
+        """Tail of the current session log — so you can watch the app without a console window."""
+        return manager.tail_log(lines)
 
     # ------------------------------------------------------------------
     # Notification preview

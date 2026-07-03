@@ -245,6 +245,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   <button onclick="showTab('results',this)">Results</button>
   <button onclick="showTab('history',this)">Activity</button>
   <button onclick="showTab('services',this)">Settings</button>
+  <button onclick="showTab('console',this)">Console</button>
 </nav>
 
 <!-- ================================================================ SERVICES -->
@@ -351,6 +352,28 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
         <div style="font-size:12px;color:var(--dim)">Permanently erases <b>everything personal</b> — all watches, results, saved logins, chat history, and settings — and restarts the app like a brand-new install. The program itself (and the AI models) stay installed. This cannot be undone.</div>
       </div>
       <button id="reset-btn" onclick="factoryReset(this)" style="white-space:nowrap;background:#7f1d1d;border-color:#7f1d1d;color:#fff">Reset…</button>
+    </div>
+  </section>
+</div>
+
+<!-- ================================================================ CONSOLE -->
+<div id="tab-console" class="tab-panel">
+  <section>
+    <h2>Console</h2>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:8px">A shell for the app folder (it runs windowless, so this is your console). Commands run on this machine — <b>type carefully</b>. <code>cd</code> persists between commands.</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <button onclick="toggleLogTail(this)" id="log-tail-btn">▶ Live log</button>
+      <button onclick="clearConsole()">Clear</button>
+      <span class="spacer"></span>
+      <span id="console-cwd" style="font-size:11px;color:var(--dim);font-family:monospace"></span>
+    </div>
+    <pre id="console-out" style="background:#0b1220;border:1px solid var(--border);border-radius:6px;padding:12px;height:52vh;overflow:auto;font-family:Consolas,monospace;font-size:12px;color:#cbd5e1;white-space:pre-wrap;margin:0"></pre>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <span style="font-family:monospace;color:#4ade80;align-self:center">&gt;</span>
+      <input id="console-in" type="text" autocomplete="off" spellcheck="false"
+             placeholder="e.g. python -m pytest -q   ·   dir   ·   git status"
+             style="flex:1;font-family:monospace" onkeydown="if(event.key==='Enter')runConsole()">
+      <button class="success" onclick="runConsole()">Run</button>
     </div>
   </section>
 </div>
@@ -623,6 +646,7 @@ function showTab(name, btn) {
   if (name === 'results')  loadResults();
   if (name === 'history')  loadHistory();
   if (name === 'services') loadOrchestrator();
+  if (name !== 'console')  _stopLogTail();   // don't keep polling the log off-tab
 }
 
 // Poll The Watcher on EVERY view (not just Watches) so the omnipresent launcher pulses
@@ -673,6 +697,59 @@ function dismissUpdateBanner() {
 }
 setInterval(pollUpdate, 60000);
 pollUpdate();
+
+// ---- Console tab: an in-app shell (the app runs windowless). Live-log is a passive viewer;
+// running a command switches back to interactive so command output isn't clobbered.
+let _logTailTimer = null;
+function _consoleEcho(text, color) {
+  const out = document.getElementById('console-out');
+  if (!out) return;
+  const span = document.createElement('span');
+  if (color) span.style.color = color;
+  span.textContent = text;
+  out.appendChild(span);
+  out.scrollTop = out.scrollHeight;
+}
+function clearConsole() { const o = document.getElementById('console-out'); if (o) o.textContent = ''; }
+function _stopLogTail() {
+  if (_logTailTimer) { clearInterval(_logTailTimer); _logTailTimer = null; }
+  const b = document.getElementById('log-tail-btn'); if (b) b.textContent = '▶ Live log';
+}
+async function runConsole() {
+  const inp = document.getElementById('console-in');
+  const cmd = inp.value;
+  if (!cmd.trim()) return;
+  inp.value = '';
+  _stopLogTail();
+  _consoleEcho('> ' + cmd + '\n', '#93c5fd');
+  try {
+    const r = await fetch('/api/console/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-WW-Console': '1' },
+      body: JSON.stringify({ cmd }),
+    });
+    const d = await r.json();
+    if (d.stdout) _consoleEcho(d.stdout);
+    if (d.stderr) _consoleEcho(d.stderr, '#f87171');
+    if (typeof d.code === 'number' && d.code !== 0) _consoleEcho(`[exit ${d.code}]\n`, '#fbbf24');
+    const cw = document.getElementById('console-cwd'); if (cw && d.cwd) cw.textContent = d.cwd;
+  } catch (e) { _consoleEcho('error: ' + e.message + '\n', '#f87171'); }
+}
+async function toggleLogTail(btn) {
+  if (_logTailTimer) { _stopLogTail(); return; }
+  btn.textContent = '⏸ Live log';
+  const pull = async () => {
+    try {
+      const d = await (await fetch('/api/console/log?lines=400')).json();
+      const out = document.getElementById('console-out');
+      out.textContent = d.text || '';
+      out.scrollTop = out.scrollHeight;
+      const cw = document.getElementById('console-cwd'); if (cw) cw.textContent = d.file || '';
+    } catch (_) {}
+  };
+  await pull();
+  _logTailTimer = setInterval(pull, 2000);
+}
 
 // ============================================================ RESULTS
 async function loadResults() {

@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.18.0-alpha] — 2026-07-03 (In-app Console tab + uninstaller)
+
+### Added
+- **Console tab** — since the app now runs windowless, there's an in-app shell. Run commands in the
+  app folder (with `cd` persisting between commands, `shell=True` so pipes work, 120s timeout), and a
+  **▶ Live log** toggle that tails the current session log. Guarded by an app-only header
+  (`X-WW-Console`) on `POST /api/console/run` so a random web page can't drive the shell (a custom
+  header forces a CORS preflight this server doesn't allow). `GET /api/console/log` tails
+  `data/logs/`. (`services.console_run`/`tail_log`, endpoints, Console tab UI; tests added.)
+- **Uninstaller** (`uninstall.py` + `uninstall.bat`) — removes the Desktop + Start Menu shortcuts and
+  any legacy auto-start task, and optionally erases personal data (`--purge-data`). Leaves the shared
+  heavy tools (Python, Ollama, models) and prints how to remove them. (The Inno Setup installer in
+  Phase 2 will generate a proper Add/Remove-Programs uninstaller too.)
+
+---
+
 ## [0.17.2-alpha] — 2026-07-02 (Consolidated start methods: Desktop + Start Menu only)
 
 ### Changed

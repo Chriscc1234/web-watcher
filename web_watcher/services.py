@@ -158,6 +158,62 @@ class ServiceManager:
                 log.debug("window destroy failed: %s", exc)
         return True
 
+    # ------------------------------------------------------------------
+    # In-app console (the app runs windowless, so this is the "shell window")
+    # ------------------------------------------------------------------
+
+    def console_cwd(self) -> str:
+        if getattr(self, "_console_cwd", None) is None:
+            from web_watcher.updater import ROOT
+            self._console_cwd = str(ROOT)
+        return self._console_cwd
+
+    def console_run(self, cmd: str) -> dict:
+        """Run one shell command for the in-app Console tab. Keeps a persistent working
+        directory across calls (so `cd` sticks, like a real shell). Runs with shell=True so
+        pipes/redirects work. Bounded by a timeout. This is a LOCAL, single-user debug tool —
+        the endpoint that calls it requires an app-only header so a web page can't abuse it."""
+        import subprocess as _sp
+        cwd = self.console_cwd()
+        s = (cmd or "").strip()
+        if not s:
+            return {"stdout": "", "stderr": "", "code": 0, "cwd": cwd}
+        # Handle `cd` ourselves so it persists between commands.
+        if s == "cd" or s.startswith("cd "):
+            import os
+            target = s[2:].strip().strip('"').strip("'") or os.path.expanduser("~")
+            newp = target if os.path.isabs(target) else os.path.join(cwd, target)
+            newp = os.path.normpath(newp)
+            if os.path.isdir(newp):
+                self._console_cwd = newp
+                return {"stdout": "", "stderr": "", "code": 0, "cwd": newp}
+            return {"stdout": "", "stderr": f"cd: no such directory: {target}\n",
+                    "code": 1, "cwd": cwd}
+        try:
+            r = _sp.run(s, shell=True, cwd=cwd, capture_output=True, text=True,
+                        timeout=120, errors="replace")
+            return {"stdout": r.stdout, "stderr": r.stderr, "code": r.returncode, "cwd": cwd}
+        except _sp.TimeoutExpired:
+            return {"stdout": "", "stderr": "(command timed out after 120s)\n",
+                    "code": 124, "cwd": cwd}
+        except Exception as exc:
+            return {"stdout": "", "stderr": f"{type(exc).__name__}: {exc}\n", "code": 1, "cwd": cwd}
+
+    def tail_log(self, lines: int = 200) -> dict:
+        """Return the tail of the newest session log (data/logs/) for the Console tab."""
+        from web_watcher.updater import ROOT
+        log_dir = ROOT / "data" / "logs"
+        try:
+            files = sorted(log_dir.glob("web_watcher_*.log"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            if not files:
+                return {"file": None, "text": "(no log files yet)"}
+            newest = files[0]
+            text = newest.read_text(encoding="utf-8", errors="replace").splitlines()
+            return {"file": newest.name, "text": "\n".join(text[-max(1, min(lines, 2000)):])}
+        except Exception as exc:
+            return {"file": None, "text": f"(could not read log: {exc})"}
+
     def request_reset(self) -> bool:
         """Flag a FULL RESET (fresh install) and close the window. launcher.py wipes all user
         data — watches, results, DB, saved logins, history — and resets config before it

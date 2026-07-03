@@ -158,6 +158,25 @@ class ServiceManager:
                 log.debug("window destroy failed: %s", exc)
         return True
 
+    def request_reset(self) -> bool:
+        """Flag a FULL RESET (fresh install) and close the window. launcher.py wipes all user
+        data — watches, results, DB, saved logins, history — and resets config before it
+        relaunches, so the wipe happens while nothing holds the DB open. Destructive; the UI
+        gates this behind multiple confirmations. Always returns True (nothing to validate)."""
+        from web_watcher import updater
+        try:
+            updater.UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+            (updater.UPDATES_DIR / "RESET_REQUESTED").write_text("1", encoding="utf-8")
+        except Exception as exc:
+            log.warning("could not write reset flag: %s", exc)
+            return False
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except Exception as exc:
+                log.debug("window destroy failed: %s", exc)
+        return True
+
     # ------------------------------------------------------------------
     # Individual service control (called by API routes)
     # ------------------------------------------------------------------

@@ -15,12 +15,14 @@ own running files are never mid-flight when they're replaced.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RESTART_FLAG = ROOT / "updates" / "RESTART_REQUESTED"
+RESET_FLAG   = ROOT / "updates" / "RESET_REQUESTED"
 
 
 def _apply_pending() -> None:
@@ -34,16 +36,35 @@ def _apply_pending() -> None:
         print(f"  (update apply skipped: {exc})")
 
 
+def _do_reset(root: Path = ROOT) -> None:
+    """Wipe ALL user data back to a fresh install: delete data/ (DB, saved logins/cookies,
+    history, logs, screenshots, dashboard profile) and reset config.yaml to the blank
+    template. Done HERE — before the app opens the DB — so nothing is file-locked."""
+    try:
+        shutil.rmtree(root / "data", ignore_errors=True)
+        example = root / "config.example.yaml"
+        target  = root / "config.yaml"
+        target.unlink(missing_ok=True)
+        if example.exists():
+            shutil.copy2(example, target)
+        print("  Reset to a fresh install (all personal data cleared).")
+    except Exception as exc:
+        print(f"  (reset skipped: {exc})")
+
+
 def main() -> int:
     while True:
         _apply_pending()
         proc = subprocess.run([sys.executable, "-m", "web_watcher.main"], cwd=str(ROOT))
-        # Relaunch only if the app explicitly requested it (an update-and-restart click).
+        # A fresh-install reset takes priority, then an update-and-restart. Both close the
+        # window and drop a flag on the way out; we act on it here, then relaunch.
+        if RESET_FLAG.exists():
+            RESET_FLAG.unlink(missing_ok=True)
+            _do_reset()
+            print("  Restarting fresh…")
+            continue
         if RESTART_FLAG.exists():
-            try:
-                RESTART_FLAG.unlink()
-            except Exception:
-                pass
+            RESTART_FLAG.unlink(missing_ok=True)
             print("  Restarting to apply update…")
             continue
         return proc.returncode

@@ -344,6 +344,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       </div>
       <button class="primary" id="fb-connect-btn" onclick="connectFacebook()" style="white-space:nowrap">Connect Facebook</button>
     </div>
+
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:24px;border-color:#7f1d1d">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px;color:#f87171">Reset to a fresh install</div>
+        <div style="font-size:12px;color:var(--dim)">Permanently erases <b>everything personal</b> — all watches, results, saved logins, chat history, and settings — and restarts the app like a brand-new install. The program itself (and the AI models) stay installed. This cannot be undone.</div>
+      </div>
+      <button id="reset-btn" onclick="factoryReset(this)" style="white-space:nowrap;background:#7f1d1d;border-color:#7f1d1d;color:#fff">Reset…</button>
+    </div>
   </section>
 </div>
 
@@ -1976,6 +1984,30 @@ async function setStealth(val) {
     const s = await api('/api/browser', {method:'POST', body:JSON.stringify({headless, stealth: val})});
     _applyBrowserSettings(s.headless, s.stealth, s.show_agent_cursor);
   } catch(e) { console.error('stealth setting failed', e); }
+}
+
+// Reset to a fresh install — DESTRUCTIVE, so make the user pass through three deliberate
+// gates (a warning, a second confirm, and typing the exact phrase) before it fires.
+async function factoryReset(btn) {
+  if (!confirm('Reset to a fresh install?\n\nThis PERMANENTLY erases all your watches, results, '
+             + 'saved logins, chat history, and settings. The app and AI models stay installed.\n\n'
+             + 'This cannot be undone.')) return;
+  if (!confirm('Are you absolutely sure? Everything personal will be wiped and the app will restart.')) return;
+  const phrase = prompt('Final step — type  ERASE EVERYTHING  to confirm:');
+  if (phrase !== 'ERASE EVERYTHING') {
+    if (phrase !== null) alert('Phrase did not match — reset cancelled.');
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Resetting…';
+  try {
+    await api('/api/reset', { method: 'POST', body: JSON.stringify({ confirm: 'ERASE EVERYTHING' }) });
+    document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;'
+      + 'justify-content:center;font-family:Segoe UI,system-ui;color:#cbd5e1;font-size:16px">'
+      + 'Resetting to a fresh install… the window will close and reopen.</div>';
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Reset…';
+    alert('Could not reset: ' + e.message);
+  }
 }
 
 async function setAgentCursor(val) {

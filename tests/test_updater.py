@@ -144,3 +144,38 @@ def test_manager_request_restart_flags_and_closes(monkeypatch, tmp_path):
     # Nothing staged → no restart.
     monkeypatch.setattr(U, "pending_update", lambda root=None: None)
     assert mgr.request_restart() is False
+
+
+def test_launcher_reset_wipes_data_and_resets_config(tmp_path):
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location(
+        "ww_launcher", str(Path(__file__).resolve().parent.parent / "launcher.py"))
+    launcher = importlib.util.module_from_spec(spec)
+    sys.modules["ww_launcher"] = launcher
+    spec.loader.exec_module(launcher)
+
+    root = tmp_path
+    (root / "data").mkdir()
+    (root / "data" / "history.db").write_text("stuff")
+    (root / "data" / "browser_state.json").write_text("cookies")   # saved logins
+    (root / "config.yaml").write_text("watches:\n- name: mine\n")
+    (root / "config.example.yaml").write_text("watches: []\n")
+
+    launcher._do_reset(root)
+
+    assert not (root / "data").exists()                                # all user data gone
+    assert (root / "config.yaml").read_text() == "watches: []\n"        # config reset to template
+
+
+def test_manager_request_reset_flags_and_closes(monkeypatch, tmp_path):
+    from web_watcher.services import ServiceManager
+    from web_watcher import updater as U
+    monkeypatch.setattr(U, "UPDATES_DIR", tmp_path)
+    closed = {"n": 0}
+    class FakeWindow:
+        def destroy(self): closed["n"] += 1
+    mgr = ServiceManager()
+    mgr._window = FakeWindow()
+    assert mgr.request_reset() is True
+    assert (tmp_path / "RESET_REQUESTED").exists()   # launcher will wipe on next start
+    assert closed["n"] == 1

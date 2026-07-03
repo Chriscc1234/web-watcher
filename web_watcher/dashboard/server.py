@@ -831,6 +831,17 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             return {"ok": True, "restarting": True}
         raise HTTPException(409, detail="No update is staged to apply.")
 
+    @app.post("/api/reset")
+    def factory_reset(body: dict):
+        """DESTRUCTIVE: erase all personal data (watches, results, DB, saved logins, history)
+        and restart fresh. Requires body {"confirm": "ERASE EVERYTHING"} as a server-side
+        guard on top of the UI's multi-step confirmation, so no stray/accidental call can
+        wipe data."""
+        if (body or {}).get("confirm") != "ERASE EVERYTHING":
+            raise HTTPException(400, detail="Reset not confirmed.")
+        manager.request_reset()
+        return {"ok": True, "resetting": True}
+
     # ------------------------------------------------------------------
     # Notification preview
     # ------------------------------------------------------------------

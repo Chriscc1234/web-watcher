@@ -201,8 +201,8 @@ class ServiceManager:
 
     def tail_log(self, lines: int = 200) -> dict:
         """Return the tail of the newest session log (data/logs/) for the Console tab."""
-        from web_watcher.updater import ROOT
-        log_dir = ROOT / "data" / "logs"
+        from web_watcher import paths
+        log_dir = paths.log_dir()
         try:
             files = sorted(log_dir.glob("web_watcher_*.log"),
                            key=lambda p: p.stat().st_mtime, reverse=True)
@@ -471,12 +471,15 @@ class ServiceManager:
             log.info("Adopted existing Ollama instance")
             return
 
-        # Launch a new instance
+        # Launch a new instance. CREATE_NO_WINDOW so ollama.exe doesn't pop its own console
+        # window when we're launched windowless (pythonw) — without it, a GUI parent spawning a
+        # console app makes Windows allocate a visible blank "ollama.exe" terminal.
         try:
             self._ollama_proc   = subprocess.Popen(
                 ["ollama", "serve"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             self._ollama_adopted = False
         except FileNotFoundError:

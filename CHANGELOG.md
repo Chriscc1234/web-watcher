@@ -11,6 +11,90 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.19.0-alpha] — 2026-07-03 (Per-user data root — data separated from code)
+
+### Changed
+- **All user data now lives in a single per-user data root** (`%LOCALAPPDATA%\WebWatcher` on
+  Windows, `~/.web-watcher` elsewhere), completely separate from the installed `web_watcher/` code.
+  This is the groundwork for a real installer: an install/update can swap the code folder without
+  ever touching a watch, result, saved login, or log. New central module `web_watcher/paths.py`
+  resolves the root once (overridable with `$WW_DATA_DIR` for tests/portable installs) and exposes
+  `config_path()`/`db_path()`/`screenshots_dir()`/`log_dir()`/`webview_dir()`/`browser_state_path()`/
+  `profile_dir()`/`watcher_history_path()`. Every consumer (storage, config, browser, main, services,
+  dashboard, install, uninstall, launcher reset) now points there.
+- **One-time automatic migration (with backup).** On first launch after this update, the legacy
+  in-repo `data/` + `config.yaml` are **copied** into the new root — the originals are left in place
+  as a backup — and a `.migrated` marker prevents it from ever repeating. Migration is best-effort and
+  never blocks startup; a `reset`/uninstall re-drops the marker so it won't re-import the discarded
+  backup.
+
+### Changed — chat that converses first, structures second
+- **The Watcher chat is now a two-phase turn.** Forcing the model to emit a JSON envelope on
+  EVERY reply split its attention between understanding the user and formatting — so it misread
+  requests, lost track of which watch was meant across turns, and sometimes described an edit in
+  prose while forgetting the `watch_suggestion` object (no card appeared). Now:
+  - **Phase 1 — converse:** the model replies in plain English (no forced JSON), given a
+    "currently in focus" line so *"it" / "that watch" / "change something else on it"* resolves to
+    the watch discussed earlier in the conversation.
+  - **Phase 2 — build:** a dedicated extraction call decides whether there's a concrete watch
+    action now and, if so, emits its full config (an update starts from the existing watch's real
+    config); otherwise `none` and no card. A card appears only when there's real structure.
+- **History hygiene:** the assistant's turn is now persisted as clean prose, not the raw JSON
+  blob — replaying JSON blobs as context was itself confusing the model about which watch was
+  meant. Replayed context is also sanitized (`_prose`) as a safety net.
+- **Robust watch card:** the card's buttons reference the suggestion via a registry id instead of
+  embedding its JSON in an inline `onclick` — an apostrophe/quote/newline in an instruction used to
+  break the attribute and the card would silently not render.
+
+### Fixed — bundled-runtime runtime bugs (found via the real install)
+- **Ollama no longer pops a blank console.** `services._start_ollama` spawned `ollama serve` with
+  no window flags; under the windowless `pythonw` launch Windows gave it its own console (a blank
+  "ollama.exe" terminal). Added `CREATE_NO_WINDOW`.
+- **App-wide UTF-8.** The launcher now runs the app with `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8`.
+  The bundled runtime otherwise defaults to cp1252, so any log line with the `→/↳/✓` glyphs
+  (all over agent/scheduler output) raised `UnicodeEncodeError` and crashed the console log
+  handler — which, stacked on an Ollama-down error, is what buried the real chat-failure cause.
+
+### Hardened — Ollama install no longer depends on winget
+- First-run provisioning now installs Ollama via winget **or**, if winget is missing or fails,
+  by **downloading the official OllamaSetup.exe and running it silently** (`/VERYSILENT`). Fresh
+  machines without the App Installer — and Windows Sandbox, which ships without winget — can now
+  provision Ollama unattended. (`install.py`: `_install_ollama_via_winget` / `_install_ollama_via_download`.)
+
+### Added — bundled Windows installer (Phase 2)
+- **Self-contained installer** so an end user needs nothing pre-installed. `build_runtime.py` fetches
+  a relocatable CPython (python-build-standalone 3.13) and pip-installs every dependency into it
+  (torch/opencv/scipy/whisper/easyocr baked in — no PyInstaller hook fights); `installer/installer.iss`
+  (Inno Setup) packages that runtime + the app code into `WebWatcher-Setup-<version>.exe`, driven by
+  `build_installer.py`. Result is a ~278MB installer.
+- **Per-user install** to `%LOCALAPPDATA%\Programs\WebWatcher` (`PrivilegesRequired=lowest`): no admin
+  prompt, and the in-app auto-updater (which stages code swaps into the app folder) can write there —
+  a Program Files install would need admin for every update. User **data** stays in
+  `%LOCALAPPDATA%\WebWatcher` (see the relocation above), so uninstall/reinstall never touches watches,
+  results, or saved logins. Verified end-to-end locally: silent install → correct tree → app imports &
+  runs under the bundled runtime → silent uninstall leaves user data intact.
+- **First-run provisioning** (`provision.py`) runs under the bundled runtime and reuses `install.py`
+  with new flags `--skip-deps` (deps already bundled), `--skip-shortcuts` (Inno makes them), and
+  `--keep-config` (never overwrite an existing config on reinstall/upgrade). It ensures Ollama (winget),
+  detects the GPU tier, pulls the local models, and installs Playwright Chromium.
+- **Fix:** `install.py`/`provision.py` now force UTF-8 on stdout/stderr — under the bundled runtime with
+  output piped to Inno the default cp1252 crashed on the ✓/→ status glyphs.
+- **App icon** — a magnifying-glass mark in the app's accent blue (`installer/make_icon.py` →
+  `web_watcher/dashboard/static/icon.ico`/`.png`). Used on the Desktop + Start Menu shortcuts, the
+  Apps-list entry (`UninstallDisplayIcon`), and the running window/taskbar (via `webview.start(icon=)`
+  + a stable `AppUserModelID` so Windows shows our icon, not the generic python one). Dev shortcuts
+  (`install.py`) use it too.
+- **Uninstall shows in Windows "Apps & features"** (per-user Add/Remove entry) and, at uninstall time,
+  offers a one-time choice — *"Also delete your Web Watcher data?"* — that wipes `%LOCALAPPDATA%\WebWatcher`
+  only if the user opts in. Default (and any silent uninstall) keeps data for a future reinstall.
+
+### Notes
+- Tests: new `tests/test_paths.py` (resolution, accessors, caching, migration, no-clobber, marker
+  guard) and a session-wide `tests/conftest.py` that pins `WW_DATA_DIR` to a throwaway dir so the
+  suite never touches real user data. Full suite green.
+
+---
+
 ## [0.18.0-alpha] — 2026-07-03 (In-app Console tab + uninstaller)
 
 ### Added

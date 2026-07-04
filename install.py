@@ -31,13 +31,25 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# The installer runs this under the bundled runtime with output piped to Inno Setup, where
+# the default Windows encoding (cp1252) can't encode the ✓/→ status glyphs and would crash on
+# the first print. Force UTF-8 on the streams (no-op if already UTF-8 or detached).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).parent.resolve()
-CONFIG_PATH = ROOT / "config.yaml"
-DATA_DIR    = ROOT / "data"
+# User data (config.yaml + DB + logins + logs) lives in a per-user data root, kept fully
+# separate from the installed code so updates never touch it. See web_watcher/paths.py.
+from web_watcher import paths
+CONFIG_PATH = paths.config_path()
+DATA_DIR    = paths.data_dir()
 OLLAMA_URL  = "http://localhost:11434"
 
 # ---------------------------------------------------------------------------
@@ -180,45 +192,85 @@ def install_dependencies() -> None:
         sys.exit(1)
 
 
+_OLLAMA_SETUP_URL = "https://ollama.com/download/OllamaSetup.exe"
+
+
+def _ollama_on_path_or_known() -> "Optional[Path]":
+    """ollama.exe if it's on PATH or at its default Windows install location."""
+    found = shutil.which("ollama")
+    if found:
+        return Path(found)
+    candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+    return candidate if candidate.exists() else None
+
+
+def _add_ollama_to_path() -> None:
+    exe = _ollama_on_path_or_known()
+    if exe and not shutil.which("ollama"):
+        os.environ["PATH"] = str(exe.parent) + os.pathsep + os.environ.get("PATH", "")
+
+
+def _install_ollama_via_winget() -> bool:
+    """Try the winget path. Returns True only if ollama is present afterwards."""
+    if not shutil.which("winget"):
+        return False
+    try:
+        info("Installing Ollama via winget ...")
+        _run(["winget", "install", "Ollama.Ollama", "--silent",
+              "--accept-package-agreements", "--accept-source-agreements"],
+             capture_output=False)
+    except subprocess.CalledProcessError:
+        warn("winget install failed — will try a direct download instead.")
+        return False
+    _add_ollama_to_path()
+    return _ollama_on_path_or_known() is not None
+
+
+def _install_ollama_via_download() -> bool:
+    """Fallback that needs NO winget: download the official OllamaSetup.exe and run it
+    silently (its installer is Inno-based, so /VERYSILENT works). This is what makes a fresh
+    machine — and Windows Sandbox, which ships without winget — able to provision Ollama."""
+    import tempfile
+    try:
+        import httpx
+        dest = Path(tempfile.gettempdir()) / "OllamaSetup.exe"
+        info(f"Downloading Ollama from {_OLLAMA_SETUP_URL} (~700 MB, one time) ...")
+        with httpx.Client(timeout=None, follow_redirects=True) as c:
+            with c.stream("GET", _OLLAMA_SETUP_URL) as r:
+                r.raise_for_status()
+                with dest.open("wb") as f:
+                    for chunk in r.iter_bytes(1 << 16):
+                        f.write(chunk)
+        info("Running the Ollama installer silently ...")
+        _run([str(dest), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+             capture_output=False)
+    except Exception as exc:
+        warn(f"Direct Ollama download/install failed: {exc}")
+        return False
+    _add_ollama_to_path()
+    return _ollama_on_path_or_known() is not None
+
+
 def check_ollama() -> None:
     step(3, TOTAL_STEPS, "Checking Ollama")
-    if shutil.which("ollama"):
-        ok("ollama found in PATH")
+    if _ollama_on_path_or_known():
+        _add_ollama_to_path()
+        ok("ollama found")
         return
 
-    warn("ollama not found — attempting to install via winget")
     if platform.system() != "Windows":
         err("Automatic Ollama install is only supported on Windows here.")
         info("Install Ollama from https://ollama.com and re-run install.")
         sys.exit(1)
 
-    if not shutil.which("winget"):
-        err("winget not available — install Ollama manually from https://ollama.com")
-        sys.exit(1)
+    warn("ollama not found — installing it (winget, then direct download as a fallback)")
+    if _install_ollama_via_winget() or _install_ollama_via_download():
+        ok("Ollama installed successfully")
+        return
 
-    try:
-        info("Running: winget install Ollama.Ollama ...")
-        _run(
-            ["winget", "install", "Ollama.Ollama",
-             "--silent", "--accept-package-agreements",
-             "--accept-source-agreements"],
-            capture_output=False,
-        )
-        # Refresh PATH
-        ollama_path = shutil.which("ollama")
-        if not ollama_path:
-            # Common install location on Windows
-            candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-            if candidate.exists():
-                os.environ["PATH"] = str(candidate.parent) + os.pathsep + os.environ["PATH"]
-
-        if shutil.which("ollama"):
-            ok("Ollama installed successfully")
-        else:
-            warn("Ollama installed but not yet in PATH. Open a new terminal after install completes.")
-    except subprocess.CalledProcessError:
-        err("winget install failed — install Ollama manually from https://ollama.com")
-        sys.exit(1)
+    err("Could not install Ollama automatically.")
+    info("Install it manually from https://ollama.com, then re-run setup.")
+    sys.exit(1)
 
 
 def detect_gpu(args) -> "TierInfo":
@@ -352,6 +404,13 @@ def install_playwright(skip: bool) -> None:
 def write_config(tier: "TierInfo", args) -> None:
     step(8 if not SKIP_VALIDATE else 7, TOTAL_STEPS, "Creating configuration")
 
+    # Preserve an existing config (e.g. a reinstall/upgrade, or data already migrated into the
+    # per-user root). Overwriting would bury the user's real watches in a .bak. First-run has no
+    # config yet, so this only ever fires on a re-provision — exactly when we must NOT clobber.
+    if getattr(args, "keep_config", False) and CONFIG_PATH.exists():
+        ok(f"Keeping existing config ({CONFIG_PATH})")
+        return
+
     # Collect credentials unless --yes
     telegram_token = ""
     telegram_chat  = ""
@@ -429,8 +488,8 @@ def write_config(tier: "TierInfo", args) -> None:
         with CONFIG_PATH.open("w") as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
-        DATA_DIR.mkdir(exist_ok=True)
-        ok(f"Config written to {CONFIG_PATH.relative_to(ROOT)}")
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ok(f"Config written to {CONFIG_PATH}")
 
     except Exception as exc:
         err(f"Failed to write config: {exc}")
@@ -456,7 +515,9 @@ def create_shortcuts(args) -> None:
     pyw = Path(sys.executable).with_name("pythonw.exe")
     target = str(pyw if pyw.exists() else sys.executable)
     launcher = str(ROOT / "launcher.py")
-    icon = str(pyw if pyw.exists() else sys.executable)
+    # Prefer the app's own icon; fall back to the python exe's icon if it's somehow missing.
+    app_icon = ROOT / "web_watcher" / "dashboard" / "static" / "icon.ico"
+    icon = str(app_icon if app_icon.exists() else (pyw if pyw.exists() else sys.executable))
 
     def q(s: str) -> str:            # PowerShell single-quote escaping
         return s.replace("'", "''")
@@ -494,6 +555,10 @@ def create_shortcuts(args) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Web Watcher Installer")
     p.add_argument("--skip-models",    action="store_true")
+    p.add_argument("--skip-deps",      action="store_true",
+                   help="Skip pip install (deps already present, e.g. bundled runtime)")
+    p.add_argument("--keep-config",    action="store_true",
+                   help="Do not overwrite an existing config.yaml (preserve user's watches)")
     p.add_argument("--skip-playwright", action="store_true")
     p.add_argument("--skip-shortcuts", "--skip-startup", dest="skip_shortcuts",
                    action="store_true")
@@ -532,7 +597,8 @@ def main() -> None:
     print(_c("1;37", "=" * 50))
 
     check_python()
-    install_dependencies()
+    if not args.skip_deps:
+        install_dependencies()
     check_ollama()
     tier = detect_gpu(args)
     tier = pull_models(tier, skip=args.skip_models)

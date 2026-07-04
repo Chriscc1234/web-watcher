@@ -1653,8 +1653,17 @@ function appendMsg(role, content, boxId = 'dock-convo') {
   return div;
 }
 
+// Registry so the card's buttons reference the suggestion object by id instead of
+// embedding its JSON in an inline onclick attribute — the old approach silently broke
+// (no card, or a dead button) whenever an instruction/name contained a quote, apostrophe,
+// or newline. Keep the object here and hand the handler a short id.
+window._suggestionRegistry = window._suggestionRegistry || {};
+let _suggestionSeq = 0;
 function appendWatchCard(suggestion, boxId = 'dock-convo') {
   const box = document.getElementById(boxId);
+  if (!box || !suggestion || typeof suggestion !== 'object') return;
+  const sugId = 'sug' + (_suggestionSeq++);
+  window._suggestionRegistry[sugId] = suggestion;
   const card = document.createElement('div');
   card.className = 'msg assistant';
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
@@ -1690,10 +1699,10 @@ function appendWatchCard(suggestion, boxId = 'dock-convo') {
       <div class="kv"><span class="k">Perception</span><span>${suggestion.perception||'auto'}</span></div>
       ${extras.length ? `<div class="kv"><span class="k">Options</span><span>${extras.join(' · ')}</span></div>` : ''}
       <div class="actions">
-        <button class="success" onclick="createWatchFromSuggestion(${JSON.stringify(suggestion).replace(/"/g,'&quot;')}, this, '${boxId}')">
+        <button class="success" onclick="createWatchFromSuggestion(window._suggestionRegistry['${sugId}'], this, '${boxId}')">
           ${verb} this watch
         </button>
-        <button onclick="editSuggestionInModal(${JSON.stringify(suggestion).replace(/"/g,'&quot;')})">
+        <button onclick="editSuggestionInModal(window._suggestionRegistry['${sugId}'])">
           Edit before ${isUpdate ? 'saving' : 'creating'}
         </button>
       </div>

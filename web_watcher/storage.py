@@ -28,8 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-DB_PATH          = Path(__file__).parent.parent / "data" / "history.db"
-SCREENSHOTS_DIR  = Path(__file__).parent.parent / "data" / "screenshots"
+from web_watcher import paths
+
+DB_PATH          = paths.db_path()
+SCREENSHOTS_DIR  = paths.screenshots_dir()
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS run_history (

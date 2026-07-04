@@ -217,7 +217,9 @@ class AppConfig(BaseModel):
 # Load / save helpers
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+from web_watcher import paths
+
+_DEFAULT_CONFIG_PATH = paths.config_path()
 
 
 def load(path: Path | str | None = None) -> AppConfig:

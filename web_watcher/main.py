@@ -21,7 +21,8 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_LOG_DIR  = Path(__file__).parent.parent / "data" / "logs"
+from web_watcher import paths
+_LOG_DIR  = paths.log_dir()
 _LOG_FMT  = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _LOG_KEEP = 30  # number of session log files to retain
 
@@ -154,6 +155,16 @@ def main() -> None:
         log.warning("Server did not respond within %.0fs — opening window anyway", SERVER_TIMEOUT)
 
     log.info("Opening dashboard window")
+    # Give the app its own taskbar identity so Windows shows OUR icon (from the launching
+    # shortcut) instead of the generic python one, and groups the taskbar button separately.
+    _icon_path = Path(__file__).parent / "dashboard" / "static" / "icon.ico"
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("WebWatcher.App")
+        except Exception as exc:
+            log.debug("could not set AppUserModelID: %s", exc)
+
     window_api = _WindowApi()
     window = webview.create_window(
         title="Web Watcher",
@@ -176,10 +187,18 @@ def main() -> None:
     # across launches. Default pywebview is private_mode=True, which discards them on exit —
     # that's why the chosen text size (and other UI prefs in localStorage) didn't survive a
     # restart. Keep the profile under data/ next to the rest of the app's state.
-    storage_path = str(Path(__file__).parent.parent / "data" / "webview")
+    storage_path = str(paths.webview_dir())
     Path(storage_path).mkdir(parents=True, exist_ok=True)
-    # webview.start() blocks until the window is closed
-    webview.start(private_mode=False, storage_path=storage_path)
+    # webview.start() blocks until the window is closed. Pass the app icon for the window +
+    # taskbar (older pywebview builds may not accept `icon`; fall back gracefully).
+    start_kwargs = {"private_mode": False, "storage_path": storage_path}
+    if _icon_path.exists():
+        start_kwargs["icon"] = str(_icon_path)
+    try:
+        webview.start(**start_kwargs)
+    except TypeError:
+        start_kwargs.pop("icon", None)
+        webview.start(**start_kwargs)
     log.info("Web Watcher exited cleanly")
 
 

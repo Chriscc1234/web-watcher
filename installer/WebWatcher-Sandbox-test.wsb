@@ -1,0 +1,26 @@
+<Configuration>
+  <!--
+    Windows Sandbox config for a clean-room install test of Web Watcher.
+
+    Double-click this file (Windows Pro/Enterprise, "Windows Sandbox" feature enabled) to boot
+    a pristine, throwaway Windows with NO Python, NO Ollama, NO models — exactly what your buddy
+    starts from. The installer folder is mapped in read-only at C:\Users\WDAGUtilityAccount\Desktop\wwinstaller.
+
+    In the Sandbox:
+      1. Run wwinstaller\Output\WebWatcher-Setup-<version>.exe
+      2. Let it install (no admin needed — per-user install).
+      3. First run downloads Ollama + models (needs internet; several GB) — this is the slow part.
+      4. Confirm the app window opens and a watch runs.
+
+    Networking is ON (required for the model pull). Nothing persists after you close the Sandbox.
+  -->
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\AI_Workspace\web-watcher\installer</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\wwinstaller</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <Networking>Enable</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+</Configuration>

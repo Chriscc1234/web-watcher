@@ -130,15 +130,16 @@ def maybe_warm_homepage(page: Page, url: str, prob: float = 0.4) -> None:
 
 # Persistent browser state — cookies + localStorage survive across runs so sites
 # see a returning user instead of a fresh bot session each time.
-_DATA_DIR     = Path(__file__).parent.parent / "data"
-_BROWSER_STATE = _DATA_DIR / "browser_state.json"
+from web_watcher import paths
+_DATA_DIR     = paths.data_dir()
+_BROWSER_STATE = paths.browser_state_path()
 
 # Persistent on-disk Chrome profile for login-required sites (e.g. Facebook).
 # Unlike the storage_state JSON snapshot above, this is a full user-data-dir that
 # Chrome owns (cookies, localStorage, service workers, fingerprint continuity), so a
 # one-time manual login survives indefinitely. Only ONE browser may use a given
 # profile dir at a time (Chromium SingletonLock).
-_PROFILE_DIR = _DATA_DIR / "profiles" / "default"
+_PROFILE_DIR = paths.profile_dir()
 
 # Serializes access to the shared persistent profile dir. Two continuous watches
 # that both use_login_profile (or a watch + the Connect-Facebook flow) would

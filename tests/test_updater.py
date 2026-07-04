@@ -146,7 +146,7 @@ def test_manager_request_restart_flags_and_closes(monkeypatch, tmp_path):
     assert mgr.request_restart() is False
 
 
-def test_launcher_reset_wipes_data_and_resets_config(tmp_path):
+def test_launcher_reset_wipes_data_and_resets_config(tmp_path, monkeypatch):
     import importlib.util, sys
     spec = importlib.util.spec_from_file_location(
         "ww_launcher", str(Path(__file__).resolve().parent.parent / "launcher.py"))
@@ -154,17 +154,26 @@ def test_launcher_reset_wipes_data_and_resets_config(tmp_path):
     sys.modules["ww_launcher"] = launcher
     spec.loader.exec_module(launcher)
 
-    root = tmp_path
-    (root / "data").mkdir()
-    (root / "data" / "history.db").write_text("stuff")
-    (root / "data" / "browser_state.json").write_text("cookies")   # saved logins
-    (root / "config.yaml").write_text("watches:\n- name: mine\n")
-    (root / "config.example.yaml").write_text("watches: []\n")
+    # User data now lives in a per-user data root (WW_DATA_DIR), separate from the app folder.
+    from web_watcher import paths
+    data_root = tmp_path / "dataroot"
+    data_root.mkdir()
+    (data_root / "history.db").write_text("stuff")
+    (data_root / "browser_state.json").write_text("cookies")       # saved logins
+    (data_root / "config.yaml").write_text("watches:\n- name: mine\n")
+    monkeypatch.setenv("WW_DATA_DIR", str(data_root))
 
-    launcher._do_reset(root)
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "config.example.yaml").write_text("watches: []\n")
 
-    assert not (root / "data").exists()                                # all user data gone
-    assert (root / "config.yaml").read_text() == "watches: []\n"        # config reset to template
+    launcher._do_reset(app)
+
+    # All user data gone except a fresh config + the re-migration guard marker.
+    assert not (data_root / "history.db").exists()
+    assert not (data_root / "browser_state.json").exists()
+    assert (data_root / "config.yaml").read_text() == "watches: []\n"   # reset to template
+    assert (data_root / paths._MIGRATION_MARKER).exists()              # blocks legacy re-import
 
 
 def test_manager_request_reset_flags_and_closes(monkeypatch, tmp_path):

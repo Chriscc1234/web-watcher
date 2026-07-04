@@ -60,12 +60,22 @@ def main() -> None:
         ans = input("\nAlso ERASE all personal data — watches, results, saved logins, "
                     "history? [y/N]: ").strip().lower()
         purge = ans in ("y", "yes")
+    # User data now lives in a per-user data root (%LOCALAPPDATA%\WebWatcher), not the
+    # app folder. Wipe that; also clear any legacy in-repo data/ + config.yaml as a courtesy.
+    try:
+        from web_watcher import paths
+        data_root = paths._default_root()
+    except Exception:
+        data_root = None
     if purge:
+        if data_root is not None:
+            shutil.rmtree(data_root, ignore_errors=True)
         shutil.rmtree(ROOT / "data", ignore_errors=True)
         (ROOT / "config.yaml").unlink(missing_ok=True)
-        print("  Erased personal data (data/ + config.yaml).")
+        print(f"  Erased personal data ({data_root or 'user data root'} + legacy in-repo data).")
     else:
-        print("  Kept your data (data/ + config.yaml) — delete them by hand if you want it gone.")
+        where = data_root or "the WebWatcher data folder"
+        print(f"  Kept your data ({where}) — delete it by hand if you want it gone.")
 
     print("\nStill installed (shared tools — remove manually only if nothing else needs them):")
     print(f"  - The app folder:   {ROOT}   (delete it after this script exits)")

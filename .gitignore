@@ -7,10 +7,12 @@ config.yaml
 # screenshots, and the persistent webview profile.
 data/
 
-# ── Update machinery ────────────────────────────────────────────────────────
-updates/            # staged/pending downloaded updates
-dist/               # built release zips + latest.json
-build/              # PyInstaller / installer build output
+# ── Build / update machinery (generated; never commit) ──────────────────────
+# NOTE: .gitignore does NOT support trailing inline comments — keep patterns bare.
+updates/
+dist/
+build/
+installer/Output/
 *.spec.bak
 
 # ── Python ──────────────────────────────────────────────────────────────────

@@ -39,8 +39,12 @@ def _child_python() -> str:
 
 def _run_app() -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    # Force UTF-8 for the child's stdio/filesystem. The bundled runtime otherwise defaults to
+    # the Windows locale (cp1252), which raises UnicodeEncodeError whenever the app logs the
+    # →/↳/✓ glyphs used throughout agent/scheduler output — crashing the console log handler.
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     return subprocess.run([_child_python(), "-m", "web_watcher.main"],
-                          cwd=str(ROOT), creationflags=flags).returncode
+                          cwd=str(ROOT), creationflags=flags, env=env).returncode
 
 
 def _apply_pending() -> None:
@@ -55,14 +59,20 @@ def _apply_pending() -> None:
 
 
 def _do_reset(root: Path = ROOT) -> None:
-    """Wipe ALL user data back to a fresh install: delete data/ (DB, saved logins/cookies,
-    history, logs, screenshots, dashboard profile) and reset config.yaml to the blank
-    template. Done HERE — before the app opens the DB — so nothing is file-locked."""
+    """Wipe ALL user data back to a fresh install: delete the user-data root (DB, saved
+    logins/cookies, history, logs, screenshots, dashboard profile, config.yaml) and reset
+    config.yaml to the blank template. Done HERE — before the app opens the DB — so nothing
+    is file-locked. A `.migrated` marker is re-dropped so the reset does NOT re-import the
+    legacy in-repo backup on the next launch."""
     try:
-        shutil.rmtree(root / "data", ignore_errors=True)
+        from web_watcher import paths
+        data_root = paths._default_root()
+        shutil.rmtree(data_root, ignore_errors=True)
+        data_root.mkdir(parents=True, exist_ok=True)
+        # Block re-migration of the legacy backup that a reset is meant to discard.
+        (data_root / paths._MIGRATION_MARKER).write_text("reset\n", encoding="utf-8")
         example = root / "config.example.yaml"
-        target  = root / "config.yaml"
-        target.unlink(missing_ok=True)
+        target  = data_root / "config.yaml"
         if example.exists():
             shutil.copy2(example, target)
         print("  Reset to a fresh install (all personal data cleared).")

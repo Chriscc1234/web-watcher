@@ -513,6 +513,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             body["urls"], _ = _normalize_marketplace_urls(body["urls"])
 
         cfg = load()
+        watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
         idx = next((i for i, w in enumerate(cfg.watches) if w.name == watch_name), None)
         if idx is None:
             raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
@@ -1007,7 +1008,8 @@ to fix or change something, propose the concrete action. Reply in the SAME JSON 
 described below."""
 
 
-_WATCHER_HISTORY_PATH = Path(__file__).parent.parent.parent / "data" / "watcher_history.json"
+from web_watcher import paths
+_WATCHER_HISTORY_PATH = paths.watcher_history_path()
 
 
 def _load_watcher_history() -> list:
@@ -1250,12 +1252,197 @@ def _normalize_turn(data: dict) -> dict:
     return out
 
 
-def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> dict:
-    """Run one assistant turn against Ollama and post-process it: parse the JSON reply,
-    run any listing_query, validate watch_actions against real watch names, and expand a
-    proposed marketplace watch's search into effective terms. Returns the response dict
-    (plus a private "raw" the caller persists then drops). Powers the oversight Watcher
-    chat — the single AI with full create/manage/lookup capabilities. Never raises."""
+# ---------------------------------------------------------------------------
+# Two-phase assistant turn: converse in plain English (phase 1), then structure any
+# concrete watch action as JSON (phase 2). Forcing JSON on EVERY turn made the local
+# model worse at understanding — it split attention between reading the user and
+# emitting a rigid envelope, so it lost track of which watch was meant and sometimes
+# described an edit in prose while forgetting the watch_suggestion object (no card).
+# Splitting the turn lets phase 1 focus purely on comprehension and phase 2 purely on
+# extraction — the card only appears when there's a real, concrete change to make.
+# ---------------------------------------------------------------------------
+
+_CONVERSE_OVERRIDE = """\
+════════════════════════════════════════
+HOW TO REPLY (READ THIS LAST — IT OVERRIDES ANY EARLIER FORMAT INSTRUCTION)
+════════════════════════════════════════
+Reply to the user in natural, plain English. Do NOT output JSON, code, or field names —
+just talk, like a knowledgeable helper. A SEPARATE step (not you) turns the conversation
+into the actual watch config, so you never need to write it yourself.
+
+Your job here is only to UNDERSTAND and RESPOND:
+- Track which watch the user is talking about. If they say "it", "that one", "the watch",
+  or "change something else on it", they mean the watch CURRENTLY IN FOCUS (named below)
+  unless they clearly name a different one. Do not switch watches on your own.
+- If the request is clear, briefly confirm what you'll change (e.g. "Sure — I'll widen the
+  Diesel Vehicles watch to also cover OfferUp trucks."). The build step handles the rest.
+- If anything is ambiguous, ask ONE short clarifying question instead of guessing.
+- Keep it short and conversational."""
+
+_EXTRACT_SYSTEM = """\
+You convert a conversation into ONE concrete watch action, but only if one is clearly
+warranted right now. You are given the conversation, the assistant's latest reply to the
+user, the user's existing watches (full current config), and which watch is in focus.
+
+Decide "intent":
+- "update"  — the user asked to CHANGE an existing watch. Start from that watch's current
+              config (shown below) and change ONLY what the user asked; keep the same name.
+- "create"  — the user asked for a brand-NEW watch. Give it a new name and full config.
+- "actions" — the user asked to start/stop/enable/disable/delete watch(es).
+- "lookup"  — the user asked what's been found / to see listings.
+- "none"    — the assistant asked the user a question, OR the user is still
+              discussing/clarifying, OR there is no concrete, unambiguous change to make yet.
+
+CHOOSING THE WATCH (critical): pick the target watch from CURRENTLY IN FOCUS, or from a watch
+name the user explicitly typed. Do NOT pick a watch just because a word in the user's request
+(a site like "offer up"/"craigslist"/"ebay", a search term, or a price) also appears in that
+watch's name or config. Those words describe WHAT to change, not WHICH watch. Example: if the
+focus watch is the sports-car watch and the user says "also look on offer up", that means ADD
+OfferUp to the sports-car watch — NOT switch to a watch named after OfferUp.
+
+When unsure, choose "none". Never invent a change the user didn't ask for.
+
+Output STRICT JSON, no prose, no markdown:
+{
+  "intent": "update" | "create" | "actions" | "lookup" | "none",
+  "watch": { full watch config INCLUDING "name"; for update use the EXACT existing name } | null,
+  "watch_actions": [ {"action": "start|stop|enable|disable|delete", "name": "..."} ] | null,
+  "listing_query": { ... } | null
+}
+For intent "none", set watch, watch_actions and listing_query all to null."""
+
+
+def _prose(content) -> str:
+    """Reduce a stored/model message to plain prose. Older turns (and the occasional model
+    slip) are raw JSON envelopes; replaying those as conversation context confused the model
+    about which watch was meant. Extract the human-readable line and drop the JSON."""
+    if not isinstance(content, str):
+        return str(content)
+    s = content.strip()
+    if not s.startswith("{"):
+        return content
+    try:
+        o = json.loads(s)
+    except Exception:
+        return content
+    if isinstance(o, dict):
+        if isinstance(o.get("message"), str) and o["message"].strip():
+            return o["message"]
+        if o.get("name") or o.get("urls") or o.get("instruction"):
+            verb = "updated" if o.get("action") == "update" else "set up"
+            return f"(I {verb} {o.get('name') or 'a watch'}.)"
+    return content
+
+
+_FOCUS_STOP = {"the", "a", "an", "watch", "watches", "for", "on", "in", "of", "and",
+               "under", "up", "to", "my", "this", "that", "it", "vehicles", "vehicle"}
+
+
+def _watch_focus_tokens(name: str) -> list[str]:
+    """Distinctive tokens of a watch name for fuzzy focus matching. Drops the parenthetical
+    SITE tag (e.g. '(OfferUp)') so a user saying 'also look on offer up' does NOT accidentally
+    resolve to a watch merely NAMED after OfferUp — the site is a target to add, not a selector."""
+    import re
+    base = re.sub(r"\(.*?\)", "", name or "")
+    toks = re.findall(r"[a-z0-9]+", base.lower())
+    return [t for t in toks if t not in _FOCUS_STOP and len(t) > 2]
+
+
+def _focused_watch_name(messages: list, cfg) -> str | None:
+    """The existing watch most recently referenced in the conversation — so 'it' / 'that watch'
+    / 'change something else on it' resolves to the right one across turns. Matches on the
+    watch's distinctive NAME tokens (e.g. 'sports car' → 'Manual Sports Cars (Seattle)'), not a
+    full-string or site-name match, so paraphrases track and site words don't hijack it."""
+    import re
+    watches = [(w.name, _watch_focus_tokens(w.name)) for w in getattr(cfg, "watches", [])]
+    for m in reversed(messages or []):
+        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(c, str):
+            continue
+        low_toks = set(re.findall(r"[a-z0-9]+", c.lower()))
+        best, best_hits = None, 0
+        for name, toks in watches:
+            if not toks:
+                continue
+            hits = sum(1 for t in toks
+                       if t in low_toks
+                       or (t.endswith("s") and t[:-1] in low_toks)
+                       or (t + "s") in low_toks)
+            if hits >= min(2, len(toks)) and hits > best_hits:
+                best, best_hits = name, hits
+        if best:
+            return best
+    return None
+
+
+def _resolve_watch_name(name: str, cfg) -> str | None:
+    """Map a possibly-imperfect watch name (as the model wrote it) to the EXACT stored name.
+    The local model often drops the site suffix — 'Diesel Vehicles' for 'Diesel Vehicles
+    (OfferUp)' — which made an update 404. Match exact → case-insensitive → distinctive-token
+    overlap, so an assistant edit lands on the right watch instead of failing."""
+    stored = [w.name for w in getattr(cfg, "watches", [])]
+    if not name:
+        return None
+    if name in stored:
+        return name
+    low = name.strip().lower()
+    for n in stored:
+        if n.strip().lower() == low:
+            return n
+    want = set(_watch_focus_tokens(name))
+    if want:
+        best, best_ov = None, 0
+        for n in stored:
+            toks = set(_watch_focus_tokens(n))
+            ov = len(want & toks)
+            if toks and ov >= max(1, (len(toks) + 1) // 2) and ov > best_ov:
+                best, best_ov = n, ov
+        if best:
+            return best
+    return None
+
+
+def _watches_config_context(cfg) -> str:
+    """Full current config of each watch as JSON, so an update starts from real values."""
+    lines = []
+    for w in getattr(cfg, "watches", []):
+        try:
+            cfg_json = json.dumps(w.model_dump(exclude_none=True), ensure_ascii=False)
+        except Exception:
+            cfg_json = json.dumps({"name": getattr(w, "name", "?")})
+        lines.append(f"- {cfg_json}")
+    body = "\n".join(lines) or "  (no watches yet)"
+    return ("EXISTING WATCHES (full current config — for an update, start from the matching "
+            "one and change ONLY what the user asked):\n" + body)
+
+
+def _chat_reply_natural(system: str, messages: list, model: str):
+    """Phase 1 — a natural-language reply (NO forced JSON). Returns (text, eval, prompt, dur)."""
+    payload = {
+        "model":    model,
+        "messages": [{"role": "system", "content": system + "\n\n" + _CONVERSE_OVERRIDE},
+                     *messages],
+        "stream":   False,
+    }
+    with httpx.Client(timeout=90.0) as client:
+        r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        r.raise_for_status()
+    resp = r.json()
+    return (_prose(resp["message"]["content"]),
+            resp.get("eval_count", 0), resp.get("prompt_eval_count", 0),
+            resp.get("eval_duration", 0))
+
+
+def _extract_watch_action(messages: list, reply: str, cfg, model: str,
+                          focus: str | None) -> dict:
+    """Phase 2 — decide if the conversation warrants a concrete watch action and, if so,
+    return it as {watch_suggestion?, watch_actions?, listing_query?}. Returns {} for 'none'.
+    A dedicated call so extraction can't be crowded out by conversation. Never raises."""
+    focus_line = (f"\n\nCURRENTLY IN FOCUS: \"{focus}\" — if the user said 'it', 'that', "
+                  "'the watch', or 'change something else on it', they mean THIS watch."
+                  if focus else "\n\nCURRENTLY IN FOCUS: (none yet)")
+    system = (_EXTRACT_SYSTEM + "\n\n" + _watches_config_context(cfg) + focus_line
+              + "\n\nThe assistant just told the user:\n\"" + (reply or "") + "\"")
     payload = {
         "model":    model,
         "messages": [{"role": "system", "content": system}, *messages],
@@ -1266,13 +1453,46 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
         with httpx.Client(timeout=60.0) as client:
             r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             r.raise_for_status()
-        resp_json    = r.json()
-        raw          = resp_json["message"]["content"]
-        eval_count   = resp_json.get("eval_count", 0)
-        prompt_count = resp_json.get("prompt_eval_count", 0)
-        duration_ns  = resp_json.get("eval_duration", 0)
+        data = _parse_chat_response(r.json()["message"]["content"])
+    except Exception as exc:
+        log.warning("action-extraction failed: %s", exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    intent = (data.get("intent") or "none").lower()
+    if intent in ("update", "create") and isinstance(data.get("watch"), dict):
+        w = dict(data["watch"])
+        w.setdefault("action", intent)
+        if intent == "update":
+            # Snap the name to the real stored watch (model often drops the site suffix),
+            # falling back to the focus watch — so applying the edit can't 404.
+            real = _resolve_watch_name(w.get("name", ""), cfg) or focus
+            if real:
+                w["name"] = real
+        return {"watch_suggestion": w}
+    if intent == "actions" and isinstance(data.get("watch_actions"), list):
+        return {"watch_actions": data["watch_actions"]}
+    if intent == "lookup" and isinstance(data.get("listing_query"), dict):
+        return {"listing_query": data["listing_query"]}
+    return {}
 
-        data = _normalize_turn(_parse_chat_response(raw))
+
+def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> dict:
+    """Run one assistant turn as two phases: (1) a natural-language reply that focuses purely
+    on understanding the user and tracking which watch is meant, then (2) a dedicated extraction
+    that turns any concrete request into a validated watch_suggestion / watch_actions /
+    listing_query. Returns the response dict (plus a private "raw" the caller persists then
+    drops). Powers the oversight Watcher chat. Never raises."""
+    # Clean the replayed context: older assistant turns may be raw JSON envelopes, which
+    # otherwise confuse the model about which watch is in play.
+    conv = [({**m, "content": _prose(m.get("content"))}
+             if isinstance(m, dict) and m.get("role") == "assistant" else m)
+            for m in (messages or [])]
+    focus = _focused_watch_name(conv, cfg)
+    try:
+        reply, eval_count, prompt_count, duration_ns = _chat_reply_natural(system, conv, model)
+        action = _extract_watch_action(conv, reply, cfg, model, focus)
+        data = _normalize_turn({"message": reply, **action})
 
         listings = None
         lq = data.get("listing_query")
@@ -1280,13 +1500,14 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
             listings = _run_listing_query(lq)
 
         _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop"}
-        _existing = {w.name for w in cfg.watches}
-        watch_actions = [
-            {"action": a.get("action"), "name": a.get("name")}
-            for a in (data.get("watch_actions") or [])
-            if isinstance(a, dict) and a.get("action") in _VALID_ACTIONS
-            and a.get("name") in _existing
-        ] or None
+        watch_actions = []
+        for a in (data.get("watch_actions") or []):
+            if not (isinstance(a, dict) and a.get("action") in _VALID_ACTIONS):
+                continue
+            real = _resolve_watch_name(a.get("name", ""), cfg)   # tolerate model name drift
+            if real:
+                watch_actions.append({"action": a.get("action"), "name": real})
+        watch_actions = watch_actions or None
 
         message = data["message"]   # _normalize_turn guarantees a message (never raw JSON)
         suggestions = data.get("watch_suggestions") or (
@@ -1316,7 +1537,7 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
             "tokens":            eval_count,
             "prompt_tokens":     prompt_count,
             "duration_ms":       duration_ns // 1_000_000,
-            "raw":               raw,
+            "raw":               message,   # clean prose persisted to history (not a JSON blob)
         }
     except httpx.ConnectError:
         return {"message": "Ollama is not reachable. Start the Ollama service and try again.",

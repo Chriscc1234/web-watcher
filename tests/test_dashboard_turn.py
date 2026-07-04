@@ -93,41 +93,138 @@ def test_normalize_marketplace_urls_strips_bogus_city_subdomain():
     assert len(changes) == 2   # offerup + ebay city subdomains fixed
 
 
-def test_asking_a_question_holds_create_suggestion(monkeypatch):
-    import json, types
+def _mock_two_phase(monkeypatch, phase1_text, phase2_obj):
+    """Mock Ollama for the two-phase turn: phase 1 (no 'format') returns natural prose,
+    phase 2 ('format'=='json') returns the extraction object."""
+    import json as _json
     from web_watcher.dashboard import server as S
 
-    canned = {"message": {"content": ""}, "eval_count": 1, "prompt_eval_count": 1, "eval_duration": 1}
+    def _content_for(payload):
+        if payload.get("format") == "json":
+            return _json.dumps(phase2_obj)
+        return phase1_text
+
     class _R:
+        def __init__(self, payload): self._p = payload
         def raise_for_status(self): pass
-        def json(self): return canned
+        def json(self):
+            return {"message": {"content": _content_for(self._p)},
+                    "eval_count": 1, "prompt_eval_count": 1, "eval_duration": 1}
     class _C:
         def __init__(self, *a, **k): pass
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def post(self, *a, **k): return _R()
+        def post(self, *a, **k): return _R(k.get("json", {}))
     monkeypatch.setattr(S.httpx, "Client", _C)
+
+
+def test_asking_a_question_holds_create_suggestion(monkeypatch):
+    import types
+    from web_watcher.dashboard import server as S
     cfg = types.SimpleNamespace(watches=[])
 
-    # Assistant is ASKING → the brand-new watch is held back.
-    canned["message"]["content"] = json.dumps({
-        "message": "Do you want trucks or SUVs, and what's your budget?",
-        "watch_suggestion": {"action": "create", "name": "X",
-                             "urls": ["https://seattle.craigslist.org/search/cta?query=truck"],
-                             "instruction": "i", "mode": "schedule", "interval_minutes": 30},
-    })
+    # Phase 1 asks a question; even if phase 2 proposes a create, the "?" guard holds it back.
+    _mock_two_phase(monkeypatch,
+                    "Do you want trucks or SUVs, and what's your budget?",
+                    {"intent": "create",
+                     "watch": {"name": "X",
+                               "urls": ["https://seattle.craigslist.org/search/cta?query=truck"],
+                               "instruction": "i", "mode": "schedule", "interval_minutes": 30}})
     out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    assert out["message"].endswith("?")
     assert out["watch_suggestion"] is None
 
-    # A confident, non-question turn still ships the watch.
-    canned["message"]["content"] = json.dumps({
-        "message": "Setting that up now.",
-        "watch_suggestion": {"action": "create", "name": "X",
-                             "urls": ["https://seattle.craigslist.org/search/cta?query=truck"],
-                             "instruction": "i", "mode": "schedule", "interval_minutes": 30},
-    })
+    # A confident, non-question turn ships the watch that phase 2 extracts.
+    _mock_two_phase(monkeypatch,
+                    "Setting that up now.",
+                    {"intent": "create",
+                     "watch": {"name": "X",
+                               "urls": ["https://seattle.craigslist.org/search/cta?query=truck"],
+                               "instruction": "i", "mode": "schedule", "interval_minutes": 30}})
     out2 = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    assert out2["message"] == "Setting that up now."
     assert out2["watch_suggestion"] is not None
+    assert out2["watch_suggestion"]["action"] == "create"
+
+
+def test_intent_none_produces_no_card(monkeypatch):
+    """Plain conversation (no concrete action) → prose reply, no watch card."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[])
+    _mock_two_phase(monkeypatch, "Sure, happy to help — what would you like to watch?",
+                    {"intent": "none", "watch": None})
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    assert out["watch_suggestion"] is None
+    assert "watch" in out["message"].lower()
+
+
+def test_focused_watch_name_tracks_last_mentioned():
+    import types
+    from web_watcher.dashboard.server import _focused_watch_name
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Diesel Vehicles (OfferUp)"),
+        types.SimpleNamespace(name="Manual Sports Cars (Seattle)"),
+    ])
+    msgs = [
+        {"role": "user", "content": "how's the diesel vehicles (offerup) watch?"},
+        {"role": "assistant", "content": "It's found 3 so far."},
+        {"role": "user", "content": "change something else on it"},
+    ]
+    # "it" refers to the last-named existing watch.
+    assert _focused_watch_name(msgs, cfg) == "Diesel Vehicles (OfferUp)"
+
+
+def test_focus_ignores_site_name_collision():
+    """'also look on offer up' must NOT resolve to a watch merely NAMED '(OfferUp)';
+    focus stays on the sports-car watch just discussed."""
+    import types
+    from web_watcher.dashboard.server import _focused_watch_name
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Diesel Vehicles (OfferUp)"),
+        types.SimpleNamespace(name="Manual Sports Cars (Seattle)"),
+    ])
+    msgs = [
+        {"role": "user", "content": "expand the sports car watch"},
+        {"role": "assistant", "content": "Sure, I'll broaden the Manual Sports Cars watch."},
+        {"role": "user", "content": "also look on offer up as well"},
+    ]
+    # Newest message has no watch tokens → falls back to the sports-car mention, NOT diesel.
+    assert _focused_watch_name(msgs, cfg) == "Manual Sports Cars (Seattle)"
+
+
+def test_focus_matches_paraphrase_tokens():
+    import types
+    from web_watcher.dashboard.server import _focused_watch_name
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Manual Sports Cars (Seattle)"),
+        types.SimpleNamespace(name="Refrigerators under $800 (up to 36\" wide)"),
+    ])
+    assert _focused_watch_name(
+        [{"role": "user", "content": "how's my sports cars watch?"}], cfg
+    ) == "Manual Sports Cars (Seattle)"
+
+
+def test_resolve_watch_name_tolerates_dropped_site_suffix():
+    """The model naming a watch 'Diesel Vehicles' must resolve to 'Diesel Vehicles (OfferUp)'
+    so an update lands instead of 404ing."""
+    import types
+    from web_watcher.dashboard.server import _resolve_watch_name
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Diesel Vehicles (OfferUp)"),
+        types.SimpleNamespace(name="Manual Sports Cars (Seattle)"),
+    ])
+    assert _resolve_watch_name("Diesel Vehicles", cfg) == "Diesel Vehicles (OfferUp)"
+    assert _resolve_watch_name("diesel vehicles (offerup)", cfg) == "Diesel Vehicles (OfferUp)"
+    assert _resolve_watch_name("sports cars", cfg) == "Manual Sports Cars (Seattle)"
+    assert _resolve_watch_name("Totally Unknown", cfg) is None
+
+
+def test_prose_extracts_message_from_json_blob():
+    from web_watcher.dashboard.server import _prose
+    assert _prose('{"message": "hello there", "watch_suggestion": null}') == "hello there"
+    assert _prose('{"name": "Trucks", "action": "update", "urls": ["x"]}').startswith("(I updated")
+    assert _prose("just plain text") == "just plain text"
 
 
 def test_merge_watch_update_preserves_mode_and_id():

@@ -37,6 +37,39 @@ def _child_python() -> str:
     return str(exe)
 
 
+def _console_python() -> str:
+    """python.exe (with a console), so setup progress is visible."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        cand = exe.with_name("python.exe")
+        if cand.exists():
+            return str(cand)
+    return str(exe)
+
+
+def _needs_setup() -> bool:
+    """True if first-run setup never completed (marker absent) — e.g. a stalled/interrupted
+    install. Absent marker → we finish setup before launching, so the app self-heals."""
+    try:
+        from web_watcher import paths
+        return not (paths.data_dir() / ".setup_complete").exists()
+    except Exception:
+        return False
+
+
+def _run_setup() -> None:
+    """Finish first-run setup (Ollama + models + browser + config) in a visible console, with
+    the pull-retry built into install.py. Runs only when the completion marker is missing."""
+    prov = ROOT / "provision.py"
+    if not prov.exists():
+        return
+    print("  Finishing Web Watcher setup (first run or a previous run was interrupted)…")
+    try:
+        subprocess.run([_console_python(), str(prov)], cwd=str(ROOT))
+    except Exception as exc:
+        print(f"  (setup step failed: {exc})")
+
+
 def _run_app() -> int:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     # Force UTF-8 for the child's stdio/filesystem. The bundled runtime otherwise defaults to
@@ -83,6 +116,8 @@ def _do_reset(root: Path = ROOT) -> None:
 def main() -> int:
     while True:
         _apply_pending()
+        if _needs_setup():          # interrupted/first-run install → finish it, then launch
+            _run_setup()
         code = _run_app()
         # A fresh-install reset takes priority, then an update-and-restart. Both close the
         # window and drop a flag on the way out; we act on it here, then relaunch.

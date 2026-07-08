@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -714,6 +715,25 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         _save_watcher_history([])
         return {"ok": True}
 
+    @app.post("/api/bug/report")
+    def submit_bug(body: dict):
+        """Bundle a self-contained bug report (description + recent logs + version + system +
+        a CREDENTIAL-FREE watch summary) into a zip on the Desktop, so the tester can send it
+        to the developer. Fully offline; never includes config.yaml or notification secrets."""
+        title = (body.get("title") or "").strip() or "Bug report"
+        desc  = (body.get("description") or "").strip()
+        try:
+            path = _write_bug_report(title, desc)
+        except Exception as exc:
+            log.warning("bug report failed: %s", exc)
+            raise HTTPException(500, detail=f"Could not create the report: {exc}")
+        try:                      # best-effort: pop open the folder so it's easy to find/send
+            import os as _os
+            _os.startfile(str(path.parent))   # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return {"ok": True, "path": str(path), "name": path.name}
+
     # ------------------------------------------------------------------
     # Orchestrator — the single driver (opt-in; The Watcher runs your watches)
     # ------------------------------------------------------------------
@@ -1027,6 +1047,81 @@ def _save_watcher_history(history: list) -> None:
         _WATCHER_HISTORY_PATH.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log.warning("Could not save watcher history: %s", exc)
+
+
+def _desktop_dir():
+    """The user's Desktop (OneDrive-redirected or local), else the data dir — wherever the bug
+    report is easiest for the tester to find and send."""
+    for env in ("OneDrive", "USERPROFILE"):
+        base = os.environ.get(env, "")
+        if base:
+            d = Path(base) / "Desktop"
+            if d.is_dir():
+                return d
+    return paths.data_dir()
+
+
+def _watch_summary_no_secrets(cfg) -> str:
+    """A repro-useful watch list with NO notification credentials (no Telegram token / email
+    password) — just name, mode, urls, instruction."""
+    lines = []
+    for w in getattr(cfg, "watches", []):
+        try:
+            lines.append(json.dumps({
+                "name": w.name, "mode": getattr(w, "mode", None),
+                "autonomous": getattr(w, "autonomous", None),
+                "urls": getattr(w, "urls", None),
+                "instruction": getattr(w, "instruction", None),
+                "judgment_prompt": getattr(w, "judgment_prompt", None),
+            }, ensure_ascii=False))
+        except Exception:
+            pass
+    return "\n".join(lines) or "(no watches)"
+
+
+def _write_bug_report(title: str, description: str):
+    """Write a zip (report.txt + newest logs) to the Desktop and return its path. Deliberately
+    excludes config.yaml and any notification secrets."""
+    import platform, zipfile
+    from datetime import datetime
+    from web_watcher.__version__ import __version__
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = _desktop_dir() / f"WebWatcher-bug-{ts}.zip"
+
+    try:
+        cfg = _load_cfg()
+        watches = _watch_summary_no_secrets(cfg)
+    except Exception:
+        watches = "(could not read watches)"
+
+    report = (
+        f"WEB WATCHER BUG REPORT\n"
+        f"======================\n"
+        f"When       : {datetime.now().isoformat(timespec='seconds')}\n"
+        f"App version: {__version__}\n"
+        f"OS         : {platform.platform()}\n"
+        f"Python     : {platform.python_version()}\n\n"
+        f"TITLE: {title}\n\n"
+        f"WHAT HAPPENED:\n{description or '(no description provided)'}\n\n"
+        f"WATCHES (no credentials included):\n{watches}\n"
+    )
+
+    logs = []
+    try:
+        logs = sorted(paths.log_dir().glob("web_watcher_*.log"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)[:2]
+    except Exception:
+        pass
+
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("report.txt", report)
+        for lf in logs:
+            try:
+                z.write(lf, arcname=f"logs/{lf.name}")
+            except Exception:
+                pass
+    return dest
 
 
 def _action_broaden_terms(watch_name: str, manager, bg, terms_override=None) -> dict:

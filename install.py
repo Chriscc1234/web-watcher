@@ -89,55 +89,71 @@ def _run_silently(cmd: list[str]) -> bool:
         return False
 
 
-def _pull_model(model_name: str) -> bool:
-    """
-    Pull a model as a background process, streaming progress to stdout.
-    Returns True on success.
-    """
+# A model download that makes no progress for this long is treated as stalled (flaky
+# network) and restarted — `ollama pull` resumes from the cached partial layers, so retrying
+# is cheap and safe. Without this, a single network blip hangs the whole install forever.
+_PULL_STALL_SECONDS = 150
+_PULL_MAX_ATTEMPTS = 6
+
+
+def _pull_once(model_name: str) -> str:
+    """One `ollama pull` attempt with stall detection. Returns 'ok', 'stalled', or 'failed'."""
     log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix=f"ww_pull_{model_name.replace(':', '_')}_")
     os.close(log_fd)
     log_path = Path(log_path)
-
     try:
         with log_path.open("w") as log_f:
-            proc = subprocess.Popen(
-                ["ollama", "pull", model_name],
-                stdout=log_f,
-                stderr=log_f,
-            )
+            proc = subprocess.Popen(["ollama", "pull", model_name], stdout=log_f, stderr=log_f)
 
         last_pos = 0
-        last_line = ""
+        last_growth = time.time()
         while proc.poll() is None:
             time.sleep(1)
             try:
                 content = log_path.read_text(errors="ignore")
                 if len(content) > last_pos:
+                    last_growth = time.time()
                     new_text = content[last_pos:]
                     last_pos = len(content)
                     lines = [l.strip() for l in new_text.splitlines() if l.strip()]
                     if lines:
-                        last_line = lines[-1]
-                        display = last_line[:70]
-                        print(f"\r    {display:<72}", end="", flush=True)
+                        print(f"\r    {lines[-1][:70]:<72}", end="", flush=True)
+                elif time.time() - last_growth > _PULL_STALL_SECONDS:
+                    print()
+                    warn(f"download stalled ({_PULL_STALL_SECONDS}s no progress) — restarting it")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return "stalled"
             except Exception:
                 pass
-
         print()  # newline after progress
-
-        if proc.returncode != 0:
-            tail = log_path.read_text(errors="ignore")[-500:]
-            err(f"ollama pull {model_name!r} exited {proc.returncode}")
-            if tail.strip():
-                print(f"    --- log tail ---\n{tail}\n    ----------------")
-            return False
-        return True
-
+        return "ok" if proc.returncode == 0 else "failed"
     finally:
         try:
             log_path.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _pull_model(model_name: str) -> bool:
+    """Pull a model, streaming progress, with automatic resume on stall/failure. Ollama caches
+    partial layers, so each retry continues where the last left off. Returns True on success."""
+    if _model_present(model_name):
+        ok(f"{model_name} already present")
+        return True
+    for attempt in range(1, _PULL_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            info(f"Retrying {model_name} download (attempt {attempt}/{_PULL_MAX_ATTEMPTS}) — "
+                 "resumes where it left off ...")
+            time.sleep(2)
+        result = _pull_once(model_name)
+        if result == "ok" or _model_present(model_name):
+            return True
+        # 'stalled' or 'failed' — loop and resume.
+    err(f"ollama pull {model_name!r} failed after {_PULL_MAX_ATTEMPTS} attempts")
+    return False
 
 
 def _model_present(model_name: str) -> bool:
@@ -611,6 +627,15 @@ def main() -> None:
 
     if not args.skip_shortcuts:
         create_shortcuts(args)
+
+    # Drop a completion marker so the launcher knows setup finished. If an install is
+    # interrupted (e.g. a stalled download), this file is absent and the launcher re-runs
+    # setup on next app start — so a broken install self-heals by just reopening the app.
+    try:
+        marker = paths.data_dir() / ".setup_complete"
+        marker.write_text(f"{tier.tier_name} {tier.text_model}\n", encoding="utf-8")
+    except Exception as exc:
+        warn(f"could not write setup marker: {exc}")
 
     print()
     print(_c("1;32", "=" * 50))

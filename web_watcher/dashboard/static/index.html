@@ -246,7 +246,29 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   <button onclick="showTab('history',this)">Activity</button>
   <button onclick="showTab('services',this)">Settings</button>
   <button onclick="showTab('console',this)">Console</button>
+  <button style="margin-left:auto" title="Report a problem to the developer" onclick="openBugModal()">🐛 Report a bug</button>
 </nav>
+
+<!-- ================================================================ BUG REPORT -->
+<div class="modal-overlay" id="bug-modal" style="display:none" onclick="if(event.target===this)closeBugModal()">
+  <div class="modal" style="max-width:520px">
+    <h3 style="margin-top:0">🐛 Report a bug</h3>
+    <p style="font-size:13px;color:var(--dim);margin:0 0 12px">
+      Describe what went wrong. When you submit, a report file (with recent logs — no passwords)
+      is saved to your <b>Desktop</b>; send that file to whoever gave you the app so they can fix it.</p>
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Short title</label>
+    <input id="bug-title" type="text" placeholder="e.g. Chat froze when I edited a watch"
+           style="width:100%;margin-bottom:12px">
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">What happened? What were you doing?</label>
+    <textarea id="bug-desc" rows="5" placeholder="Steps, what you expected, what actually happened…"
+              style="width:100%"></textarea>
+    <div id="bug-result" style="font-size:13px;margin-top:10px"></div>
+    <div class="modal-footer" style="margin-top:14px">
+      <button onclick="closeBugModal()">Cancel</button>
+      <button class="success" id="bug-submit" onclick="submitBug(this)">Save report</button>
+    </div>
+  </div>
+</div>
 
 <!-- ================================================================ SERVICES -->
 <div id="tab-services" class="tab-panel">
@@ -1519,6 +1541,35 @@ function closeModal() {
 
 function toggleAdvanced() {
   document.getElementById('advanced-section').classList.toggle('open');
+}
+
+// ---- Bug reporter: bundle a report file to the Desktop for the user to send on ----
+function openBugModal() {
+  document.getElementById('bug-result').textContent = '';
+  document.getElementById('bug-title').value = '';
+  document.getElementById('bug-desc').value = '';
+  const b = document.getElementById('bug-submit');
+  b.disabled = false; b.textContent = 'Save report';
+  document.getElementById('bug-modal').style.display = 'flex';
+}
+function closeBugModal() {
+  document.getElementById('bug-modal').style.display = 'none';
+}
+async function submitBug(btn) {
+  const title = document.getElementById('bug-title').value.trim();
+  const desc  = document.getElementById('bug-desc').value.trim();
+  const result = document.getElementById('bug-result');
+  if (!desc && !title) { result.innerHTML = '<span style="color:var(--red)">Please describe what happened.</span>'; return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await api('/api/bug/report', { method: 'POST', body: JSON.stringify({ title, description: desc }) });
+    result.innerHTML = `<span style="color:var(--green)">✓ Saved <b>${r.name}</b> to your Desktop.</span>`
+      + `<br><span style="color:var(--dim)">Send that file to whoever gave you Web Watcher — it has the logs they need to fix this.</span>`;
+    btn.textContent = 'Saved ✓';
+  } catch (e) {
+    result.innerHTML = `<span style="color:var(--red)">Could not save the report: ${e.message}</span>`;
+    btn.disabled = false; btn.textContent = 'Save report';
+  }
 }
 
 async function saveWatch() {

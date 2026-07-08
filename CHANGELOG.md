@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.0-alpha] — 2026-07-04 (Self-healing install + bug reporter)
+
+### Added — self-healing setup (from the live VM clean-install test)
+- **Model downloads auto-retry on stall.** `install.py` now detects a stalled `ollama pull` (no
+  progress for 150s — a flaky-network hang, seen live) and restarts it; Ollama resumes from its
+  cached layers, so retries are cheap. Up to 6 attempts. Previously a single network blip hung the
+  whole install forever with no recovery.
+- **Interrupted installs self-heal on next launch.** Provisioning drops a `.setup_complete` marker
+  when it finishes; if that marker is missing (a crashed/stalled install), the launcher re-runs
+  setup — in a visible console, with the retry above — *before* opening the app. So a broken install
+  fixes itself by just reopening the app (or re-running the installer); no command line ever needed.
+
+### Added — in-app bug reporter
+- **"🐛 Report a bug" button** (top nav) → a small form (title + what happened). On submit it bundles
+  a `WebWatcher-bug-<timestamp>.zip` onto the **Desktop** (recent logs + app version + OS + a
+  **credential-free** watch summary) and opens the folder, so a tester can send it to the developer.
+  Fully offline; the report never includes `config.yaml` or notification secrets (`POST /api/bug/report`,
+  `_write_bug_report`; test asserts no Telegram/email secrets leak).
+
+---
+
 ## [0.19.0-alpha] — 2026-07-03 (Per-user data root — data separated from code)
 
 ### Changed

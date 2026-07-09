@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.6-alpha] — 2026-07-08 (Fix 6GB model tag + re-scan applies safely)
+
+### Fixed — model setup
+- **6GB GPUs now get the right model.** The 6GB tier referenced `qwen2.5:7b-q4_K_M`, which is not
+  a real Ollama manifest — so on a 6GB card the pull failed ("manifest: file does not exist") and
+  setup fell all the way back to CPU/`qwen2.5:3b`. Fixed to plain `qwen2.5:7b` (which is already
+  q4_K_M). A 6GB machine now runs the capable 7B model instead of the tiny CPU one.
+- **Re-scan applies the new model only after it's downloaded.** "Re-scan hardware" used to switch
+  the config to the new model immediately and download it in the background — leaving the app
+  pointed at a model that wasn't on disk yet, so it broke until the multi-GB download finished. Now
+  it downloads first and switches the config only once every model is present; your current model
+  keeps working the whole time, then it swaps automatically. A failed download leaves you on the
+  working model.
+
+### Note
+- The in-app chat handles watch creation well on the 7B+ models; the tiny 3B (CPU-only) model is
+  prone to mixing up a new-watch request with an existing watch when a word overlaps a watch name.
+  Running a GPU tier (7B+) is strongly recommended for the assistant.
+
+---
+
 ## [0.20.5-alpha] — 2026-07-08 (Chat only reads the recent thread)
 
 ### Fixed — chat context

@@ -57,7 +57,7 @@ def test_select_tier_exactly_8gb():
 def test_select_tier_exactly_6gb():
     tier = _select_tier(6_000)
     assert tier.tier_name == "6GB"
-    assert tier.text_model == "qwen2.5:7b-q4_K_M"
+    assert tier.text_model == "qwen2.5:7b"
     assert tier.vision_model == "moondream"
 
 
@@ -199,7 +199,7 @@ def test_wmi_not_found_gives_none(_mock):
 def test_detect_tier_6gb_floor(mock_vram):
     tier = detect_tier()
     assert tier.tier_name == "6GB"
-    assert tier.text_model == "qwen2.5:7b-q4_K_M"
+    assert tier.text_model == "qwen2.5:7b"
     assert tier.vision_model == "moondream"
 
 

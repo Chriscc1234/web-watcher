@@ -16,7 +16,7 @@ Tier table (bigger hardware gets bigger models — 16GB is not the ceiling)
 ≥24 000 MB  →  24GB     qwen2.5:32b           qwen2.5vl:7b
 ≥16 000 MB  →  16GB     qwen2.5:14b           qwen2.5vl:7b
 ≥ 8 000 MB  →  8-12GB   qwen2.5:7b            qwen2.5vl:7b
-≥ 6 000 MB  →  6GB      qwen2.5:7b-q4_K_M     moondream
+≥ 6 000 MB  →  6GB      qwen2.5:7b            moondream
      <6 000  →  CPU      qwen2.5:3b            (vision disabled)
 
 council_model (recovery/judge/assistant reasoning) defaults to each tier's text_model.
@@ -94,7 +94,7 @@ _TIERS: list[TierInfo] = [
     TierInfo("24GB",    24_000, "qwen2.5:32b",       "qwen2.5vl:7b",  "qwen2.5:32b"),
     TierInfo("16GB",    16_000, "qwen2.5:14b",       "qwen2.5vl:7b",  "qwen2.5:14b"),
     TierInfo("8-12GB",   8_000, "qwen2.5:7b",        "qwen2.5vl:7b",  "qwen2.5:7b"),
-    TierInfo("6GB",      6_000, "qwen2.5:7b-q4_K_M", "moondream",     "qwen2.5:7b-q4_K_M"),
+    TierInfo("6GB",      6_000, "qwen2.5:7b",        "moondream",     "qwen2.5:7b"),
     TierInfo("CPU",          0, "qwen2.5:3b",         None,           "qwen2.5:3b"),
 ]
 

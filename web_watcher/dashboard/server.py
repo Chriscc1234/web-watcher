@@ -46,9 +46,15 @@ log = logging.getLogger(__name__)
 _rescan_state: dict = {"status": "idle", "detail": "", "models": []}
 
 
-def _pull_models_bg(models: list[str]) -> None:
-    """Pull each model via the Ollama API in a background thread, updating _rescan_state so the
-    UI can show progress. Ollama caches layers, so re-pulling an already-present model is cheap."""
+def _apply_new_models_bg(rec: dict) -> None:
+    """Download the recommended models, then — ONLY once they're all present — switch the config
+    to them. Pulling first and switching last means the app keeps using the current (working)
+    model for the minutes the download takes, instead of pointing at a model that isn't on disk
+    yet (which would break every chat/sweep until the pull finished). Runs in a background thread;
+    updates _rescan_state so the UI can show progress. Ollama caches layers, so re-pulls are cheap."""
+    models = [m for m in (rec.get("text_model"), rec.get("vision_model"),
+                          rec.get("council_model")) if m]
+    models = list(dict.fromkeys(models))   # dedupe, keep order
     _rescan_state.update(status="pulling", detail="Downloading updated AI models…", models=list(models))
     try:
         for m in models:
@@ -57,10 +63,23 @@ def _pull_models_bg(models: list[str]) -> None:
                     r.raise_for_status()
                     for _ in r.iter_lines():
                         pass   # drain the progress stream until the pull completes
-        _rescan_state.update(status="done", detail="Updated models are ready.", models=[])
+        # Every model is now on disk — safe to switch. Re-load so we don't clobber a config the
+        # user edited during the download, then persist. New model is picked up on the next
+        # chat turn / sweep (both read cfg.models fresh each time).
+        from web_watcher.config import load, save
+        cfg = load()
+        cfg.models.text_model    = rec.get("text_model") or cfg.models.text_model
+        cfg.models.vision_model  = rec.get("vision_model") or ""
+        cfg.models.council_model = rec.get("council_model") or rec.get("text_model") or ""
+        save(cfg)
+        log.info("re-scan applied models: %s", cfg.models.text_model)
+        _rescan_state.update(status="done",
+                             detail=f"Updated — now using {cfg.models.text_model}.", models=[])
     except Exception as exc:
+        # Leave the config on the OLD (working) model so the app keeps functioning.
         log.warning("re-scan model pull failed: %s", exc)
-        _rescan_state.update(status="error", detail=f"Model download failed: {exc}")
+        _rescan_state.update(status="error",
+                             detail=f"Model download failed (still using your current model): {exc}")
 
 _CHAT_SYSTEM_BASE = """\
 You are the built-in assistant for Web Watcher — a personal, fully offline AI \
@@ -877,7 +896,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         """Re-detect the GPU/tier (for a hardware swap). If the recommended models differ from
         what's configured, switch to them and download the new ones in the background."""
         import threading
-        from web_watcher.config import load, save
+        from web_watcher.config import load
         from web_watcher.gpu_detect import probe_system
         spec = probe_system()
         rec = spec.get("recommended") or {}
@@ -887,21 +906,15 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         if not changed:
             return {"changed": False, "specs": spec,
                     "message": f"No change — your hardware maps to the {spec['recommended_tier']} tier."}
-        # Apply the new tier's models, then pull whatever's newly needed in the background.
-        cfg.models.text_model   = rec.get("text_model") or cfg.models.text_model
-        cfg.models.vision_model = rec.get("vision_model") or ""
-        cfg.models.council_model = rec.get("council_model") or rec.get("text_model") or ""
-        save(cfg)
-        need = [m for m in (rec.get("text_model"), rec.get("vision_model"),
-                            rec.get("council_model")) if m]
-        need = list(dict.fromkeys(need))   # dedupe, keep order
+        # Download first, switch the config LAST (inside the thread, after every model is on disk),
+        # so the app keeps using the current working model until the new one is fully ready.
         if _rescan_state.get("status") != "pulling":
-            threading.Thread(target=_pull_models_bg, args=(need,), daemon=True).start()
+            threading.Thread(target=_apply_new_models_bg, args=(rec,), daemon=True).start()
         where = spec.get("gpu_name") or "your hardware"
         return {"changed": True, "specs": spec,
                 "message": (f"Detected {where} → {spec['recommended_tier']} tier. "
-                            "Downloading the updated AI models in the background; "
-                            "they'll be used automatically once ready.")}
+                            "Downloading the updated AI models in the background — your current "
+                            "model keeps working until they're ready, then it switches automatically.")}
 
     # ------------------------------------------------------------------
     # Auto-update

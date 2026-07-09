@@ -33,6 +33,9 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DefaultDirName={localappdata}\Programs\WebWatcher
 DisableProgramGroupPage=yes
+; Show the welcome page (Inno 6 hides it by default) so the first screen can say whether this
+; is a fresh install or an update — see InitializeWizard in [Code].
+DisableWelcomePage=no
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\app\web_watcher\dashboard\static\icon.ico
@@ -65,10 +68,12 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\{#AppName}";  Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\launcher.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\web_watcher\dashboard\static\icon.ico"; AppUserModelID: "WebWatcher.App"; Tasks: desktopicon
 
 [Run]
-; First-run provisioning: ensure Ollama is present + pull the local models (shows its own
-; console window with progress). Uses the console python.exe so the user sees progress.
-Filename: "{app}\python\python.exe"; Parameters: """{app}\app\provision.py"""; WorkingDir: "{app}\app"; StatusMsg: "Setting up local AI models (first run — this downloads several GB)…"; Flags: postinstall
-; Offer to launch the app after install.
+; ONE clean finish-page checkbox: "Launch Web Watcher now". First-run provisioning (Ollama +
+; model pulls) is NOT run here — the launcher does it: launcher.py's _needs_setup()/_run_setup()
+; runs provision in a visible console BEFORE opening the app whenever setup hasn't completed
+; (marker absent). Running provision.py as its own postinstall entry showed a confusing bare
+; "run python …provision.py" checkbox (it has no Description) that a user could uncheck; dropping
+; it leaves a single obvious action, and the model download just shifts to first launch.
 Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\launcher.py"""; WorkingDir: "{app}\app"; Description: "Launch {#AppName} now"; Flags: postinstall nowait skipifsilent
 
 ; NOTE: no [UninstallRun] to remove shortcuts — Inno automatically removes the [Icons] it
@@ -80,6 +85,41 @@ Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\launcher.py"""; W
 WelcomeLabel2=This will install [name/ver] on your computer.%n%nWeb Watcher bundles its own Python, so nothing else is required up front. On first launch it will download the local AI models (several GB, one time) via Ollama — an internet connection is needed for that step, but the app runs fully offline afterward.
 
 [Code]
+// Uninstall registry subkey Inno writes for this AppId (per-user → HKCU, elevated → HKLM).
+const
+  UninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E1D9A4C-2F5B-4C8E-9A31-0B2C3D4E5F60}_is1';
+
+// The version of any already-installed Web Watcher, or '' if this is a fresh machine.
+function PriorVersion(): string;
+var
+  v: string;
+begin
+  Result := '';
+  if RegQueryStringValue(HKCU, UninstallSubkey, 'DisplayVersion', v) then
+    Result := v
+  else if RegQueryStringValue(HKLM, UninstallSubkey, 'DisplayVersion', v) then
+    Result := v;
+end;
+
+// If Web Watcher is already installed, reframe the first screen as an UPDATE (not a fresh
+// install) and reassure the user their data is kept. The same installer handles both — Inno
+// upgrades in place because the AppId matches — so this is messaging, not a code path change.
+procedure InitializeWizard();
+var
+  prev: string;
+begin
+  prev := PriorVersion();
+  if prev <> '' then
+  begin
+    WizardForm.WelcomeLabel1.Caption := 'Update Web Watcher';
+    WizardForm.WelcomeLabel2.Caption :=
+      'Web Watcher ' + prev + ' is already installed on this computer.' + #13#10 + #13#10 +
+      'Setup will update it to version {#AppVersion}. Your watches, saved logins, results, ' +
+      'and history are all kept — nothing personal is removed.' + #13#10 + #13#10 +
+      'Click Next to update.';
+  end;
+end;
+
 // On uninstall, offer to also delete the user's data. It lives OUTSIDE the app folder
 // (%LOCALAPPDATA%\WebWatcher — watches, results, saved logins, logs, DB), so a normal
 // uninstall keeps it for a future reinstall. Give the user a clear one-time choice.

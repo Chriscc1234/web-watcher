@@ -11,6 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.3-alpha] — 2026-07-08 (Installer polish)
+
+### Changed — installer
+- **Detects an existing install.** When Web Watcher is already installed, the first screen now
+  says *"Update Web Watcher"* — names the installed version, states it will update in place, and
+  reassures that watches, saved logins, results, and history are kept — instead of looking like a
+  fresh install. (Same installer handles both; the matching AppId upgrades in place.)
+- **One clean finish-page checkbox.** Removed the confusing bare "run …provision.py" checkbox from
+  the final page; the only option is now **"Launch Web Watcher now."** First-run setup (Ollama +
+  model download) is handled by the launcher on first launch, in a visible console.
+
+---
+
 ## [0.20.2-alpha] — 2026-07-08 (New-watch fix + System panel)
 
 ### Fixed — The Watcher can create a NEW watch when others already exist

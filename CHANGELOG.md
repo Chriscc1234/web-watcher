@@ -11,6 +11,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.7-alpha] — 2026-07-08 (Asks for a link instead of inventing one)
+
+### Fixed — watch creation for non-marketplace requests
+- **It now asks for the URL instead of guessing.** When you ask it to watch a specific site, local
+  page, news topic, or schedule that it doesn't have an address for (e.g. "look at the Anacortes
+  clam digger every week"), the assistant now **asks for the link** — instead of quietly inventing
+  a bogus Craigslist search or creating a watch with no URL that couldn't monitor anything. Give it
+  the page's web address and it sets the watch up on that page. Marketplace item searches
+  (Craigslist/eBay/Facebook/OfferUp) still build their own search URLs as before.
+- **Hard guard: a watch is never created without a real URL.** Even if the model slips, a
+  suggestion with an empty/invalid URL list is dropped rather than shown.
+
+### Known limitation
+- Asking for several watches in one sentence ("watch for a canopy **and** a snowblower") still
+  creates only the first — ask for them one at a time for now.
+
+---
+
 ## [0.20.6-alpha] — 2026-07-08 (Fix 6GB model tag + re-scan applies safely)
 
 ### Fixed — model setup

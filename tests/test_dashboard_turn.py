@@ -166,6 +166,25 @@ def test_long_history_is_capped_before_the_model(monkeypatch):
     assert seen["n"] <= S._CHAT_CONTEXT_MESSAGES        # only the recent window reached the model
 
 
+def test_urlless_create_is_suppressed(monkeypatch):
+    """Regression (the 'Anacortes clam digger' bug): the model sometimes proposes a create with
+    an empty urls list for a request it couldn't turn into a real page. A watch with no URL can't
+    monitor anything, so the card must be dropped (the assistant asks for the link instead)."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[])
+    _mock_two_phase(monkeypatch,
+                    "Sure — what's the web address of the page you want me to check?",
+                    {"intent": "create",
+                     "watch": {"name": "Anacortes Clam Digger", "urls": [],
+                               "instruction": "clam digging status", "mode": "schedule",
+                               "interval_minutes": 60}})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "watch the anacortes clam digger every week"}], cfg, "m")
+    assert out["watch_suggestion"] is None          # no URL -> no card
+    assert "?" in out["message"]                     # …it asked for the link instead
+
+
 def test_committed_create_with_trailing_question_still_ships(monkeypatch):
     """Regression (the Miata bug): the user clearly asked to set up a watch and gave details;
     the assistant commits AND tacks on an optional question. The create card must still ship —

@@ -1473,6 +1473,13 @@ Your job here is only to UNDERSTAND and RESPOND:
   for now — tell me if you want one"); never hold up the watch to interrogate them for it.
 - Only ask a clarifying question when you genuinely can't tell WHAT they want to watch. Ask at
   most ONE, and only if it's truly essential — otherwise proceed with sensible defaults.
+- MARKETPLACE vs SPECIFIC PAGE: if the user is shopping for an ITEM on a marketplace you know
+  (Craigslist, eBay, Facebook Marketplace, OfferUp), you can build the search yourself — go ahead.
+  But if they want to watch a SPECIFIC website, a local page, a news topic, a schedule, or a
+  status page (e.g. "the Anacortes clam digger", "the Seattle Times for ferry news", "when the
+  campsite page opens"), you do NOT know the exact web address — ASK them for the link/URL of the
+  page to watch. NEVER invent a URL or quietly turn it into a Craigslist search. It's better to
+  ask "What's the web address of the page you want me to check?" than to guess wrong.
 - Keep it short and conversational."""
 
 _EXTRACT_SYSTEM = """\
@@ -1495,6 +1502,13 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
   watch (instruction/name), the price cap, and the site(s) → urls. Do NOT wait for the user to
   restate details they already gave. For anything they did NOT specify, use sensible defaults
   (no price cap; a reasonable marketplace for that item) rather than emitting "none".
+  URL RULE — a CREATE MUST have at least one real http(s) URL, and never an empty urls list:
+    • Item shopping on a marketplace you know (Craigslist/eBay/Facebook/OfferUp) → build the
+      search URL(s) yourself from the item + location.
+    • Watching a SPECIFIC website/page/topic/schedule/news (not a marketplace item search) where
+      the user has NOT given a URL → you do NOT know the address; return intent "none" (the
+      assistant is asking them for the link). Do NOT fabricate a URL and do NOT turn it into a
+      Craigslist search. Example: "watch the Anacortes clam digger" with no link → "none".
 
 - "update" — the user wants to CHANGE an EXISTING watch. Choose this ONLY when the user
   points at a specific existing watch: by typing (part of) its name, or by "it" / "that one" /
@@ -1760,6 +1774,15 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
         message = data["message"]   # _normalize_turn guarantees a message (never raw JSON)
         suggestions = data.get("watch_suggestions") or (
             [data["watch_suggestion"]] if isinstance(data.get("watch_suggestion"), dict) else [])
+        # Hard safety net: never ship a watch with no real URL. A watch with an empty (or bogus,
+        # non-http) urls list can't monitor anything — the model occasionally does this for a
+        # request it couldn't turn into a real page (e.g. "watch the Anacortes clam digger"). Drop
+        # those; the prompt tells the assistant to ask the user for the link instead.
+        def _has_real_url(s):
+            return isinstance(s, dict) and any(
+                isinstance(u, str) and u.strip().lower().startswith(("http://", "https://"))
+                for u in (s.get("urls") or []))
+        suggestions = [s for s in suggestions if _has_real_url(s)]
         # Confirm-before-creating: if the assistant is ASKING the user to clarify (and NOT also
         # committing to the watch), hold any 'create' suggestion until they answer — so a truly
         # half-formed request ("guitars?") gets clarified first instead of instantly spawning a

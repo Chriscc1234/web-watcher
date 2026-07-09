@@ -147,6 +147,25 @@ def test_asking_a_question_holds_create_suggestion(monkeypatch):
     assert out2["watch_suggestion"]["action"] == "create"
 
 
+def test_long_history_is_capped_before_the_model(monkeypatch):
+    """The chat UI never clears, so the client sends the whole transcript every turn. The turn
+    must only feed the RECENT tail to the model, not hundreds of stale messages."""
+    import types
+    from web_watcher.dashboard import server as S
+
+    seen = {}
+    def _fake_reply(system, messages, model):
+        seen["n"] = len(messages)
+        return ("ok", 1, 1, 1)
+    monkeypatch.setattr(S, "_chat_reply_natural", _fake_reply)
+    monkeypatch.setattr(S, "_extract_watch_action", lambda *a, **k: {})
+
+    cfg = types.SimpleNamespace(watches=[])
+    huge = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(200)]
+    S._complete_assistant_turn("sys", huge, cfg, "m")
+    assert seen["n"] <= S._CHAT_CONTEXT_MESSAGES        # only the recent window reached the model
+
+
 def test_committed_create_with_trailing_question_still_ships(monkeypatch):
     """Regression (the Miata bug): the user clearly asked to set up a watch and gave details;
     the assistant commits AND tacks on an optional question. The create card must still ship —

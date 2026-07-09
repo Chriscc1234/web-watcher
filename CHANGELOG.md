@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.5-alpha] — 2026-07-08 (Chat only reads the recent thread)
+
+### Fixed — chat context
+- **The Watcher no longer looks too far back.** The chat panel keeps the whole transcript on
+  screen and the client sent all of it to the model every turn, so it drifted onto watches
+  mentioned far earlier and could eventually overflow context. Now only the recent tail of the
+  conversation (last 14 messages / ~7 exchanges) is fed to the model and the focus tracker, so
+  back-references resolve to the current thread instead of ancient history.
+
+---
+
 ## [0.20.4-alpha] — 2026-07-08 (Watcher stops interrogating you)
 
 ### Fixed — creating a watch

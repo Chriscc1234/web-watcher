@@ -1526,6 +1526,13 @@ _COMMIT_RE = re.compile(
     re.IGNORECASE)
 
 
+# How many trailing chat messages the model + focus tracker actually see. The UI keeps the full
+# transcript on screen forever, but only this recent window is sent to the model each turn — enough
+# for short-term back-references ("it", "that one") without dragging in stale, unrelated history.
+# ~7 exchanges (user+assistant pairs).
+_CHAT_CONTEXT_MESSAGES = 14
+
+
 def _reply_commits_to_action(message: str) -> bool:
     """True if the assistant's reply states it IS setting up / changing a watch (not just asking).
     Lets a committed create proceed even if the message also contains an optional question."""
@@ -1705,11 +1712,17 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
     that turns any concrete request into a validated watch_suggestion / watch_actions /
     listing_query. Returns the response dict (plus a private "raw" the caller persists then
     drops). Powers the oversight Watcher chat. Never raises."""
+    # Only consider the RECENT tail of the conversation. The chat UI never clears itself, so the
+    # client sends the ENTIRE history every turn; feeding all of it to the model makes it look too
+    # far back (stale focus — it grabs a watch mentioned 20 messages ago — and eventually overflows
+    # context). Keep the last _CHAT_CONTEXT_MESSAGES so "it"/"that one" resolve to the current
+    # thread, not ancient history.
+    messages = (messages or [])[-_CHAT_CONTEXT_MESSAGES:]
     # Clean the replayed context: older assistant turns may be raw JSON envelopes, which
     # otherwise confuse the model about which watch is in play.
     conv = [({**m, "content": _prose(m.get("content"))}
              if isinstance(m, dict) and m.get("role") == "assistant" else m)
-            for m in (messages or [])]
+            for m in messages]
     focus = _focused_watch_name(conv, cfg)
     try:
         reply, eval_count, prompt_count, duration_ns = _chat_reply_natural(system, conv, model)

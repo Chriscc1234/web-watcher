@@ -147,6 +147,30 @@ def test_asking_a_question_holds_create_suggestion(monkeypatch):
     assert out2["watch_suggestion"]["action"] == "create"
 
 
+def test_create_with_existing_watches_stays_a_create(monkeypatch):
+    """Regression: a NEW-watch request must produce a 'create' even when other watches exist —
+    it must not be snapped onto an existing watch. Guards the plumbing; the create-vs-update
+    decision itself lives in the extraction prompt (verified live)."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Diesel Vehicles (OfferUp)"),
+        types.SimpleNamespace(name="Manual Sports Cars (Seattle)"),
+    ])
+    _mock_two_phase(monkeypatch,
+                    "Sure — I'll set up a new watch for canoes.",
+                    {"intent": "create",
+                     "watch": {"name": "Canoes (Craigslist)",
+                               "urls": ["https://seattle.craigslist.org/search/boa?query=canoe"],
+                               "instruction": "used canoes", "mode": "schedule",
+                               "interval_minutes": 30}})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "also watch craigslist for a canoe"}], cfg, "m")
+    assert out["watch_suggestion"] is not None
+    assert out["watch_suggestion"]["action"] == "create"
+    assert out["watch_suggestion"]["name"] == "Canoes (Craigslist)"   # NOT an existing name
+
+
 def test_intent_none_produces_no_card(monkeypatch):
     """Plain conversation (no concrete action) → prose reply, no watch card."""
     import types

@@ -40,6 +40,27 @@ _KNOWN_SERVICES = {"ollama", "server", "scheduler"}
 
 log = logging.getLogger(__name__)
 
+# Progress of a Settings → "Re-scan hardware" model download (a hardware upgrade can bump the
+# model tier, whose new models must be pulled). Shared, single-flight; surfaced via /api/system/specs.
+_rescan_state: dict = {"status": "idle", "detail": "", "models": []}
+
+
+def _pull_models_bg(models: list[str]) -> None:
+    """Pull each model via the Ollama API in a background thread, updating _rescan_state so the
+    UI can show progress. Ollama caches layers, so re-pulling an already-present model is cheap."""
+    _rescan_state.update(status="pulling", detail="Downloading updated AI models…", models=list(models))
+    try:
+        for m in models:
+            with httpx.Client(timeout=None) as client:
+                with client.stream("POST", f"{OLLAMA_URL}/api/pull", json={"name": m}) as r:
+                    r.raise_for_status()
+                    for _ in r.iter_lines():
+                        pass   # drain the progress stream until the pull completes
+        _rescan_state.update(status="done", detail="Updated models are ready.", models=[])
+    except Exception as exc:
+        log.warning("re-scan model pull failed: %s", exc)
+        _rescan_state.update(status="error", detail=f"Model download failed: {exc}")
+
 _CHAT_SYSTEM_BASE = """\
 You are the built-in assistant for Web Watcher — a personal, fully offline AI \
 app that monitors websites and takes autonomous actions on them. Everything runs \
@@ -827,6 +848,61 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "show_agent_cursor": cfg.browser.show_agent_cursor}
 
     # ------------------------------------------------------------------
+    # System specs + hardware re-scan (Settings → System)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/system/specs")
+    def system_specs():
+        """Hardware summary (CPU/RAM/GPU/VRAM), the tier this hardware maps to, the models
+        currently in use, and any in-progress re-scan download."""
+        from web_watcher.gpu_detect import probe_system
+        spec = probe_system()
+        cfg = _load_cfg()
+        spec["current_models"] = {
+            "text":    cfg.models.text_model,
+            "vision":  cfg.models.vision_model,
+            "council": cfg.models.effective_council_model,
+        }
+        rec = spec.get("recommended") or {}
+        spec["matches_current"] = (
+            cfg.models.text_model == rec.get("text_model")
+            and (cfg.models.vision_model or "") == (rec.get("vision_model") or "")
+        )
+        spec["rescan"] = dict(_rescan_state)
+        return spec
+
+    @app.post("/api/system/rescan")
+    def system_rescan():
+        """Re-detect the GPU/tier (for a hardware swap). If the recommended models differ from
+        what's configured, switch to them and download the new ones in the background."""
+        import threading
+        from web_watcher.config import load, save
+        from web_watcher.gpu_detect import probe_system
+        spec = probe_system()
+        rec = spec.get("recommended") or {}
+        cfg = load()
+        changed = (cfg.models.text_model != rec.get("text_model")
+                   or (cfg.models.vision_model or "") != (rec.get("vision_model") or ""))
+        if not changed:
+            return {"changed": False, "specs": spec,
+                    "message": f"No change — your hardware maps to the {spec['recommended_tier']} tier."}
+        # Apply the new tier's models, then pull whatever's newly needed in the background.
+        cfg.models.text_model   = rec.get("text_model") or cfg.models.text_model
+        cfg.models.vision_model = rec.get("vision_model") or ""
+        cfg.models.council_model = rec.get("council_model") or rec.get("text_model") or ""
+        save(cfg)
+        need = [m for m in (rec.get("text_model"), rec.get("vision_model"),
+                            rec.get("council_model")) if m]
+        need = list(dict.fromkeys(need))   # dedupe, keep order
+        if _rescan_state.get("status") != "pulling":
+            threading.Thread(target=_pull_models_bg, args=(need,), daemon=True).start()
+        where = spec.get("gpu_name") or "your hardware"
+        return {"changed": True, "specs": spec,
+                "message": (f"Detected {where} → {spec['recommended_tier']} tier. "
+                            "Downloading the updated AI models in the background; "
+                            "they'll be used automatically once ready.")}
+
+    # ------------------------------------------------------------------
     # Auto-update
     # ------------------------------------------------------------------
 
@@ -1369,6 +1445,10 @@ Your job here is only to UNDERSTAND and RESPOND:
 - Track which watch the user is talking about. If they say "it", "that one", "the watch",
   or "change something else on it", they mean the watch CURRENTLY IN FOCUS (named below)
   unless they clearly name a different one. Do not switch watches on your own.
+- New vs. existing: if the user asks to watch something NEW or DIFFERENT from the watches
+  they already have (e.g. "also watch for canoes", "set up a watch for…", "can you watch X"),
+  treat it as a BRAND-NEW watch and say you'll set one up. Having other watches does NOT mean
+  they want to edit an existing one — don't fold a new request into an existing watch.
 - If the request is clear, briefly confirm what you'll change (e.g. "Sure — I'll widen the
   Diesel Vehicles watch to also cover OfferUp trucks."). The build step handles the rest.
 - If anything is ambiguous, ask ONE short clarifying question instead of guessing.
@@ -1379,28 +1459,45 @@ You convert a conversation into ONE concrete watch action, but only if one is cl
 warranted right now. You are given the conversation, the assistant's latest reply to the
 user, the user's existing watches (full current config), and which watch is in focus.
 
-Decide "intent":
-- "update"  — the user asked to CHANGE an existing watch. Start from that watch's current
-              config (shown below) and change ONLY what the user asked; keep the same name.
-- "create"  — the user asked for a brand-NEW watch. Give it a new name and full config.
+STEP 1 — the most important decision: is this a CREATE or an UPDATE?
+
+- "create" — the user wants a NEW, SEPARATE watch. Choose this when ANY of these hold:
+    • they say things like "new watch", "another watch", "also watch (for)…", "create /
+      add / set up a watch", "start watching…", "make one for…", "can you watch…";
+    • they describe watching a thing that NONE of the existing watches already covers;
+    • they are starting a fresh topic rather than pointing at an existing watch.
+  Give it a NEW name (different from every existing watch) and a full config.
+  IMPORTANT: the user ALREADY HAVING other watches does NOT mean they want to edit one.
+  Most "watch X for me" requests are BRAND-NEW watches. If you are torn between create and
+  update, choose CREATE unless the user clearly points at one specific existing watch.
+
+- "update" — the user wants to CHANGE an EXISTING watch. Choose this ONLY when the user
+  points at a specific existing watch: by typing (part of) its name, or by "it" / "that one" /
+  "the watch" / "change something else on it" (which mean the watch CURRENTLY IN FOCUS).
+  Start from that watch's current config (below) and change ONLY what the user asked; keep
+  the same name.
+
 - "actions" — the user asked to start/stop/enable/disable/delete watch(es).
 - "lookup"  — the user asked what's been found / to see listings.
 - "none"    — the assistant asked the user a question, OR the user is still
-              discussing/clarifying, OR there is no concrete, unambiguous change to make yet.
+              discussing/clarifying, OR there is no concrete, unambiguous action yet.
 
-CHOOSING THE WATCH (critical): pick the target watch from CURRENTLY IN FOCUS, or from a watch
-name the user explicitly typed. Do NOT pick a watch just because a word in the user's request
-(a site like "offer up"/"craigslist"/"ebay", a search term, or a price) also appears in that
-watch's name or config. Those words describe WHAT to change, not WHICH watch. Example: if the
-focus watch is the sports-car watch and the user says "also look on offer up", that means ADD
-OfferUp to the sports-car watch — NOT switch to a watch named after OfferUp.
+STEP 2 — only if UPDATE, pick WHICH watch: from CURRENTLY IN FOCUS, or a name the user typed.
+Do NOT pick a watch just because a word in the request (a site like "offer up"/"craigslist"/
+"ebay", a search term, or a price) also appears in that watch's name or config. Those words
+describe WHAT to change, not WHICH watch — and they NEVER, on their own, turn a new-watch
+request into an update. Example: focus is the sports-car watch and the user says "also look on
+offer up" → ADD OfferUp to the sports-car watch (update). But "watch craigslist for a canoe"
+when no canoe watch exists → CREATE, even though a "craigslist" word appears elsewhere.
 
-When unsure, choose "none". Never invent a change the user didn't ask for.
+When unsure between create/update/none, prefer CREATE for a clearly-new thing, else "none".
+Never invent a change the user didn't ask for.
 
 Output STRICT JSON, no prose, no markdown:
 {
   "intent": "update" | "create" | "actions" | "lookup" | "none",
-  "watch": { full watch config INCLUDING "name"; for update use the EXACT existing name } | null,
+  "watch": { full watch config INCLUDING "name"; for CREATE use a NEW name not equal to any
+             existing watch; for UPDATE use the EXACT existing name } | null,
   "watch_actions": [ {"action": "start|stop|enable|disable|delete", "name": "..."} ] | null,
   "listing_query": { ... } | null
 }
@@ -1533,8 +1630,10 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
     """Phase 2 — decide if the conversation warrants a concrete watch action and, if so,
     return it as {watch_suggestion?, watch_actions?, listing_query?}. Returns {} for 'none'.
     A dedicated call so extraction can't be crowded out by conversation. Never raises."""
-    focus_line = (f"\n\nCURRENTLY IN FOCUS: \"{focus}\" — if the user said 'it', 'that', "
-                  "'the watch', or 'change something else on it', they mean THIS watch."
+    focus_line = (f"\n\nCURRENTLY IN FOCUS: \"{focus}\" — use this ONLY when the user refers "
+                  "back to it with 'it' / 'that one' / 'the watch' / 'change something else on "
+                  "it'. If the user is asking to watch a NEW or DIFFERENT thing, that is a "
+                  "CREATE — do NOT force it onto this focus watch."
                   if focus else "\n\nCURRENTLY IN FOCUS: (none yet)")
     system = (_EXTRACT_SYSTEM + "\n\n" + _watches_config_context(cfg) + focus_line
               + "\n\nThe assistant just told the user:\n\"" + (reply or "") + "\"")

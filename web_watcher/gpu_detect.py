@@ -163,6 +163,107 @@ def validate_inference(
 
 
 # ---------------------------------------------------------------------------
+# Full system probe (for the Settings → System panel + re-scan)
+# ---------------------------------------------------------------------------
+
+def probe_system() -> dict:
+    """Gather a human-readable hardware summary + the tier this hardware maps to. Used by the
+    Settings 'System' panel and the 'Re-scan hardware' button (so a user who swaps a GPU can
+    re-detect without reinstalling). All probes are best-effort and time-boxed — never raise."""
+    import platform as _pf
+    vram = _detect_vram_mb()
+    tier = _select_tier(vram)
+    return {
+        "os":               _pf.platform(),
+        "cpu":              (_pf.processor() or _pf.machine() or "Unknown CPU"),
+        "cpu_cores":        _os_cpu_count(),
+        "ram_mb":           _total_ram_mb(),
+        "gpu_name":         _gpu_name(),
+        "vram_mb":          vram,
+        "recommended_tier": tier.tier_name,
+        "recommended":      tier.as_dict(),
+    }
+
+
+def _os_cpu_count() -> Optional[int]:
+    import os
+    try:
+        return os.cpu_count()
+    except Exception:
+        return None
+
+
+def _total_ram_mb() -> Optional[int]:
+    """Total physical RAM in MB. Uses a Windows API call (no psutil dependency); falls back to
+    POSIX sysconf on Linux/mac."""
+    import sys
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MEMSTAT(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            stat = _MEMSTAT()
+            stat.dwLength = ctypes.sizeof(_MEMSTAT)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullTotalPhys) // (1024 * 1024)
+        else:
+            import os
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return (pages * page_size) // (1024 * 1024)
+    except Exception as exc:
+        log.debug("RAM probe failed: %s", exc)
+    return None
+
+
+def _gpu_name() -> Optional[str]:
+    """The discrete GPU's name (nvidia-smi first, then WMI), or None on a CPU-only machine."""
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            names = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
+            if names:
+                return names[0]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as exc:
+        log.debug("nvidia-smi name probe failed: %s", exc)
+    # WMI fallback — returns the adapter name even for AMD/Intel.
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-WmiObject Win32_VideoController | Select-Object -ExpandProperty Name"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0:
+            names = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
+            # Prefer a discrete GPU name over a basic display adapter if several are listed.
+            for n in names:
+                if not any(k in n.lower() for k in ("basic", "microsoft")):
+                    return n
+            if names:
+                return names[0]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as exc:
+        log.debug("WMI GPU name probe failed: %s", exc)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

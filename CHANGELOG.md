@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.2-alpha] — 2026-07-08 (New-watch fix + System panel)
+
+### Fixed — The Watcher can create a NEW watch when others already exist
+- Asking for a brand-new watch while other watches existed made the assistant try to EDIT an
+  existing one instead of creating a new one. The action-extraction prompt framed every request
+  as "which existing watch," with "create" as an afterthought, so it defaulted to update. Rewrote
+  the extraction prompt to decide **create vs. update first**, with explicit create triggers
+  ("also watch…", "set up a watch for…", a thing no existing watch covers) and CREATE as the
+  default when torn; scoped the focus watch to genuine back-references ("it"/"that one") so a new
+  request can't be forced onto it. Verified live against qwen2.5:14b: "also watch craigslist for a
+  canoe" → new watch; "add offerup to my trucks watch" → still updates the right existing one.
+
+### Added — Settings → System panel
+- New **System** section in Settings shows your hardware (OS, CPU, memory, graphics card + VRAM),
+  the AI model tier it maps to, and the models currently in use. A **Re-scan hardware** button
+  re-detects your GPU (for when you swap cards or add memory) and, if a better tier now fits,
+  switches to those models and downloads them in the background — no reinstall needed
+  (`GET /api/system/specs`, `POST /api/system/rescan`; `gpu_detect.probe_system()`).
+
+---
+
 ## [0.20.1-alpha] — 2026-07-08 (Clean-machine launch fixes)
 
 Found live on a fresh Windows 10 VM with no developer tools — the two things that stopped

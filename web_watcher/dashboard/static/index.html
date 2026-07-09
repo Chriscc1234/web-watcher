@@ -277,6 +277,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
     <div class="service-grid" id="services-grid"></div>
   </section>
   <section style="margin-top:24px">
+    <h2>System</h2>
+    <div class="service-card" style="padding:16px 20px;max-width:600px">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Web Watcher scans your hardware to pick the best local AI models it can run. If you change your graphics card or memory, re-scan to switch to the models that fit your new hardware.</div>
+      <div id="system-specs" style="font-size:13px;line-height:1.9">
+        <div style="color:var(--dim)">Loading system info…</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap">
+        <button id="rescan-btn" onclick="rescanSystem(this)" style="white-space:nowrap">Re-scan hardware</button>
+        <span id="rescan-status" style="font-size:12px;color:var(--dim)"></span>
+      </div>
+    </div>
+  </section>
+  <section style="margin-top:24px">
     <h2>The Watcher</h2>
     <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px">
       <div style="flex:1">
@@ -2207,8 +2220,87 @@ api('/api/health').then(h => {
     }
   }
 }).catch(() => {});
+// ---- System specs (Settings → System) --------------------------------------
+function _fmtRam(mb) {
+  if (!mb) return 'Unknown';
+  const gb = mb / 1024;
+  return (gb >= 10 ? Math.round(gb) : gb.toFixed(1)) + ' GB';
+}
+function _renderSystemSpecs(s) {
+  const el = document.getElementById('system-specs');
+  if (!el) return;
+  const gpu = s.gpu_name
+    ? `${s.gpu_name}${s.vram_mb ? ' — ' + _fmtRam(s.vram_mb) + ' VRAM' : ''}`
+    : 'No dedicated graphics card detected (using CPU)';
+  const cm = s.current_models || {};
+  const modelsLine = [cm.text, cm.vision && cm.vision !== '' ? cm.vision : null, cm.council]
+    .filter((v, i, a) => v && a.indexOf(v) === i).join(', ') || '—';
+  const row = (label, val) =>
+    `<div style="display:flex;gap:10px"><span style="color:var(--dim);min-width:130px">${label}</span><span>${val}</span></div>`;
+  el.innerHTML =
+    row('Operating system', s.os || 'Unknown') +
+    row('Processor', `${s.cpu || 'Unknown'}${s.cpu_cores ? ' (' + s.cpu_cores + ' cores)' : ''}`) +
+    row('Memory', _fmtRam(s.ram_mb)) +
+    row('Graphics', gpu) +
+    row('AI model tier', s.recommended_tier || '—') +
+    row('Models in use', modelsLine);
+  // If the configured models don't match what this hardware maps to, hint a re-scan.
+  const status = document.getElementById('rescan-status');
+  if (status && s.matches_current === false && (!s.rescan || s.rescan.status !== 'pulling')) {
+    status.textContent = 'Your hardware maps to different models than are configured — re-scan to switch.';
+    status.style.color = 'var(--blue)';
+  }
+}
+async function loadSystemSpecs() {
+  try {
+    const s = await api('/api/system/specs');
+    _renderSystemSpecs(s);
+    // Reflect an in-progress download if a re-scan is mid-flight.
+    if (s.rescan && s.rescan.status === 'pulling') { _pollRescan(); }
+  } catch(_) {
+    const el = document.getElementById('system-specs');
+    if (el) el.innerHTML = '<div style="color:var(--dim)">Could not read system info.</div>';
+  }
+}
+let _rescanTimer = null;
+async function _pollRescan() {
+  const status = document.getElementById('rescan-status');
+  try {
+    const s = await api('/api/system/specs');
+    const r = s.rescan || {};
+    if (status) {
+      status.textContent = r.detail || '';
+      status.style.color = r.status === 'error' ? 'var(--red, #f87171)'
+                         : r.status === 'done'  ? 'var(--green)' : 'var(--dim)';
+    }
+    if (r.status === 'pulling') {
+      _rescanTimer = setTimeout(_pollRescan, 3000);
+    } else {
+      _renderSystemSpecs(s);   // refresh "models in use" once done
+      const btn = document.getElementById('rescan-btn');
+      if (btn) { btn.disabled = false; btn.textContent = 'Re-scan hardware'; }
+    }
+  } catch(_) { _rescanTimer = setTimeout(_pollRescan, 5000); }
+}
+async function rescanSystem(btn) {
+  const status = document.getElementById('rescan-status');
+  btn.disabled = true; btn.textContent = 'Scanning…';
+  if (status) { status.textContent = 'Checking your hardware…'; status.style.color = 'var(--dim)'; }
+  try {
+    const r = await api('/api/system/rescan', {method:'POST'});
+    if (r.specs) _renderSystemSpecs(r.specs);
+    if (status) { status.textContent = r.message || ''; status.style.color = r.changed ? 'var(--blue)' : 'var(--green)'; }
+    if (r.changed) { _pollRescan(); }   // download runs in background; poll until ready
+    else { btn.disabled = false; btn.textContent = 'Re-scan hardware'; }
+  } catch(e) {
+    if (status) { status.textContent = 'Re-scan failed: ' + e; status.style.color = 'var(--red, #f87171)'; }
+    btn.disabled = false; btn.textContent = 'Re-scan hardware';
+  }
+}
+
 loadBrowserSettings();
 loadAccessibilitySettings();
+loadSystemSpecs();      // Settings → System panel (hardware + model tier)
 loadWatches();          // Watches is home — load it + The Watcher's ambient feed on boot
 loadOversight();        // (the dock's conversation loads lazily the first time it's opened)
 loadOrchestrator();     // reflect whether The Watcher is currently driving

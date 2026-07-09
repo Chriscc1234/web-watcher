@@ -29,6 +29,7 @@ the produced runtime — like the app itself — runs fully offline against loca
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -104,6 +105,35 @@ def download_runtime() -> None:
     _log(f"runtime ready at {PY_DIR}")
 
 
+# The C++ runtime DLLs that python-build-standalone does NOT ship (it bundles the C runtime
+# — vcruntime140* — because CPython is pure C, but packages with C++ extensions like greenlet
+# need the C++ standard library too). Without these, a fresh Windows without the VC++
+# Redistributable fails at import with "DLL load failed while importing _greenlet". They are
+# Microsoft-redistributable, so bundling them next to python.exe is allowed and keeps the app
+# self-contained. Copied from the build machine's System32.
+_VCPP_DLLS = ["msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+              "msvcp140_codecvt_ids.dll", "concrt140.dll", "vccorlib140.dll"]
+
+
+def bundle_vcredist() -> None:
+    """Copy the C++ runtime DLLs next to python.exe so native extensions load on a clean
+    Windows that lacks the Visual C++ Redistributable."""
+    import shutil as _sh
+    system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    copied = []
+    for name in _VCPP_DLLS:
+        src = system32 / name
+        dst = PY_DIR / name
+        if dst.exists():
+            continue
+        if src.exists():
+            _sh.copy2(src, dst)
+            copied.append(name)
+        else:
+            _log(f"  (VC++ dll not found on build machine: {name})")
+    _log(f"bundled {len(copied)} C++ runtime DLL(s): {', '.join(copied) or '(all already present)'}")
+
+
 def install_deps() -> None:
     py = str(_runtime_python())
     _log("upgrading pip …")
@@ -168,6 +198,7 @@ def main() -> None:
 
     if not args.skip_deps:
         install_deps()
+    bundle_vcredist()          # C++ runtime DLLs for clean machines w/o VC++ Redistributable
     copy_app()
     verify()
 

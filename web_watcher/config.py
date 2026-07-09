@@ -227,8 +227,18 @@ def load(path: Path | str | None = None) -> AppConfig:
     p = Path(path) if path else _DEFAULT_CONFIG_PATH
     raw: dict[str, Any] = {}
     if p.exists():
-        with p.open("r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Self-heal a config accidentally written in cp1252 (e.g. an older installer that
+            # wrote the em-dash default watch name without encoding="utf-8"). Read it as
+            # cp1252 and rewrite it as UTF-8 so this only ever happens once.
+            text = p.read_text(encoding="cp1252")
+            try:
+                p.write_text(text, encoding="utf-8")
+            except Exception:
+                pass
+        raw = yaml.safe_load(text) or {}
     config = AppConfig.model_validate(raw)
 
     # Migration: ensure every watch has a stable id, then persist once so the id is

@@ -11,6 +11,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.1-alpha] — 2026-07-08 (Clean-machine launch fixes)
+
+Found live on a fresh Windows 10 VM with no developer tools — the two things that stopped
+0.20.0 from launching for a first-time user.
+
+### Fixed — app now starts on a truly clean Windows
+- **Bundled the Visual C++ runtime DLLs.** python-build-standalone ships the C runtime
+  (`vcruntime140*`) but not the C++ runtime (`msvcp140.dll` et al), so Playwright's `greenlet`
+  extension failed at import with *"DLL load failed while importing _greenlet"* on any machine
+  without the VC++ Redistributable. `build_runtime.py` now copies the six C++ runtime DLLs next to
+  `python.exe`, so native extensions load with nothing pre-installed.
+- **Config written as UTF-8.** The installer's default watch name contains an em-dash; it was
+  written with Windows' default cp1252 encoding, so `config.load()` (UTF-8) crashed at startup
+  (`'utf-8' codec can't decode byte 0x97`) — the app 500'd on every `/api/watches` call and the
+  scheduler failed to start. `install.py` now writes `config.yaml` as UTF-8.
+- **Self-healing config read.** `config.load()` now falls back to cp1252 and rewrites the file as
+  UTF-8 if it encounters a mis-encoded config, so any machine already carrying a bad config repairs
+  itself on next launch instead of failing.
+
+### Added — visible startup-crash dialog
+- **No more silent sand-timer.** If the app hits a fatal error before the window opens, it now shows
+  a native Windows message box naming the error and the session-log path (and pointing at the
+  Report-a-bug flow), instead of vanishing with no feedback.
+
+---
+
 ## [0.20.0-alpha] — 2026-07-04 (Self-healing install + bug reporter)
 
 ### Added — self-healing setup (from the live VM clean-install test)

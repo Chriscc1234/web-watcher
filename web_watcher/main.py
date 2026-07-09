@@ -202,5 +202,49 @@ def main() -> None:
     log.info("Web Watcher exited cleanly")
 
 
+def _crash_dialog(exc: BaseException) -> None:
+    """On a fatal startup error, show a native Windows message box instead of dying to a
+    silent sand-timer. Points the user at the session log and the Report-a-bug flow so a
+    non-technical buddy can tell us what happened. Best-effort — never raises."""
+    import traceback
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    try:
+        log.critical("FATAL startup error:\n%s", tb)
+    except Exception:
+        pass
+    # Find the newest session log to name in the dialog.
+    log_hint = ""
+    try:
+        logs = sorted(_LOG_DIR.glob("web_watcher_*.log"))
+        if logs:
+            log_hint = f"\n\nDetails were saved to:\n{logs[-1]}"
+    except Exception:
+        pass
+    short = f"{type(exc).__name__}: {exc}"
+    body = (
+        "Web Watcher couldn't start.\n\n"
+        f"{short}"
+        f"{log_hint}\n\n"
+        "Please send this log to Chris (or use the in-app \"Report a bug\" button "
+        "next time it launches)."
+    )
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # 0x10 = MB_ICONERROR, 0x40000 = MB_TOPMOST
+            ctypes.windll.user32.MessageBoxW(0, body, "Web Watcher — startup error", 0x10 | 0x40000)
+            return
+        except Exception:
+            pass
+    # Non-Windows / no ctypes: at least print it where a console can see it.
+    print(body, file=sys.stderr)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — last-resort UX guard
+        _crash_dialog(exc)
+        sys.exit(1)

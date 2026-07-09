@@ -501,7 +501,10 @@ def write_config(tier: "TierInfo", args) -> None:
             CONFIG_PATH.rename(backup)
             info(f"Existing config backed up to {backup.name}")
 
-        with CONFIG_PATH.open("w") as f:
+        # MUST specify utf-8: the default watch name has an em-dash, and Windows' default
+        # cp1252 encoding would write it as byte 0x97, which config.load() (utf-8) then can't
+        # decode — the app would 500 on every /api/watches call on a fresh install.
+        with CONFIG_PATH.open("w", encoding="utf-8") as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)

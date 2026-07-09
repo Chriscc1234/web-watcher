@@ -147,6 +147,30 @@ def test_asking_a_question_holds_create_suggestion(monkeypatch):
     assert out2["watch_suggestion"]["action"] == "create"
 
 
+def test_committed_create_with_trailing_question_still_ships(monkeypatch):
+    """Regression (the Miata bug): the user clearly asked to set up a watch and gave details;
+    the assistant commits AND tacks on an optional question. The create card must still ship —
+    the '?' guard only holds BACK genuine clarifying questions, not a committed create."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[types.SimpleNamespace(name="Trucks (Craigslist)")])
+    _mock_two_phase(monkeypatch,
+                    "Sure — setting up a Miata watch on Craigslist under $8k. "
+                    "Want me to also check OfferUp?",
+                    {"intent": "create",
+                     "watch": {"name": "Miata (Craigslist)",
+                               "urls": ["https://seattle.craigslist.org/search/cta?query=miata"],
+                               "instruction": "Mazda Miata under $8000", "mode": "schedule",
+                               "interval_minutes": 30}})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "set up a miata watch under 8k on craigslist"}],
+        cfg, "m")
+    assert "?" in out["message"]                       # it did ask an optional follow-up…
+    assert out["watch_suggestion"] is not None         # …but the watch still shipped
+    assert out["watch_suggestion"]["action"] == "create"
+    assert out["watch_suggestion"]["name"] == "Miata (Craigslist)"
+
+
 def test_create_with_existing_watches_stays_a_create(monkeypatch):
     """Regression: a NEW-watch request must produce a 'create' even when other watches exist —
     it must not be snapped onto an existing watch. Guards the plumbing; the create-vs-update

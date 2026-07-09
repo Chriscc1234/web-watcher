@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.4-alpha] — 2026-07-08 (Watcher stops interrogating you)
+
+### Fixed — creating a watch
+- **The Watcher now just sets it up.** When you clearly ask to set up a watch and give the
+  details ("set up a Miata watch under $8k on Craigslist"), it commits and builds the watch from
+  what you said — instead of asking *"do you want me to set it up?"* and then re-asking for the
+  price range you already gave. The confirm-before-create guard now only holds back genuine
+  clarifying questions, not a committed create that happens to end with an optional follow-up.
+  Verified live against qwen2.5:14b with existing watches present.
+
+---
+
 ## [0.20.3-alpha] — 2026-07-08 (Installer polish)
 
 ### Changed — installer

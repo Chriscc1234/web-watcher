@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1449,9 +1450,16 @@ Your job here is only to UNDERSTAND and RESPOND:
   they already have (e.g. "also watch for canoes", "set up a watch for…", "can you watch X"),
   treat it as a BRAND-NEW watch and say you'll set one up. Having other watches does NOT mean
   they want to edit an existing one — don't fold a new request into an existing watch.
-- If the request is clear, briefly confirm what you'll change (e.g. "Sure — I'll widen the
-  Diesel Vehicles watch to also cover OfferUp trucks."). The build step handles the rest.
-- If anything is ambiguous, ask ONE short clarifying question instead of guessing.
+- When the user clearly asks to set up or change a watch, COMMIT — say you're doing it, as a
+  STATEMENT, not a question (e.g. "Sure — setting up a Miata watch on Craigslist under $8k.").
+  The build step handles the rest. NEVER ask the user to confirm an action they already asked
+  for — "Do you want me to set it up?" is wrong when they just said "set up a … watch".
+- Use the details the user ALREADY gave (what to watch, price, which sites). Do NOT ask them
+  to repeat something they've already said. For an optional detail they did NOT give (a price
+  cap, extra sites), just pick a sensible default and mention it in passing ("no price limit
+  for now — tell me if you want one"); never hold up the watch to interrogate them for it.
+- Only ask a clarifying question when you genuinely can't tell WHAT they want to watch. Ask at
+  most ONE, and only if it's truly essential — otherwise proceed with sensible defaults.
 - Keep it short and conversational."""
 
 _EXTRACT_SYSTEM = """\
@@ -1470,6 +1478,10 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
   IMPORTANT: the user ALREADY HAVING other watches does NOT mean they want to edit one.
   Most "watch X for me" requests are BRAND-NEW watches. If you are torn between create and
   update, choose CREATE unless the user clearly points at one specific existing watch.
+  BUILD THE CONFIG FROM WHAT THE USER ALREADY SAID anywhere in the conversation — the thing to
+  watch (instruction/name), the price cap, and the site(s) → urls. Do NOT wait for the user to
+  restate details they already gave. For anything they did NOT specify, use sensible defaults
+  (no price cap; a reasonable marketplace for that item) rather than emitting "none".
 
 - "update" — the user wants to CHANGE an EXISTING watch. Choose this ONLY when the user
   points at a specific existing watch: by typing (part of) its name, or by "it" / "that one" /
@@ -1502,6 +1514,22 @@ Output STRICT JSON, no prose, no markdown:
   "listing_query": { ... } | null
 }
 For intent "none", set watch, watch_actions and listing_query all to null."""
+
+
+# Phrases that mean the assistant is COMMITTING to set up / change a watch (a statement of
+# action), as opposed to merely asking the user a question. Used to let a committed 'create'
+# card through even when the reply also ends with an optional question.
+_COMMIT_RE = re.compile(
+    r"\b(sett?ing up|set up|i['’]?ll set|i['’]?ll creat|creat(?:e|ing)|i['’]?ll add|adding a watch|"
+    r"i['’]?ll (?:watch|start|widen|update|expand)|start(?:ing)? (?:a )?watch|"
+    r"watch(?:ing)? (?:for|the)|here['’]?s (?:your|the) watch|i['’]?ve set)\b",
+    re.IGNORECASE)
+
+
+def _reply_commits_to_action(message: str) -> bool:
+    """True if the assistant's reply states it IS setting up / changing a watch (not just asking).
+    Lets a committed create proceed even if the message also contains an optional question."""
+    return bool(_COMMIT_RE.search(message or ""))
 
 
 def _prose(content) -> str:
@@ -1706,11 +1734,13 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
         message = data["message"]   # _normalize_turn guarantees a message (never raw JSON)
         suggestions = data.get("watch_suggestions") or (
             [data["watch_suggestion"]] if isinstance(data.get("watch_suggestion"), dict) else [])
-        # Confirm-before-creating: if the assistant is ASKING the user something (its reply
-        # contains a question), don't ALSO drop a brand-new watch on them — hold any 'create'
-        # suggestion until they answer, so a half-formed request gets clarified first instead
-        # of instantly spawning a watch. (Edits the user explicitly asked for still go through.)
-        if "?" in message:
+        # Confirm-before-creating: if the assistant is ASKING the user to clarify (and NOT also
+        # committing to the watch), hold any 'create' suggestion until they answer — so a truly
+        # half-formed request ("guitars?") gets clarified first instead of instantly spawning a
+        # watch. But if the reply COMMITS ("setting up a Miata watch under $8k…"), let the card
+        # through even if it ends with an optional question ("want price alerts too?") — the user
+        # asked for the watch, so don't make them re-confirm. (Edits always go through.)
+        if "?" in message and not _reply_commits_to_action(message):
             suggestions = [s for s in suggestions
                            if isinstance(s, dict) and (s.get("action") or "create") != "create"]
         # Expand each proposed marketplace watch's search into effective terms.

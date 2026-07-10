@@ -24,6 +24,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `WW_NO_UPDATE_CHECK=1` skips it entirely.
 - The restart-to-apply loop no longer re-checks — the update is already staged by then.
 
+### Fixed — the launcher itself was not updatable
+- The code bundle carried only `web_watcher/`, so `launcher.py` — *the script that applies
+  updates* — could only ever be fixed by reinstalling. The bundle now also ships `launcher.py`,
+  `provision.py`, `install.py`, and `uninstall.py`, and the apply step backs them up before
+  overwriting. Bundles that omit them (anything built before this release) still apply cleanly.
+
 ### Added — Settings → Updates
 - Shows your installed version, whether an update is waiting, and when the last check ran.
 - **Check for updates** button to force a check on demand.

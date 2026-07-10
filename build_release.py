@@ -23,6 +23,8 @@ import re
 import zipfile
 from pathlib import Path
 
+from web_watcher import updater          # ROOT_FILES: the root scripts that ship in the bundle
+
 ROOT = Path(__file__).resolve().parent
 PKG  = ROOT / "web_watcher"
 DIST = ROOT / "dist"
@@ -54,6 +56,12 @@ def _zip_package(version: str) -> Path:
             if p.is_dir() or "__pycache__" in p.parts or p.suffix in (".pyc", ".pyo"):
                 continue
             z.write(p, p.relative_to(ROOT))   # arcname keeps the top-level web_watcher/ prefix
+        # Root-level scripts the app folder needs. Without these in the bundle, a bug in the
+        # launcher (the thing that APPLIES updates) could only ever be fixed by reinstalling.
+        for name in updater.ROOT_FILES:
+            p = ROOT / name
+            if p.exists():
+                z.write(p, name)
     return out
 
 

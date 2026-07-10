@@ -55,6 +55,12 @@ BACKUP_DIR  = UPDATES_DIR / "backup"
 APPLY_MARKER = "APPLY_VERSION"                            # file in PENDING_DIR naming the staged version
 RESTART_FLAG = UPDATES_DIR / "RESTART_REQUESTED"          # launcher relaunches when this exists
 
+# Root-level scripts that ship inside the code bundle alongside web_watcher/. launcher.py is the
+# thing that APPLIES updates, so if it weren't updatable a bug in it could only be fixed by
+# reinstalling. Overwriting them mid-run is safe: Python has already read and compiled them, and
+# the replacement only takes effect on the next launch.
+ROOT_FILES = ("launcher.py", "provision.py", "install.py", "uninstall.py")
+
 _API_TIMEOUT = 15.0
 _STARTUP_TIMEOUT = 5.0            # launcher.py: never make an offline user wait longer than this
 _DOWNLOAD_READ_TIMEOUT = 120.0    # a stalled socket, not a slow one, should abort the download
@@ -300,16 +306,20 @@ def apply_pending_update(root: Path = ROOT) -> Optional[str]:
     version = pending_update(root)
     if not version:
         return None
-    staged_pkg = root / "updates" / "pending" / "web_watcher"
+    pending    = root / "updates" / "pending"
+    staged_pkg = pending / "web_watcher"
     live_pkg   = root / "web_watcher"
     backup     = root / "updates" / "backup"
     try:
-        # Back up the current package (best-effort — never block the update on backup).
+        # Back up the current package + root scripts (best-effort — never block on backup).
         try:
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
             backup.mkdir(parents=True, exist_ok=True)
             shutil.copytree(live_pkg, backup / "web_watcher")
+            for name in ROOT_FILES:
+                if (root / name).exists():
+                    shutil.copy2(root / name, backup / name)
         except Exception as exc:
             log.debug("update backup skipped: %s", exc)
 
@@ -322,6 +332,12 @@ def apply_pending_update(root: Path = ROOT) -> Optional[str]:
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
+
+        # Root scripts, when the bundle carries them. Older bundles don't — that's not an error.
+        for name in ROOT_FILES:
+            src = pending / name
+            if src.is_file():
+                shutil.copy2(src, root / name)
 
         shutil.rmtree(root / "updates" / "pending", ignore_errors=True)
         log.info("applied update %s", version)

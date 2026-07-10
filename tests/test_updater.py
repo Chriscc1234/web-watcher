@@ -68,13 +68,46 @@ def test_parse_release_none_without_zip_asset():
 # Stage + apply round-trip
 # ---------------------------------------------------------------------------
 
-def _make_bundle(tmp_path: Path, marker_text: str) -> Path:
-    """A zip containing a top-level web_watcher/ with one changed file + one new file."""
+def _make_bundle(tmp_path: Path, marker_text: str, launcher_text: str | None = None) -> Path:
+    """A zip containing a top-level web_watcher/ with one changed file + one new file, and
+    optionally the root-level launcher.py that newer bundles carry."""
     zip_path = tmp_path / "bundle.zip"
     with zipfile.ZipFile(zip_path, "w") as z:
         z.writestr("web_watcher/__version__.py", marker_text)
         z.writestr("web_watcher/newmod.py", "VALUE = 42\n")
+        if launcher_text is not None:
+            z.writestr("launcher.py", launcher_text)
     return zip_path
+
+
+def test_apply_updates_root_scripts_and_backs_them_up(tmp_path):
+    """launcher.py is what APPLIES updates. If it weren't itself updatable, a bug in it could
+    only ever be fixed by reinstalling."""
+    root = tmp_path
+    (root / "web_watcher").mkdir()
+    (root / "web_watcher" / "__version__.py").write_text('__version__ = "0.0.1"\n', encoding="utf-8")
+    (root / "launcher.py").write_text("OLD LAUNCHER\n", encoding="utf-8")
+
+    bundle = _make_bundle(root, '__version__ = "9.9.9"\n', launcher_text="NEW LAUNCHER\n")
+    assert updater.stage_zip(bundle, "9.9.9", root=root) is not None
+    assert updater.apply_pending_update(root) == "9.9.9"
+
+    assert (root / "launcher.py").read_text(encoding="utf-8") == "NEW LAUNCHER\n"
+    # Recoverable by hand if the new entry point is broken.
+    assert (root / "updates" / "backup" / "launcher.py").read_text(encoding="utf-8") == "OLD LAUNCHER\n"
+
+
+def test_apply_leaves_root_scripts_alone_when_bundle_omits_them(tmp_path):
+    """Bundles built before ROOT_FILES existed carry only web_watcher/ — not an error."""
+    root = tmp_path
+    (root / "web_watcher").mkdir()
+    (root / "web_watcher" / "__version__.py").write_text('__version__ = "0.0.1"\n', encoding="utf-8")
+    (root / "launcher.py").write_text("KEEP ME\n", encoding="utf-8")
+
+    bundle = _make_bundle(root, '__version__ = "9.9.9"\n')      # no launcher.py inside
+    assert updater.stage_zip(bundle, "9.9.9", root=root) is not None
+    assert updater.apply_pending_update(root) == "9.9.9"
+    assert (root / "launcher.py").read_text(encoding="utf-8") == "KEEP ME\n"
 
 
 def test_stage_verifies_sha_and_apply_swaps_files(tmp_path):

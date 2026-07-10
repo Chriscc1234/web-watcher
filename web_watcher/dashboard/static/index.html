@@ -329,25 +329,9 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       <div id="model-installed"></div>
     </div>
   </section>
-  <section style="margin-top:24px">
-    <h2>The Watcher</h2>
-    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px">
-      <div style="flex:1">
-        <div style="font-weight:600;margin-bottom:4px">Let The Watcher run my watches</div>
-        <div style="font-size:12px;color:var(--dim)">One driver cycles through all your always-on watches like a person — choosing what to check next and telling you why in the dock — instead of each watch running on its own. Turn off to go back to starting watches individually.
-          <span id="orch-current" style="color:var(--blue);display:block;margin-top:4px"></span></div>
-      </div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
-        <div class="toggle-wrap">
-          <input type="checkbox" id="orch-chk" onchange="setOrchestrator(this.checked)" style="display:none">
-          <div class="toggle-track" id="orch-track" onclick="document.getElementById('orch-chk').click()">
-            <div class="toggle-thumb"></div>
-          </div>
-        </div>
-        <span id="orch-label" style="font-size:13px;color:var(--dim)">Off</span>
-      </label>
-    </div>
-  </section>
+  <!-- No "Let The Watcher run my watches" toggle here. It was a third control for the one piece
+       of state the ▶ Start watching button already owns, in the dock and on the Watches tab —
+       three switches for one thing, two of them where you'd never look. -->
   <section style="margin-top:24px">
     <h2>Accessibility</h2>
     <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px">
@@ -2148,19 +2132,14 @@ async function setOrchestrator(on) {
     _applyOrchState(r.running);
     loadOversight();   // surface The Watcher's "taking the wheel" line right away
   } catch (e) {
-    _applyOrchState(!on);   // revert the toggle on failure
+    _applyOrchState(!on);   // put the button back the way it was on failure
   }
 }
 let _orchRunning = false;   // is The Watcher currently driving the watches?
 function _applyOrchState(running) {
   _orchRunning = !!running;
-  const chk = document.getElementById('orch-chk');
-  const track = document.getElementById('orch-track');
-  const label = document.getElementById('orch-label');
-  if (chk) chk.checked = !!running;
-  if (track) running ? track.classList.add('on') : track.classList.remove('on');
-  if (label) { label.textContent = running ? 'On' : 'Off'; label.style.color = running ? 'var(--green)' : 'var(--dim)'; }
-  // The Start/Stop run buttons — the always-accessible run control (dock + Watches panel).
+  // The Start/Stop run buttons — the only control for this, mirrored in the dock (always
+  // reachable) and on the Watches tab (where you're looking when you care).
   ['dock-run-btn', 'watches-run-btn'].forEach(id => {
     const btn = document.getElementById(id);
     if (btn) {
@@ -2170,8 +2149,6 @@ function _applyOrchState(running) {
     }
   });
 }
-// Toggle The Watcher driving the watches (Start/Stop button — dock + Watches panel; mirrors
-// the Settings toggle). All three controls reflect the one state via _applyOrchState.
 async function toggleWatcherRun() {
   ['dock-run-btn', 'watches-run-btn'].forEach(id => {
     const btn = document.getElementById(id);
@@ -2181,10 +2158,7 @@ async function toggleWatcherRun() {
 }
 async function loadOrchestrator() {
   try {
-    const s = await api('/api/orchestrator');
-    _applyOrchState(s.running);
-    const cur = document.getElementById('orch-current');
-    if (cur) cur.textContent = (s.running && s.current) ? `Currently checking: ${s.current}` : '';
+    _applyOrchState((await api('/api/orchestrator')).running);
   } catch (_) {}
 }
 

@@ -341,7 +341,7 @@ turned up:". Shape (omit/null any filter you don't need):
 {
   "watch": "<exact watch name, or null for all watches>",
   "matched_only": true,        // true = only listings that matched the watch's criteria
-  "text": "miata",             // GENERAL keyword search over title + ad body (any item type)
+  "text": "<keywords>",        // GENERAL keyword search over title + ad body (any item type)
   "transmission": "manual",    // vehicles only — or "automatic", or null
   "drivetrain": "4wd",         // vehicles only — or "awd", or null
   "min_year": 2010,
@@ -1455,6 +1455,12 @@ Reply to the user in natural, plain English. Do NOT output JSON, code, or field 
 just talk, like a knowledgeable helper. A SEPARATE step (not you) turns the conversation
 into the actual watch config, so you never need to write it yourself.
 
+⚠ EXAMPLES ARE NOT REQUESTS. Everything named in the instructions above (cars, kayaks, trucks,
+kitchen appliances, any brand or model) is an ILLUSTRATION of format and technique only. NEVER
+mention, propose, or create a watch for an item that appears only in an example. The ONLY things
+you may act on are the items the USER actually typed in this conversation. If the user has not
+named a thing to watch, do not invent one.
+
 Your job here is only to UNDERSTAND and RESPOND:
 - Track which watch the user is talking about. If they say "it", "that one", "the watch",
   or "change something else on it", they mean the watch CURRENTLY IN FOCUS (named below)
@@ -1464,9 +1470,10 @@ Your job here is only to UNDERSTAND and RESPOND:
   treat it as a BRAND-NEW watch and say you'll set one up. Having other watches does NOT mean
   they want to edit an existing one — don't fold a new request into an existing watch.
 - When the user clearly asks to set up or change a watch, COMMIT — say you're doing it, as a
-  STATEMENT, not a question (e.g. "Sure — setting up a Miata watch on Craigslist under $8k.").
-  The build step handles the rest. NEVER ask the user to confirm an action they already asked
-  for — "Do you want me to set it up?" is wrong when they just said "set up a … watch".
+  STATEMENT, not a question. Name back THE ITEM THE USER ACTUALLY ASKED FOR, e.g. "Sure —
+  setting up that watch on Craigslist now." The build step handles the rest. NEVER ask the user
+  to confirm an action they already asked for — "Do you want me to set it up?" is wrong when
+  they just said "set up a … watch".
 - Use the details the user ALREADY gave (what to watch, price, which sites). Do NOT ask them
   to repeat something they've already said. For an optional detail they did NOT give (a price
   cap, extra sites), just pick a sensible default and mention it in passing ("no price limit
@@ -1486,6 +1493,10 @@ _EXTRACT_SYSTEM = """\
 You convert a conversation into ONE concrete watch action, but only if one is clearly
 warranted right now. You are given the conversation, the assistant's latest reply to the
 user, the user's existing watches (full current config), and which watch is in focus.
+
+⚠ EXAMPLES ARE NOT REQUESTS. Any item named in these instructions is an illustration only.
+Build a watch ONLY for what the USER actually asked for in the conversation. If the user never
+named a thing to watch, output intent "none" — never invent an item.
 
 STEP 1 — the most important decision: is this a CREATE or an UPDATE?
 

@@ -11,6 +11,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.20.8-alpha] — 2026-07-08 (No more phantom "Miata" watches)
+
+### Fixed — the assistant inventing items you never mentioned
+- **It no longer hallucinates an item out of its own instructions.** A tester's fresh install
+  started talking about a "Miata" he had never mentioned. Cause: "Miata" appeared as an *example*
+  inside the assistant's system prompt, and the smaller models (notably the CPU-tier `qwen2.5:3b`)
+  copy prompt examples straight into their replies. Removed the concrete item from the
+  commit example, made the listing-query example a placeholder, and added an explicit rule to both
+  chat phases: **examples are illustrations, never requests — only act on what the user actually
+  typed.** Reproduced live on `qwen2.5:3b`: the old prompt leaked a phantom Miata in 2 of 6 neutral
+  conversations (including "how does this work?"); the fixed prompt leaks in 0 of 6, while normal
+  watch creation still works.
+
+---
+
 ## [0.20.7-alpha] — 2026-07-08 (Asks for a link instead of inventing one)
 
 ### Fixed — watch creation for non-marketplace requests

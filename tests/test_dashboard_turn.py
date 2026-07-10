@@ -166,6 +166,20 @@ def test_long_history_is_capped_before_the_model(monkeypatch):
     assert seen["n"] <= S._CHAT_CONTEXT_MESSAGES        # only the recent window reached the model
 
 
+def test_prompts_guard_against_example_item_leakage():
+    """Regression: a tester's fresh install hallucinated a 'Miata' watch he never asked for —
+    the word was an EXAMPLE inside the system prompt, and small models (qwen2.5:3b) copy prompt
+    examples into their answers. Reproduced live: old prompt leaked in 2/6 neutral chats, fixed
+    prompt 0/6. Keep concrete items out of the commit example, and keep the explicit rule that
+    examples are not requests in BOTH phases."""
+    from web_watcher.dashboard import server as S
+    # The phase-1 commit example must not name a real, wantable item.
+    assert "Miata" not in S._CONVERSE_OVERRIDE
+    # Both phases must carry the anti-leak rule.
+    assert "EXAMPLES ARE NOT REQUESTS" in S._CONVERSE_OVERRIDE
+    assert "EXAMPLES ARE NOT REQUESTS" in S._EXTRACT_SYSTEM
+
+
 def test_urlless_create_is_suppressed(monkeypatch):
     """Regression (the 'Anacortes clam digger' bug): the model sometimes proposes a create with
     an empty urls list for a request it couldn't turn into a real page. A watch with no URL can't

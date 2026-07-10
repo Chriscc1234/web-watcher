@@ -345,3 +345,60 @@ def test_merge_watch_update_preserves_mode_and_id():
     assert w.id == "abc123"                # stable id kept
     assert w.urls == body["urls"]          # applied
     assert w.instruction == "manual sports cars in good shape"
+
+
+def test_two_items_become_two_watch_cards(monkeypatch):
+    """#68: 'watch for a <thing A> and a <thing B>' must ship BOTH watches, not just one."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[])
+    _mock_two_phase(monkeypatch,
+                    "Setting both up now.",
+                    {"intent": "create", "watches": [
+                        {"name": "A", "urls": ["https://x.org/search?q=a"], "instruction": "a",
+                         "mode": "continuous"},
+                        {"name": "B", "urls": ["https://x.org/search?q=b"], "instruction": "b",
+                         "mode": "continuous"}]})
+    monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    assert [s["name"] for s in out["watch_suggestions"]] == ["A", "B"]
+    assert all(s["action"] == "create" for s in out["watch_suggestions"])
+    assert out["watch_suggestion"]["name"] == "A"           # legacy single-card field intact
+
+
+def test_watch_config_in_wrong_slot_is_adopted(monkeypatch):
+    """The model sometimes builds a valid config but drops it into listing_query with
+    watches:null. That must be repaired into a suggestion, not silently produce nothing."""
+    import types
+    from web_watcher.dashboard import server as S
+    stored = types.SimpleNamespace(name="Existing Watch", urls=["https://x.org/s?q=1"])
+    cfg = types.SimpleNamespace(watches=[stored])
+    _mock_two_phase(monkeypatch,
+                    "Updating that now.",
+                    {"intent": "update", "watches": None, "watch_actions": None,
+                     "listing_query": {"name": "Existing Watch", "instruction": "i",
+                                       "judgment_prompt": "j", "max_agent_steps": 15}})
+    monkeypatch.setattr(S, "_resolve_watch_name", lambda name, cfg: "Existing Watch")
+    monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    sug = out["watch_suggestion"]
+    assert sug and sug["action"] == "update" and sug["name"] == "Existing Watch"
+    # urls omitted by the model = "unchanged" -> backfilled from the stored watch, so the
+    # no-URL safety net can't eat a legitimate edit.
+    assert sug["urls"] == ["https://x.org/s?q=1"]
+    assert out["listings"] is None                          # not treated as a lookup
+
+
+def test_single_watch_object_still_supported(monkeypatch):
+    """Older 'watch': {...} singular shape keeps working after the schema moved to a list."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[])
+    _mock_two_phase(monkeypatch,
+                    "Setting that up now.",
+                    {"intent": "create",
+                     "watch": {"name": "Solo", "urls": ["https://x.org/s?q=1"],
+                               "instruction": "i", "mode": "continuous"}})
+    monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    assert out["watch_suggestion"]["name"] == "Solo"

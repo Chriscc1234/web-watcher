@@ -166,9 +166,14 @@ def main() -> None:
             log.debug("could not set AppUserModelID: %s", exc)
 
     window_api = _WindowApi()
+    # The ?v= stamp makes every app version a DIFFERENT url to the embedded browser, so its cache
+    # can never serve last version's page. Without it, WebView2 cached the dashboard HTML (served
+    # with no Cache-Control) and kept rendering the old UI after updates — the version badge is
+    # live JS so it showed the new number on the old page, which made updates look broken.
+    from web_watcher.__version__ import __version__
     window = webview.create_window(
         title="Web Watcher",
-        url=DASHBOARD_URL,
+        url=f"{DASHBOARD_URL}/?v={__version__}",
         width=BASE_W,
         height=BASE_H,
         min_size=(900, 600),

@@ -368,8 +368,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
     </div>
     <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:10px" id="stealth-row">
       <div style="flex:1">
-        <div style="font-weight:600;margin-bottom:4px">Stealth mode</div>
-        <div style="font-size:12px;color:var(--dim)">Human-like mouse movements and timing to avoid bot detection. Disable only for simple trusted sites that don't need it.</div>
+        <div style="font-weight:600;margin-bottom:4px">Browse like a person</div>
+        <div style="font-size:12px;color:var(--dim)">Types searches into the site's search box and scrolls with natural pauses instead of jumping straight to result URLs. Slower per check, but much harder for sites to flag. Fingerprint protection is always on regardless of this switch. Turn off only for simple sites that don't block bots.</div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
         <div class="toggle-wrap">
@@ -1483,12 +1483,18 @@ function watchRowHtml(w, isActive) {
   const isContinuous = w.mode === 'continuous';
   const modeBadge = isContinuous ? ' <span class="badge" style="background:#1a3a2d;color:#34d399">continuous</span>' : '';
   // Status column: run-state for continuous, schedule note for scheduled, "inactive" when off.
+  // While The Watcher drives (orchestrator), per-watch loops are off — so "stopped" would be a
+  // lie for every watch it's cycling through. Show which one it's on and that the rest are queued.
   const statusCell = !isActive
     ? '<span style="color:var(--dim)">inactive</span>'
     : isContinuous
-      ? (w.continuous_running
-          ? '<span style="color:#34d399">● running</span>'
-          : '<span style="color:var(--dim)">○ stopped</span>')
+      ? (_orchRunning
+          ? (w.name === _orchCurrent
+              ? '<span style="color:#34d399">👁 checking now</span>'
+              : '<span style="color:var(--blue)">● in rotation</span>')
+          : (w.continuous_running
+              ? '<span style="color:#34d399">● running</span>'
+              : '<span style="color:var(--dim)">○ stopped</span>'))
       : '<span style="color:var(--dim)">scheduled</span>';
   // Next-run column: timer for scheduled, blank for continuous (state is in Status now).
   const nextCell = isActive && !isContinuous ? timeUntil(w.next_run_utc)
@@ -2136,6 +2142,7 @@ async function setOrchestrator(on) {
   }
 }
 let _orchRunning = false;   // is The Watcher currently driving the watches?
+let _orchCurrent = null;    // name of the watch it's checking right now (status column)
 function _applyOrchState(running) {
   _orchRunning = !!running;
   // The Start/Stop run buttons — the only control for this, mirrored in the dock (always
@@ -2158,7 +2165,13 @@ async function toggleWatcherRun() {
 }
 async function loadOrchestrator() {
   try {
-    _applyOrchState((await api('/api/orchestrator')).running);
+    const s = await api('/api/orchestrator');
+    // Re-render the watches table when the run-state or the watch being checked changes,
+    // so the Status column tracks The Watcher in real time (this polls every 8s).
+    const changed = (s.running !== _orchRunning) || ((s.current || null) !== _orchCurrent);
+    _orchCurrent = s.current || null;
+    _applyOrchState(s.running);
+    if (changed && document.getElementById('watches-body')) loadWatches();
   } catch (_) {}
 }
 

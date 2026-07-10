@@ -398,7 +398,10 @@ _BODY_JS = r"""() => {
     if (text.length < 40) {            // nothing matched → trimmed page body fallback
         text = clean(document.body ? document.body.innerText : '');
     }
-    return text.slice(0, 2000);
+    // 8000, not 2000: sellers put phone numbers and "call me at…" at the END of long ads, so a
+    // tight cap deleted exactly the contact info the user saves the ad for. Still bounded so the
+    // whole-page fallback above can't store megabytes.
+    return text.slice(0, 8000);
 }"""
 
 

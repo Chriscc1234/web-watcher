@@ -11,6 +11,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.22.2-alpha] — 2026-07-10 (The update you got is the update you see)
+
+### Fixed — updates applied but the window kept showing the OLD interface
+- The app's embedded browser (WebView2) cached the dashboard page — it was served with no
+  `Cache-Control` header — and kept rendering it after self-updates. The little version number is
+  live JavaScript, so it showed the NEW version on the OLD page: updates looked broken ("I see the
+  version update but not the actual updates"), and the model selector / Updates panel seemed to
+  vanish. Two-layer fix: the window now opens `/?v=<version>` (every release is a brand-new URL
+  the cache has never seen) and the page is served `no-store`. Includes existing installs: the
+  first auto-update to this version changes the URL and busts the stale cache.
+
+### Fixed — saved listing info cut off mid-sentence
+- Listing descriptions were capped at 2,000 characters in storage — and sellers put their phone
+  number and "call me at…" at the END of long ads, so exactly the contact info you saved the ad
+  for got deleted. The cap is now 8,000. (Ads already saved under the old cap can't be
+  reconstructed if the post was deleted; live ones re-fill on the next sweep.)
+
+### Fixed — the chat dropped parts of your request
+- **"Watch craigslist AND offerup for X" now produces one watch covering BOTH sites.** Previously
+  every site after the first was silently dropped (that's why a multi-site request came out
+  craigslist-only). Verified live: each named site gets real search URLs.
+- **"Watch for X and Y" now produces TWO watch cards.** Previously only one item survived —
+  usually the last one mentioned.
+- Junk search URLs are gone: no more `?query=black` or `?query=under+800` from adjectives and
+  price caps — those constraints go in the watch's instructions instead.
+- A valid edit the model put in the wrong response slot is now repaired instead of vanishing, and
+  an edit that doesn't touch a watch's links no longer risks being dropped by the no-URL guard.
+
+### Fixed — Status column while The Watcher is running
+- When The Watcher drives your watches, the Watches table used to show every one of them as
+  "○ stopped". Now the one being checked shows **👁 checking now** and the rest show
+  **● in rotation**, updating live as it moves.
+
+### Changed — "Stealth mode" toggle renamed to what it actually does
+- The fingerprint protection (hiding that a robot browser is browsing) was ALWAYS on regardless
+  of the toggle — turning it off never made sense and the old label overpromised. The toggle now
+  says what it truly controls: **Browse like a person** — typing searches into the site's search
+  box and scrolling with natural pauses instead of jumping straight to result URLs.
+
+---
+
 ## [0.22.1-alpha] — 2026-07-09
 
 ### Removed

@@ -295,13 +295,17 @@ class BrowserSession:
     def __init__(
         self,
         headless: bool = True,
-        stealth: bool = True,
+        stealth: bool = True,   # accepted for compat; fingerprint hardening is ALWAYS on (see below)
         persistent: bool = False,
         profile_dir: str | Path | None = None,
         show_cursor: bool = False,
     ) -> None:
         self._headless = headless
-        self._stealth  = stealth
+        # NOTE: `stealth` is deliberately unused. The fingerprint patches (webdriver/UA/cores/
+        # memory/screen) are applied to EVERY session — turning them off has no user benefit and
+        # a bare Playwright fingerprint gets instantly flagged. What the Settings "stealth" flag
+        # actually controls is human PACING (typing searches, scroll/pause jitter), and that is
+        # read where the pacing happens: cfg.browser.stealth in scheduler.py/monitor.py.
         self._show_cursor = show_cursor
         # Persistent mode uses an on-disk Chrome profile (launch_persistent_context)
         # instead of an ephemeral context + storage_state snapshot. Used for

@@ -1142,7 +1142,18 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     # Static files — must be last
     # ------------------------------------------------------------------
 
-    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    class _NoCacheStaticFiles(StaticFiles):
+        """StaticFiles that forbids caching the HTML. Without a Cache-Control header the
+        embedded WebView2 cached the dashboard page and kept rendering the OLD ui after a
+        self-update — the live version badge on a stale page made updates look broken. The
+        page is ~130 KB from localhost; refetching it every load costs nothing."""
+        def file_response(self, *args, **kwargs):
+            resp = super().file_response(*args, **kwargs)
+            if getattr(resp, "media_type", "") == "text/html":
+                resp.headers["Cache-Control"] = "no-store, max-age=0"
+            return resp
+
+    app.mount("/", _NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static")
 
     return app
 
@@ -1518,13 +1529,18 @@ def _normalize_turn(data: dict) -> dict:
     if not isinstance(data, dict):
         return {"message": str(data), "watch_suggestion": None}
 
-    # Collect every watch_suggestion* the model produced, in stable order.
-    suggestions = []
-    if isinstance(data.get("watch_suggestion"), dict):
-        suggestions.append(data["watch_suggestion"])
-    for k in sorted(k for k in data if k.startswith("watch_suggestion_")):
-        if isinstance(data[k], dict):
-            suggestions.append(data[k])
+    # Collect every watch_suggestion* the model produced, in stable order. An existing
+    # watch_suggestions LIST is canonical (the extractor emits one for multi-item requests) —
+    # rebuilding from the singular keys alone would silently drop every watch after the first.
+    if isinstance(data.get("watch_suggestions"), list):
+        suggestions = [w for w in data["watch_suggestions"] if isinstance(w, dict)]
+    else:
+        suggestions = []
+        if isinstance(data.get("watch_suggestion"), dict):
+            suggestions.append(data["watch_suggestion"])
+        for k in sorted(k for k in data if k.startswith("watch_suggestion_")):
+            if isinstance(data[k], dict):
+                suggestions.append(data[k])
 
     # The model sometimes returns a BARE watch object (no envelope) → adopt it as the suggestion.
     bare_watch = ("message" not in data and not suggestions and
@@ -1620,6 +1636,11 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
     • they describe watching a thing that NONE of the existing watches already covers;
     • they are starting a fresh topic rather than pointing at an existing watch.
   Give it a NEW name (different from every existing watch) and a full config.
+  TWO OR MORE DIFFERENT THINGS = TWO OR MORE WATCHES. When one message asks to watch
+  DISTINCT items ("watch for a <thing A> and a <thing B>"), return a "watches" LIST —
+  one complete watch object per item, each with its own name, instruction, and urls.
+  Never merge different items into one watch and never quietly drop all but the first.
+  (Multiple SITES for the SAME item is still ONE watch with several urls.)
   IMPORTANT: the user ALREADY HAVING other watches does NOT mean they want to edit one.
   Most "watch X for me" requests are BRAND-NEW watches. If you are torn between create and
   update, choose CREATE unless the user clearly points at one specific existing watch.
@@ -1630,6 +1651,14 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
   URL RULE — a CREATE MUST have at least one real http(s) URL, and never an empty urls list:
     • Item shopping on a marketplace you know (Craigslist/eBay/Facebook/OfferUp) → build the
       search URL(s) yourself from the item + location.
+    • EVERY SITE THE USER NAMED gets urls. "watch craigslist and offerup for <item>" → the urls
+      list has craigslist search URLs AND offerup search URLs in the SAME watch. Never quietly
+      drop a site down to just the first one; if the user said "everywhere" / "all the usual
+      places", cover Craigslist, OfferUp, and eBay.
+    • Each URL is a REAL SEARCH for the item: the query is the item's name or a close synonym.
+      Do NOT emit a bare adjective, price, or size as its own search (no "?query=black",
+      "?query=under+800"), and do NOT invent query parameters the site doesn't have — price
+      caps and size limits belong in the instruction text, not the URL.
     • Watching a SPECIFIC website/page/topic/schedule/news (not a marketplace item search) where
       the user has NOT given a URL → you do NOT know the address; return intent "none" (the
       assistant is asking them for the link). Do NOT fabricate a URL and do NOT turn it into a
@@ -1660,12 +1689,17 @@ Never invent a change the user didn't ask for.
 Output STRICT JSON, no prose, no markdown:
 {
   "intent": "update" | "create" | "actions" | "lookup" | "none",
-  "watch": { full watch config INCLUDING "name"; for CREATE use a NEW name not equal to any
-             existing watch; for UPDATE use the EXACT existing name } | null,
+  "watches": [ one full watch config PER DISTINCT ITEM the user asked to watch — usually
+               exactly ONE; two different items → a list of TWO complete configs. Each
+               INCLUDES "name" (for CREATE a NEW name not equal to any existing watch; for
+               UPDATE the EXACT existing name). COUNT the items before you answer: if the
+               user named two things, a one-element list is WRONG. ] | null,
   "watch_actions": [ {"action": "start|stop|enable|disable|delete", "name": "..."} ] | null,
-  "listing_query": { ... } | null
+  "listing_query": { ... } | null   — ONLY for intent "lookup" (showing found listings).
+                                      NEVER put a watch config here.
 }
-For intent "none", set watch, watch_actions and listing_query all to null."""
+For intent "create" or "update" the config goes in "watches" — a create/update with
+"watches": null is INVALID. For intent "none", set all three to null."""
 
 
 # Phrases that mean the assistant is COMMITTING to set up / change a watch (a statement of
@@ -1841,16 +1875,41 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
     if not isinstance(data, dict):
         return {}
     intent = (data.get("intent") or "none").lower()
-    if intent in ("update", "create") and isinstance(data.get("watch"), dict):
-        w = dict(data["watch"])
-        w.setdefault("action", intent)
-        if intent == "update":
-            # Snap the name to the real stored watch (model often drops the site suffix),
-            # falling back to the focus watch — so applying the edit can't 404.
-            real = _resolve_watch_name(w.get("name", ""), cfg) or focus
-            if real:
-                w["name"] = real
-        return {"watch_suggestion": w}
+    # "watch me for X and Y" is TWO watches; the model returns them as a "watches" list.
+    # A single "watch" object stays supported — most requests are one thing.
+    raw = data.get("watches")
+    raw_watches = (raw if isinstance(raw, list)
+                   else [raw] if isinstance(raw, dict)      # bare object instead of a list
+                   else [data.get("watch")])
+    raw_watches = [w for w in raw_watches if isinstance(w, dict)]
+    if intent in ("update", "create") and not raw_watches:
+        # Wrong-slot repair: the model sometimes builds a perfectly good config but drops it
+        # into listing_query (or another slot). If it walks like a watch, adopt it.
+        for v in data.values():
+            if isinstance(v, dict) and _WATCH_SHAPE_KEYS & set(v.keys()):
+                raw_watches = [v]
+                break
+    if intent in ("update", "create") and raw_watches:
+        out = []
+        for w in raw_watches:
+            w = dict(w)
+            w.setdefault("action", intent)
+            if intent == "update":
+                # Snap the name to the real stored watch (model often drops the site suffix),
+                # falling back to the focus watch — so applying the edit can't 404.
+                real = _resolve_watch_name(w.get("name", ""), cfg) or focus
+                if real:
+                    w["name"] = real
+                # An edit that doesn't touch the urls often omits them entirely; that means
+                # "unchanged", not "no urls" — backfill from the stored watch so the no-URL
+                # safety net (which exists to stop unmonitorable CREATEs) can't eat the edit.
+                if not w.get("urls"):
+                    stored = next((sw for sw in getattr(cfg, "watches", [])
+                                   if getattr(sw, "name", None) == w.get("name")), None)
+                    if stored is not None and getattr(stored, "urls", None):
+                        w["urls"] = list(stored.urls)
+            out.append(w)
+        return {"watch_suggestion": out[0], "watch_suggestions": out}
     if intent == "actions" and isinstance(data.get("watch_actions"), list):
         return {"watch_actions": data["watch_actions"]}
     if intent == "lookup" and isinstance(data.get("listing_query"), dict):

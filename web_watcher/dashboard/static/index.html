@@ -288,6 +288,29 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
         <span id="rescan-status" style="font-size:12px;color:var(--dim)"></span>
       </div>
     </div>
+
+    <h3 style="margin-top:22px;font-size:15px">AI model set</h3>
+    <!-- display:block overrides .service-card's flex, which would lay these children out in a row -->
+    <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:6px">
+        Bigger models understand you better; smaller ones use less memory and run lighter on your
+        computer. Web Watcher keeps using your current model until a new one has finished
+        downloading, then switches automatically.
+      </div>
+      <div id="model-tiers" style="margin-top:10px">
+        <div style="color:var(--dim);font-size:13px">Loading model sets…</div>
+      </div>
+      <div id="model-select-status" style="font-size:12px;color:var(--blue);margin-top:10px"></div>
+
+      <h4 style="margin-top:18px;font-size:13px;color:var(--dim);font-weight:600">
+        Downloaded models <span id="model-disk" style="font-weight:400"></span>
+      </h4>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:8px">
+        Delete any model you no longer use to free up disk space. The models currently in use are
+        protected — switch to a different set first, then you can remove the old one.
+      </div>
+      <div id="model-installed"></div>
+    </div>
   </section>
   <section style="margin-top:24px">
     <h2>The Watcher</h2>
@@ -2279,8 +2302,86 @@ async function _pollRescan() {
       _renderSystemSpecs(s);   // refresh "models in use" once done
       const btn = document.getElementById('rescan-btn');
       if (btn) { btn.disabled = false; btn.textContent = 'Re-scan hardware'; }
+      loadModelSets();         // the active set / disk usage just changed
     }
   } catch(_) { _rescanTimer = setTimeout(_pollRescan, 5000); }
+}
+
+// ---- Model set selector -------------------------------------------------
+function _gb(mb) { return (mb / 1000).toFixed(1) + ' GB'; }
+
+async function loadModelSets() {
+  const box = document.getElementById('model-tiers');
+  const list = document.getElementById('model-installed');
+  if (!box) return;
+  try {
+    const d = await api('/api/system/models');
+    box.innerHTML = (d.tiers || []).map(t => {
+      const badges = [];
+      if (t.current)      badges.push('<span style="color:var(--green);font-weight:600">● In use</span>');
+      if (t.recommended)  badges.push('<span style="color:var(--blue)">Recommended for your hardware</span>');
+      if (t.installed && !t.current) badges.push('<span style="color:var(--dim)">Already downloaded</span>');
+      const dl = t.installed ? 'No download needed'
+                             : 'Downloads ' + _gb(t.to_download_mb);
+      const warn = t.fits ? '' :
+        `<div style="color:var(--red,#f87171);font-size:11px;margin-top:3px">⚠ Bigger than your graphics card — it will run partly on the CPU and be slow.</div>`;
+      const btn = t.current
+        ? `<button disabled style="opacity:.5;white-space:nowrap">Current</button>`
+        : `<button onclick="selectModelSet('${t.tier_name}', ${t.fits}, ${t.to_download_mb})" style="white-space:nowrap">Use this set</button>`;
+      return `<div style="display:flex;gap:14px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--border,#2a2f3a)">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px">${t.tier_name}
+            <span style="font-weight:400;color:var(--dim);font-size:11px">— ${t.models.join(', ')}</span></div>
+          <div style="font-size:12px;margin-top:2px">${t.what}</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:2px">${t.tradeoff}</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:3px">${dl}${badges.length ? ' · ' + badges.join(' · ') : ''}</div>
+          ${warn}
+        </div>
+        <div>${btn}</div>
+      </div>`;
+    }).join('');
+
+    const disk = document.getElementById('model-disk');
+    if (disk) disk.textContent = '— ' + _gb(d.installed_total_mb) + ' on disk';
+
+    list.innerHTML = (d.installed || []).map(m => {
+      const del = m.in_use
+        ? `<button disabled title="Web Watcher is using this model. Switch to another set first." style="opacity:.4">In use</button>`
+        : `<button onclick="deleteModel('${m.name}', ${m.size_mb})">Delete</button>`;
+      return `<div style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:12px">
+        <span style="flex:1;font-family:monospace">${m.name}</span>
+        <span style="color:var(--dim)">${_gb(m.size_mb)}</span>
+        ${del}
+      </div>`;
+    }).join('') || '<div style="color:var(--dim);font-size:12px">No models downloaded yet.</div>';
+  } catch (_) {
+    box.innerHTML = '<div style="color:var(--dim);font-size:13px">Could not load model sets (is Ollama running?).</div>';
+  }
+}
+
+async function selectModelSet(tier, fits, toDownloadMb) {
+  let msg = `Switch to the ${tier} model set?`;
+  if (toDownloadMb > 0) msg += `\n\nThis downloads about ${_gb(toDownloadMb)}. Your current model keeps working until it's ready.`;
+  if (!fits) msg += `\n\nWARNING: this set is bigger than your graphics card. It will run partly on the CPU and may be very slow.`;
+  if (!confirm(msg)) return;
+  const status = document.getElementById('model-select-status');
+  try {
+    const r = await api('/api/system/models/select', {method:'POST', body: JSON.stringify({tier})});
+    if (status) status.textContent = (r.warning ? r.warning + ' ' : '') + (r.message || '');
+    _pollRescan();     // same background download state as a hardware re-scan
+  } catch (e) {
+    if (status) { status.textContent = 'Could not switch: ' + e; status.style.color = 'var(--red,#f87171)'; }
+  }
+}
+
+async function deleteModel(name, sizeMb) {
+  if (!confirm(`Delete ${name}?\n\nThis frees ${_gb(sizeMb)} of disk. You can download it again later if you need it.`)) return;
+  try {
+    await api('/api/system/models/delete', {method:'POST', body: JSON.stringify({name})});
+    loadModelSets();
+  } catch (e) {
+    alert('Could not delete ' + name + ':\n\n' + e);
+  }
 }
 async function rescanSystem(btn) {
   const status = document.getElementById('rescan-status');
@@ -2301,6 +2402,7 @@ async function rescanSystem(btn) {
 loadBrowserSettings();
 loadAccessibilitySettings();
 loadSystemSpecs();      // Settings → System panel (hardware + model tier)
+loadModelSets();        // Settings → System panel (model set selector + disk usage)
 loadWatches();          // Watches is home — load it + The Watcher's ambient feed on boot
 loadOversight();        // (the dock's conversation loads lazily the first time it's opened)
 loadOrchestrator();     // reflect whether The Watcher is currently driving

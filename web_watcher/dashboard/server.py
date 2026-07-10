@@ -46,6 +46,25 @@ log = logging.getLogger(__name__)
 _rescan_state: dict = {"status": "idle", "detail": "", "models": []}
 
 
+def _model_size_mb(name: str):
+    """Approximate download size for a model tag (None if we don't know it)."""
+    from web_watcher.gpu_detect import model_size_mb
+    return model_size_mb(name)
+
+
+def _installed_models() -> dict[str, int]:
+    """{model name: real size in MB} for every model Ollama has on disk. {} if Ollama is down."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            r = client.get(f"{OLLAMA_URL}/api/tags")
+            r.raise_for_status()
+            return {m["name"]: int(m.get("size", 0) / 1e6)
+                    for m in (r.json().get("models") or []) if m.get("name")}
+    except Exception as exc:
+        log.debug("could not list installed models: %s", exc)
+        return {}
+
+
 def _apply_new_models_bg(rec: dict) -> None:
     """Download the recommended models, then — ONLY once they're all present — switch the config
     to them. Pulling first and switching last means the app keeps using the current (working)
@@ -915,6 +934,93 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "message": (f"Detected {where} → {spec['recommended_tier']} tier. "
                             "Downloading the updated AI models in the background — your current "
                             "model keeps working until they're ready, then it switches automatically.")}
+
+    @app.get("/api/system/models")
+    def system_models():
+        """The selectable model sets (with download sizes + plain-English trade-offs), plus every
+        model actually installed on this machine and its real disk size. Powers the Settings model
+        selector: pick a lighter set to reduce load, or delete models you no longer use."""
+        from web_watcher.gpu_detect import probe_system, tier_catalog
+        spec = probe_system()
+        cfg  = _load_cfg()
+        in_use = {m for m in (cfg.models.text_model, cfg.models.vision_model,
+                              cfg.models.effective_council_model) if m}
+
+        installed = _installed_models()          # {name: size_mb} from Ollama
+        catalog = tier_catalog(spec.get("vram_mb"))
+        for t in catalog:
+            t["installed"] = all(m in installed for m in t["models"])
+            # Only the models we don't already have need downloading.
+            t["to_download_mb"] = sum(_model_size_mb(m) or 0
+                                      for m in t["models"] if m not in installed)
+            t["current"] = (t["text_model"] == cfg.models.text_model
+                            and (t["vision_model"] or "") == (cfg.models.vision_model or ""))
+
+        return {
+            "specs": spec,
+            "tiers": catalog,
+            "installed": [{"name": n, "size_mb": s, "in_use": n in in_use}
+                          for n, s in sorted(installed.items())],
+            "installed_total_mb": sum(installed.values()),
+            "current_models": {"text": cfg.models.text_model,
+                               "vision": cfg.models.vision_model,
+                               "council": cfg.models.effective_council_model},
+            "rescan": dict(_rescan_state),
+        }
+
+    @app.post("/api/system/models/select")
+    def system_models_select(body: dict):
+        """Switch to a named model set. Downloads anything missing FIRST, then swaps the config
+        (see _apply_new_models_bg) — the current model keeps working until the new one is ready.
+        A set larger than the detected VRAM is allowed (the probe can be wrong, and Ollama will
+        offload the overflow to CPU) but the response says so."""
+        import threading
+        from web_watcher.gpu_detect import probe_system, tier_catalog
+        name = (body or {}).get("tier")
+        spec = probe_system()
+        match = next((t for t in tier_catalog(spec.get("vram_mb")) if t["tier_name"] == name), None)
+        if not match:
+            raise HTTPException(404, detail=f"Unknown model set {name!r}")
+        if _rescan_state.get("status") == "pulling":
+            raise HTTPException(409, detail="A model download is already running.")
+
+        rec = {"text_model": match["text_model"], "vision_model": match["vision_model"],
+               "council_model": match["council_model"]}
+        threading.Thread(target=_apply_new_models_bg, args=(rec,), daemon=True).start()
+
+        warn = None
+        if not match["fits"]:
+            warn = (f"{match['tier_name']} needs about {match['min_vram_mb'] // 1000}GB of video "
+                    f"memory and this machine reports {(spec.get('vram_mb') or 0) // 1000}GB. "
+                    "It will still run, but partly on the CPU — expect it to be slow.")
+        return {"tier": match["tier_name"], "warning": warn,
+                "message": (f"Switching to the {match['tier_name']} model set. Downloading what's "
+                            "missing in the background — your current model keeps working until "
+                            "it's ready, then it switches automatically.")}
+
+    @app.post("/api/system/models/delete")
+    def system_models_delete(body: dict):
+        """Remove a downloaded model to free disk. The models the app is CURRENTLY using are
+        protected — deleting one would break chat and every watch until it was re-downloaded, and
+        there's no need: switch model sets first, which leaves the old model unused and deletable."""
+        name = ((body or {}).get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, detail="No model named.")
+        cfg = _load_cfg()
+        in_use = {m for m in (cfg.models.text_model, cfg.models.vision_model,
+                              cfg.models.effective_council_model) if m}
+        if name in in_use:
+            raise HTTPException(409, detail=(
+                f"{name} is the model Web Watcher is using right now. Switch to a different model "
+                "set first — then this one becomes unused and you can delete it."))
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                r = client.request("DELETE", f"{OLLAMA_URL}/api/delete", json={"name": name})
+                r.raise_for_status()
+        except Exception as exc:
+            raise HTTPException(502, detail=f"Ollama could not delete {name}: {exc}")
+        log.info("deleted model %s", name)
+        return {"deleted": name}
 
     # ------------------------------------------------------------------
     # Auto-update

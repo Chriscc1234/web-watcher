@@ -166,6 +166,73 @@ def validate_inference(
 # Full system probe (for the Settings → System panel + re-scan)
 # ---------------------------------------------------------------------------
 
+# Approximate DOWNLOAD sizes (MB) for the models we ship, used to warn the user before a
+# multi-GB pull. Only a fallback: for models already installed we report Ollama's real size.
+# Ollama's default qwen2.5 tags are q4_K_M quantisations.
+_MODEL_SIZE_MB: dict[str, int] = {
+    "qwen2.5:3b":     1_900,
+    "qwen2.5:7b":     4_700,
+    "qwen2.5:14b":    9_000,
+    "qwen2.5:32b":   20_000,
+    "qwen2.5:72b":   47_000,
+    "qwen2.5vl:7b":   6_000,
+    "qwen2.5vl:32b": 21_000,
+    "moondream":      1_700,
+}
+
+# Plain-English explanation of what choosing each tier means. Shown next to the model selector
+# so a non-technical user understands the trade-off before committing to a download.
+_TIER_BLURB: dict[str, tuple[str, str]] = {
+    # tier_name: (what it is, the trade-off)
+    "48GB+":   ("Largest models. Best possible understanding.",
+                "Needs a 48GB+ workstation GPU. Huge download and very heavy on your machine."),
+    "24GB":    ("Very strong reasoning; handles tricky requests well.",
+                "Needs a 24GB GPU. Large download; noticeably heavier load."),
+    "16GB":    ("Strong all-rounder — the sweet spot for most gaming GPUs.",
+                "Needs a 16GB GPU. The assistant rarely misunderstands you."),
+    "8-12GB":  ("Good understanding with modest resource use.",
+                "Needs an 8GB+ GPU. Solid for everyday watch creation."),
+    "6GB":     ("Capable assistant that fits a small GPU.",
+                "Needs ~6GB VRAM. Reliable at creating and editing watches."),
+    "CPU":     ("Runs on any computer, no graphics card required.",
+                "Lightest load, but the assistant is noticeably weaker: it can confuse a new "
+                "watch with an existing one and misread requests. Vision is disabled. "
+                "Use a GPU tier if you can."),
+}
+
+
+def model_size_mb(name: str) -> Optional[int]:
+    """Approximate download size for a model tag, or None if unknown."""
+    return _MODEL_SIZE_MB.get((name or "").strip())
+
+
+def tier_catalog(vram_mb: Optional[int] = None) -> list[dict]:
+    """Every selectable model set, largest first, annotated for the Settings model selector.
+
+    `fits` says whether the detected VRAM can hold it — the UI still lets the user pick a bigger
+    set (they may want to override a bad GPU probe, or knowingly run partly on CPU), but warns.
+    `recommended` marks the set this hardware maps to.
+    """
+    if vram_mb is None:
+        vram_mb = _detect_vram_mb() or 0
+    best = _select_tier(vram_mb)
+    out: list[dict] = []
+    for t in _TIERS:
+        models = [m for m in (t.text_model, t.vision_model, t.council_model) if m]
+        models = list(dict.fromkeys(models))          # dedupe, keep order
+        what, tradeoff = _TIER_BLURB.get(t.tier_name, ("", ""))
+        out.append({
+            **t.as_dict(),
+            "models":        models,
+            "download_mb":   sum(_MODEL_SIZE_MB.get(m, 0) for m in models),
+            "fits":          (t.min_vram_mb == 0) or (vram_mb >= t.min_vram_mb),
+            "recommended":   t.tier_name == best.tier_name,
+            "what":          what,
+            "tradeoff":      tradeoff,
+        })
+    return out
+
+
 def probe_system() -> dict:
     """Gather a human-readable hardware summary + the tier this hardware maps to. Used by the
     Settings 'System' panel and the 'Re-scan hardware' button (so a user who swaps a GPU can

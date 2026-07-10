@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "web-watcher-ui-only",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["_preview_ui_only.py"],
+      "port": 7899
+    },
+    {
       "name": "web-watcher-dashboard",
       "runtimeExecutable": "python",
       "runtimeArgs": ["_preview_server.py"],

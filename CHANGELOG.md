@@ -11,6 +11,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.21.0-alpha] — 2026-07-08 (Choose your AI model set)
+
+### Added — model selector in Settings → System
+- **Pick a lighter (or heavier) model set.** Every set is listed with the models it uses, its
+  **download size**, a plain-English description, and the trade-off ("Runs on any computer, no
+  graphics card required… but the assistant is noticeably weaker"). The set matching your hardware
+  is marked **Recommended**, and the one you're running is marked **In use**.
+- **Safe switching.** Choosing a set downloads whatever's missing in the background; your current
+  model keeps working the whole time and only swaps once the new one is fully on disk. A failed
+  download leaves you on the working model.
+- **Oversized sets are allowed, but warned.** You can select a set bigger than your graphics card
+  (useful when the GPU probe is wrong) — the UI warns it will run partly on the CPU and be slow.
+- **Delete downloaded models to free disk.** Each model shows its real size, with the total. The
+  models Web Watcher is *currently using* are protected: switch sets first, and the old model
+  becomes deletable. (Deleting the active model would break chat and every watch for no benefit.)
+
+### Changed — prompt hygiene (follow-up to the phantom "Miata")
+- Audited all nine LLM prompts and removed the remaining concrete example items that a small model
+  could echo back as if you had asked for them (`agent.py`'s remember-examples, the chat prompt's
+  example watch names and "watch eBay for RTX 3060s under $250"). `search_terms` keeps its
+  instructive examples but is now told to expand **only** the request it's given.
+
+---
+
 ## [0.20.8-alpha] — 2026-07-08 (No more phantom "Miata" watches)
 
 ### Fixed — the assistant inventing items you never mentioned

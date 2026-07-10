@@ -166,25 +166,60 @@ def test_download_installer_none_when_release_ships_no_exe(tmp_path):
 # launch_installer + the manager
 # ---------------------------------------------------------------------------
 
-def test_launch_installer_runs_detached_and_silent(monkeypatch, tmp_path):
-    exe = tmp_path / "setup.exe"
-    exe.write_bytes(b"x")
+def _fake_popen(monkeypatch, returncode):
+    """returncode: what poll() reports after the settle wait. None = still running."""
     calls = {}
-
     import subprocess
     def fake_popen(cmd, **kw):
         calls["cmd"] = cmd
-        calls["kw"] = kw
-        return types.SimpleNamespace(pid=123)
+        return types.SimpleNamespace(pid=123, poll=lambda: returncode)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    return calls
 
-    assert U.launch_installer(exe) is True
+
+def test_launch_installer_runs_detached_and_silent(monkeypatch, tmp_path):
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"x")
+    calls = _fake_popen(monkeypatch, 0)     # Inno's stub exits 0 after spawning the real setup
+
+    assert U.launch_installer(exe, settle=0) is True
     assert calls["cmd"][0] == str(exe)
     assert "/SILENT" in calls["cmd"]        # progress visible; installer.iss relaunches the app
 
 
+def test_launch_installer_still_running_is_success(monkeypatch, tmp_path):
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"x")
+    _fake_popen(monkeypatch, None)
+    assert U.launch_installer(exe, settle=0) is True
+
+
+def test_launch_installer_detects_a_blocked_binary(monkeypatch, tmp_path):
+    """The installer is unsigned — antivirus or policy can kill it instantly. If we reported
+    success, the caller would close the app and the user would be left with nothing."""
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"x")
+    _fake_popen(monkeypatch, 1)             # died immediately, nonzero
+    assert U.launch_installer(exe, settle=0) is False
+
+
 def test_launch_installer_false_when_file_is_missing(tmp_path):
     assert U.launch_installer(tmp_path / "nope.exe") is False
+
+
+def test_manager_keeps_the_window_open_when_the_installer_is_blocked(monkeypatch, tmp_path):
+    from web_watcher.services import ServiceManager
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"x")
+    mgr = ServiceManager()
+    mgr._installer_path = exe
+    closed = {"n": 0}
+    mgr._window = types.SimpleNamespace(destroy=lambda: closed.__setitem__("n", closed["n"] + 1))
+    monkeypatch.setattr(U, "launch_installer", lambda p: False)
+
+    assert mgr.run_installer() is False
+    assert closed["n"] == 0                              # app stays open
+    assert "blocked" in mgr.update_status()["error"]     # and says why
 
 
 def test_manager_will_not_run_an_installer_it_never_downloaded():

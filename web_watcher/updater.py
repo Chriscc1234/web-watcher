@@ -393,27 +393,45 @@ def download_installer(info: UpdateInfo, root: Path = ROOT,
     return exe_path
 
 
-def launch_installer(exe_path: Path) -> bool:
-    """Start the verified installer detached and return True; the caller must then EXIT.
+_INSTALLER_SETTLE = 2.5   # seconds to confirm the installer didn't die on the launch pad
+
+
+def launch_installer(exe_path: Path, settle: float = _INSTALLER_SETTLE) -> bool:
+    """Start the verified installer detached. Return True only once it looks alive; the caller
+    must then EXIT so the files unlock.
 
     Web Watcher cannot install over itself — `python\\python.exe` is the running interpreter and
     Windows holds it locked. So we hand off: spawn the installer as an independent process, quit,
     and let it replace the folder. It relaunches the app when it's done (installer.iss runs the
     launcher on a silent install). /SILENT rather than /VERYSILENT so the user sees a progress
-    window and knows the machine isn't hung."""
+    window and knows the machine isn't hung.
+
+    We wait a moment and check the process before reporting success. The installer is UNSIGNED, so
+    Defender or an enterprise policy can kill it on sight — and if we had already closed the app,
+    the user would be left with no Web Watcher and no explanation. A nonzero exit this early means
+    it never got going. (Exit 0 is normal and expected: Inno's stub extracts the real setup to
+    %TEMP%, launches it, and returns immediately.)"""
     import subprocess
+    import time
     if not exe_path.is_file():
         return False
     flags = 0
     if os.name == "nt":
         flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
-        subprocess.Popen([str(exe_path), "/SILENT", "/NOCANCEL"],
-                         creationflags=flags, close_fds=True)
-        return True
+        proc = subprocess.Popen([str(exe_path), "/SILENT", "/NOCANCEL"],
+                                creationflags=flags, close_fds=True)
     except Exception as exc:
         log.error("could not start installer: %s", exc)
         return False
+
+    time.sleep(settle)
+    rc = proc.poll()
+    if rc is not None and rc != 0:
+        log.error("installer exited immediately with code %s — it was probably blocked "
+                  "(antivirus / policy). Staying on the current version.", rc)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

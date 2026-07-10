@@ -1045,8 +1045,13 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         """Apply whichever update is waiting. A full-installer update (runtime bump) runs the
         verified .exe and closes the app; a code update flags a restart so launcher.py swaps the
         new code in and relaunches. 409 if nothing is ready."""
+        installer_waiting = manager.update_status().get("installer_ready")
         if manager.run_installer():
             return {"ok": True, "restarting": True, "kind": "installer"}
+        if installer_waiting:
+            # It was ready but wouldn't launch — say so rather than "nothing to apply".
+            raise HTTPException(502, detail=manager.update_status().get("error")
+                                or "The update installer wouldn't start.")
         if manager.request_restart():
             return {"ok": True, "restarting": True, "kind": "code"}
         raise HTTPException(409, detail="No update is ready to apply.")

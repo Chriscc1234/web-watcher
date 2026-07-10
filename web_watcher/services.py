@@ -192,11 +192,18 @@ class ServiceManager:
 
     def run_installer(self) -> bool:
         """Start the verified installer and close the app so it can replace the folder. Returns
-        False when nothing is downloaded yet — the UI must never offer this before then."""
+        False when nothing is downloaded yet — the UI must never offer this before then.
+
+        The window is closed ONLY after the installer proves it survived launch. The installer is
+        unsigned, so antivirus can kill it on sight; closing first would leave the user with a
+        vanished app and no explanation."""
         from web_watcher import updater
         if not self._installer_path:
             return False
         if not updater.launch_installer(self._installer_path):
+            self._update_error = ("The update installer wouldn't start — antivirus or a system "
+                                  "policy may have blocked it. You're still on your current "
+                                  "version. Try downloading the installer from GitHub by hand.")
             return False
         if self._window is not None:
             try:

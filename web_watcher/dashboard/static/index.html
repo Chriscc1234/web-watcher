@@ -277,6 +277,23 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
     <div class="service-grid" id="services-grid"></div>
   </section>
   <section style="margin-top:24px">
+    <h2>Updates</h2>
+    <!-- display:block overrides .service-card's flex, which would lay these children out in a row -->
+    <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Web Watcher checks for a new version every time you open it, and again a few times a day while it's running. An update found while the app is open installs the next time you open it — or click <b>Install &amp; restart</b> below to get it right now.</div>
+      <div style="font-size:13px;line-height:1.9">
+        <div>Installed version: <b id="upd-current">…</b></div>
+        <div id="upd-state" style="color:var(--dim)">Checking…</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap">
+        <button id="upd-check-btn" onclick="checkUpdatesNow(this)" style="white-space:nowrap">Check for updates</button>
+        <button id="upd-apply-btn" class="success" onclick="applyUpdate(this)" style="display:none;white-space:nowrap">Install &amp; restart</button>
+        <span id="upd-checked" style="font-size:12px;color:var(--dim)"></span>
+      </div>
+    </div>
+  </section>
+
+  <section style="margin-top:24px">
     <h2>System</h2>
     <div class="service-card" style="padding:16px 20px;max-width:600px">
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Web Watcher scans your hardware to pick the best local AI models it can run. If you change your graphics card or memory, re-scan to switch to the models that fit your new hardware.</div>
@@ -715,11 +732,57 @@ setInterval(() => { loadOversight(); loadOrchestrator(); }, 8000);
 
 // ---- Auto-update: poll status; show a banner when a newer release is downloaded + ready.
 let _updateInfo = null;
+
+// Settings → Updates. Kept in sync by the same poll that drives the banner, so the two can
+// never disagree about whether an update is waiting.
+function renderUpdatePanel(s) {
+  const cur = document.getElementById('upd-current');
+  if (!cur) return;                       // Settings tab not in the DOM yet
+  cur.textContent = 'v' + (s.current || '?');
+  const state = document.getElementById('upd-state');
+  const apply = document.getElementById('upd-apply-btn');
+  if (s.staged && s.available) {
+    state.innerHTML = `Version <b>${s.available.version}</b> is downloaded and ready to install.`;
+    state.style.color = 'var(--blue)';
+    apply.style.display = '';
+  } else if (s.error) {
+    // "Couldn't check" must never be dressed up as "you're up to date".
+    state.textContent = s.error;
+    state.style.color = 'var(--yellow)';
+    apply.style.display = 'none';
+  } else if (!s.configured) {
+    state.textContent = 'Automatic updates are turned off in this build.';
+    state.style.color = 'var(--dim)';
+    apply.style.display = 'none';
+  } else {
+    state.textContent = 'You’re running the latest version.';
+    state.style.color = 'var(--dim)';
+    apply.style.display = 'none';
+  }
+  const when = document.getElementById('upd-checked');
+  when.textContent = s.checked_at
+    ? 'Last checked ' + new Date(s.checked_at * 1000).toLocaleString()
+    : '';
+}
+
+async function checkUpdatesNow(btn) {
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    renderUpdatePanel(await api('/api/update/check', { method: 'POST' }));
+  } catch (e) {
+    const state = document.getElementById('upd-state');
+    if (state) { state.textContent = 'Check failed: ' + e.message; state.style.color = 'var(--yellow)'; }
+  } finally {
+    btn.disabled = false; btn.textContent = 'Check for updates';
+  }
+}
+
 async function pollUpdate() {
   try {
     const s = await api('/api/update/status');
     const hv = document.getElementById('hdr-version');
     if (hv && s.current) hv.textContent = 'v' + s.current;
+    renderUpdatePanel(s);
     const banner = document.getElementById('update-banner');
     if (!banner) return;
     if (s.staged && s.available && banner.dataset.dismissed !== '1') {
@@ -738,14 +801,19 @@ function showUpdateNotes() {
   openWatcherDock();
   appendMsg('assistant', `What's new in ${_updateInfo.version}:\n\n${_updateInfo.notes || '(no notes)'}`, 'dock-convo');
 }
+// Shared by the banner button and the Settings button, which have different labels — restore
+// whichever one we started with rather than hard-coding the banner's.
 async function applyUpdate(btn) {
+  const label = btn.textContent;
   btn.disabled = true; btn.textContent = 'Restarting…';
   try {
     await api('/api/update/apply', { method: 'POST' });
-    document.getElementById('update-banner-text').textContent =
-      'Installing update and restarting… this window will close and reopen.';
+    const t = document.getElementById('update-banner-text');
+    if (t) t.textContent = 'Installing update and restarting… this window will close and reopen.';
+    const st = document.getElementById('upd-state');
+    if (st) st.textContent = 'Installing update and restarting… this window will close and reopen.';
   } catch (e) {
-    btn.disabled = false; btn.textContent = 'Update & restart';
+    btn.disabled = false; btn.textContent = label;
     alert('Could not apply the update: ' + e.message);
   }
 }

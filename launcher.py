@@ -4,10 +4,17 @@ Web Watcher launcher.
 This is the process start.bat (and later the installer's shortcut) runs — NOT
 `python -m web_watcher.main` directly. It exists so updates can be applied safely:
 
-  1. Apply any staged update (swap the new code in) BEFORE the app is imported.
-  2. Launch the app as a child process and wait.
-  3. If the app asked to "Update & restart" (it drops updates/RESTART_REQUESTED on the
+  1. Check GitHub for a newer release and stage it (bounded by a short timeout).
+  2. Apply any staged update (swap the new code in) BEFORE the app is imported.
+  3. Launch the app as a child process and wait.
+  4. If the app asked to "Update & restart" (it drops updates/RESTART_REQUESTED on the
      way out), loop: apply the freshly-staged update and relaunch. Otherwise exit.
+
+Step 1 must come before step 2. The running app also checks for updates, but it can only
+STAGE them — the swap can't happen under a live process. So if the launcher never checked, you
+would download version N while running N-1 and only install N on the *next* start, leaving every
+user permanently one release behind unless they noticed the in-app banner. Checking here closes
+that gap: what a launch finds, that same launch installs.
 
 Because the swap happens here — before web_watcher is imported in the child — the app's
 own running files are never mid-flight when they're replaced.
@@ -80,6 +87,23 @@ def _run_app() -> int:
                           cwd=str(ROOT), creationflags=flags, env=env).returncode
 
 
+def _stage_startup_update() -> None:
+    """Check for a newer release and stage it, so the _apply_pending() that follows installs it
+    in this same launch. Bounded and silent: Web Watcher is an offline-first app, so a missing
+    network, a dead DNS, or a GitHub outage must cost at most a few seconds and never a failure.
+    Set WW_NO_UPDATE_CHECK=1 to skip (used by the test suite and by offline demos)."""
+    if os.environ.get("WW_NO_UPDATE_CHECK"):
+        return
+    try:
+        from web_watcher.updater import check_and_stage, _STARTUP_TIMEOUT
+        from web_watcher.__version__ import __version__
+        staged = check_and_stage(__version__, timeout=_STARTUP_TIMEOUT)
+        if staged:
+            print(f"  Downloaded update {staged} — installing…")
+    except Exception as exc:
+        print(f"  (update check skipped: {exc})")
+
+
 def _apply_pending() -> None:
     # Import the updater lazily (it's stdlib-only for apply) and swap in any staged update.
     try:
@@ -114,7 +138,13 @@ def _do_reset(root: Path = ROOT) -> None:
 
 
 def main() -> int:
+    first = True
     while True:
+        # Only on a cold start: a restart-to-apply loop already has its update staged, and
+        # re-checking would just add a network round-trip to every relaunch.
+        if first:
+            _stage_startup_update()
+            first = False
         _apply_pending()
         if _needs_setup():          # interrupted/first-run install → finish it, then launch
             _run_setup()

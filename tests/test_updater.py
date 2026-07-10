@@ -106,13 +106,18 @@ def test_apply_noop_when_nothing_staged(tmp_path):
     assert updater.apply_pending_update(tmp_path) is None
 
 
+def _release_json(version="9.9.9", notes="big news"):
+    return {"tag_name": f"v{version}", "body": notes,
+            "assets": [{"name": f"web-watcher-{version}.zip",
+                        "browser_download_url": "http://x/bundle.zip"}]}
+
+
 def test_manager_stages_and_reports_update(monkeypatch, tmp_path):
     from web_watcher.services import ServiceManager
     from web_watcher import updater as U
-    info = U.UpdateInfo(version="9.9.9", notes="big news", download_url="x", sha256=None)
     staged = {"v": None}
     monkeypatch.setattr(U, "pending_update", lambda root=None: staged["v"])
-    monkeypatch.setattr(U, "check_for_update", lambda cur: info)
+    monkeypatch.setattr(U, "_fetch_latest_release", lambda o, r, timeout=None: _release_json())
     def fake_stage(i):
         staged["v"] = i.version
         return tmp_path
@@ -122,7 +127,88 @@ def test_manager_stages_and_reports_update(monkeypatch, tmp_path):
     st = mgr.check_updates_now()
     assert st["available"]["version"] == "9.9.9"
     assert st["staged"] is True
+    assert st["error"] is None
+    assert st["checked_at"] > 0
     assert mgr._update_available["notes"] == "big news"
+
+
+def test_manager_reports_unreachable_rather_than_up_to_date(monkeypatch):
+    """An offline check must not look like a clean bill of health."""
+    from web_watcher.services import ServiceManager
+    from web_watcher import updater as U
+
+    def boom(o, r, timeout=None):
+        raise U.UpdateUnreachable("getaddrinfo failed")
+    monkeypatch.setattr(U, "pending_update", lambda root=None: None)
+    monkeypatch.setattr(U, "_fetch_latest_release", boom)
+
+    st = ServiceManager().check_updates_now()
+    assert st["staged"] is False
+    assert st["available"] is None
+    assert "Couldn't reach GitHub" in st["error"]
+
+
+def test_manager_up_to_date_has_no_error(monkeypatch):
+    from web_watcher.services import ServiceManager
+    from web_watcher import updater as U
+    from web_watcher.__version__ import __version__
+    monkeypatch.setattr(U, "pending_update", lambda root=None: None)
+    monkeypatch.setattr(U, "_fetch_latest_release",
+                        lambda o, r, timeout=None: _release_json(version=__version__))
+    st = ServiceManager().check_updates_now()
+    assert st["error"] is None and st["available"] is None and st["staged"] is False
+
+
+# ---------------------------------------------------------------------------
+# check_and_stage — the startup one-shot the launcher calls
+# ---------------------------------------------------------------------------
+
+def test_check_and_stage_returns_version_and_stages(monkeypatch, tmp_path):
+    from web_watcher import updater as U
+    info = U.UpdateInfo(version="9.9.9", notes="", download_url="x", sha256=None)
+    monkeypatch.setattr(U, "pending_update", lambda root=None: None)
+    monkeypatch.setattr(U, "check_for_update", lambda cur, timeout=None: info)
+    monkeypatch.setattr(U, "download_and_stage", lambda i, root, timeout=None: tmp_path)
+    assert U.check_and_stage("0.1.0", root=tmp_path) == "9.9.9"
+
+
+def test_check_and_stage_skips_network_when_already_staged(monkeypatch, tmp_path):
+    """A previous session already downloaded it; the caller's apply step will install it."""
+    from web_watcher import updater as U
+    monkeypatch.setattr(U, "pending_update", lambda root=None: "9.9.9")
+    def never(*a, **k):
+        raise AssertionError("must not hit the network when an update is already staged")
+    monkeypatch.setattr(U, "check_for_update", never)
+    assert U.check_and_stage("0.1.0", root=tmp_path) is None
+
+
+@pytest.mark.parametrize("blowup", [
+    lambda cur, timeout=None: (_ for _ in ()).throw(RuntimeError("kaboom")),
+    lambda cur, timeout=None: None,          # up to date
+])
+def test_check_and_stage_never_raises(monkeypatch, tmp_path, blowup):
+    """Nothing about updating may stand between the user and their app."""
+    from web_watcher import updater as U
+    monkeypatch.setattr(U, "pending_update", lambda root=None: None)
+    monkeypatch.setattr(U, "check_for_update", blowup)
+    assert U.check_and_stage("0.1.0", root=tmp_path) is None
+
+
+def test_check_and_stage_none_when_download_fails(monkeypatch, tmp_path):
+    from web_watcher import updater as U
+    info = U.UpdateInfo(version="9.9.9", notes="", download_url="x", sha256=None)
+    monkeypatch.setattr(U, "pending_update", lambda root=None: None)
+    monkeypatch.setattr(U, "check_for_update", lambda cur, timeout=None: info)
+    monkeypatch.setattr(U, "download_and_stage", lambda i, root, timeout=None: None)
+    assert U.check_and_stage("0.1.0", root=tmp_path) is None
+
+
+def test_check_for_update_swallows_unreachable(monkeypatch):
+    from web_watcher import updater as U
+    def boom(o, r, timeout=None):
+        raise U.UpdateUnreachable("no dns")
+    monkeypatch.setattr(U, "_fetch_latest_release", boom)
+    assert U.check_for_update("0.1.0") is None
 
 
 def test_manager_request_restart_flags_and_closes(monkeypatch, tmp_path):
@@ -146,13 +232,72 @@ def test_manager_request_restart_flags_and_closes(monkeypatch, tmp_path):
     assert mgr.request_restart() is False
 
 
-def test_launcher_reset_wipes_data_and_resets_config(tmp_path, monkeypatch):
+def _load_launcher():
     import importlib.util, sys
     spec = importlib.util.spec_from_file_location(
         "ww_launcher", str(Path(__file__).resolve().parent.parent / "launcher.py"))
     launcher = importlib.util.module_from_spec(spec)
     sys.modules["ww_launcher"] = launcher
     spec.loader.exec_module(launcher)
+    return launcher
+
+
+def test_launcher_checks_before_applying(tmp_path, monkeypatch):
+    """The whole point of the startup check: a launch installs what that same launch found.
+    If apply ran first, the freshly-staged update would sit unused until the NEXT start."""
+    launcher = _load_launcher()
+    order = []
+    monkeypatch.setattr(launcher, "_stage_startup_update", lambda: order.append("check"))
+    monkeypatch.setattr(launcher, "_apply_pending", lambda: order.append("apply"))
+    monkeypatch.setattr(launcher, "_needs_setup", lambda: False)
+    monkeypatch.setattr(launcher, "_run_app", lambda: order.append("run") or 0)
+    monkeypatch.setattr(launcher, "RESET_FLAG", tmp_path / "RESET_REQUESTED")
+    monkeypatch.setattr(launcher, "RESTART_FLAG", tmp_path / "RESTART_REQUESTED")
+
+    assert launcher.main() == 0
+    assert order == ["check", "apply", "run"]
+
+
+def test_launcher_does_not_recheck_on_restart_loop(tmp_path, monkeypatch):
+    """The update is already staged when we loop to apply it — re-checking would add a network
+    round-trip to every 'Update & restart'."""
+    launcher = _load_launcher()
+    order = []
+    restart = tmp_path / "RESTART_REQUESTED"
+    restart.write_text("1")
+    monkeypatch.setattr(launcher, "_stage_startup_update", lambda: order.append("check"))
+    monkeypatch.setattr(launcher, "_apply_pending", lambda: order.append("apply"))
+    monkeypatch.setattr(launcher, "_needs_setup", lambda: False)
+    monkeypatch.setattr(launcher, "_run_app", lambda: order.append("run") or 0)
+    monkeypatch.setattr(launcher, "RESET_FLAG", tmp_path / "RESET_REQUESTED")
+    monkeypatch.setattr(launcher, "RESTART_FLAG", restart)
+
+    assert launcher.main() == 0
+    # First pass consumes the flag and loops; the second pass applies + runs without re-checking.
+    assert order == ["check", "apply", "run", "apply", "run"]
+    assert order.count("check") == 1
+
+
+def test_launcher_startup_check_is_skippable(monkeypatch, capsys):
+    launcher = _load_launcher()
+    monkeypatch.setenv("WW_NO_UPDATE_CHECK", "1")
+    launcher._stage_startup_update()          # must not touch the network or print
+    assert capsys.readouterr().out == ""
+
+
+def test_launcher_startup_check_survives_a_broken_updater(monkeypatch, capsys):
+    """Even an exploding updater import must not stop the app from starting."""
+    launcher = _load_launcher()
+    monkeypatch.delenv("WW_NO_UPDATE_CHECK", raising=False)
+    from web_watcher import updater as U
+    monkeypatch.setattr(U, "check_and_stage",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    launcher._stage_startup_update()          # no exception escapes
+    assert "update check skipped" in capsys.readouterr().out
+
+
+def test_launcher_reset_wipes_data_and_resets_config(tmp_path, monkeypatch):
+    launcher = _load_launcher()
 
     # User data now lives in a per-user data root (WW_DATA_DIR), separate from the app folder.
     from web_watcher import paths

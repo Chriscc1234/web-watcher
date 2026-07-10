@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.21.1-alpha] — 2026-07-09 (Updates actually install themselves)
+
+### Fixed — the app could sit one version behind forever
+- **The launcher now checks for updates *before* it starts the app**, so a launch installs whatever
+  that same launch found. Previously the check ran 25 seconds *after* startup while the install
+  step ran *before* it — meaning you downloaded version N while running N-1, and only got N on the
+  *next* start. Anyone who didn't notice the in-app banner stayed permanently one release behind.
+  (This is why a machine could show v0.20.0 with v0.21.0 already sitting in `updates/pending/`.)
+- The startup check is bounded by a **5-second timeout** and swallows every failure. Web Watcher is
+  offline-first: no network, no DNS, and no GitHub outage may stand between you and your app.
+  `WW_NO_UPDATE_CHECK=1` skips it entirely.
+- The restart-to-apply loop no longer re-checks — the update is already staged by then.
+
+### Added — Settings → Updates
+- Shows your installed version, whether an update is waiting, and when the last check ran.
+- **Check for updates** button to force a check on demand.
+- **Install & restart** appears whenever an update is downloaded and ready.
+- A failed check now says **"Couldn't reach GitHub"** instead of silently reporting that you're up
+  to date — the two used to be indistinguishable, and only one of them is reassuring.
+
+---
+
 ## [0.21.0-alpha] — 2026-07-08 (Choose your AI model set)
 
 ### Added — model selector in Settings → System

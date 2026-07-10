@@ -7,21 +7,25 @@ frequent part: checking GitHub Releases for a newer version, downloading + verif
 code bundle, staging it, and applying it on next launch.
 
 Split of responsibilities:
-  • the RUNNING app checks + downloads + STAGES into updates/pending/ (never touches the
-    live files while it's running);
-  • launcher.py, at the next start, calls apply_pending_update() to swap the staged code
-    in BEFORE the app imports it, then launches.
+  • launcher.py, at startup, calls check_and_stage() (bounded by a 5s timeout so an offline
+    user is never made to wait) and then apply_pending_update() to swap the staged code in
+    BEFORE the app imports it — so a launch installs whatever was found in that same launch;
+  • the RUNNING app ALSO checks + downloads + STAGES into updates/pending/ every few hours
+    (never touching the live files while it's running), which lets the UI offer an immediate
+    "Update & restart" instead of waiting for the next cold start.
 
 Configure the source once (your GitHub repo): set env WW_UPDATE_OWNER / WW_UPDATE_REPO,
 or edit the constants below. Empty owner → updates are silently disabled (safe default).
 
 ── KEY LOCATIONS ─────────────────────────────────────────────────────────────
-  parse_version / is_newer   ~L55   Version compare (handles "-alpha" pre-releases)
-  parse_release              ~L95   GitHub releases/latest JSON → UpdateInfo
-  check_for_update           ~L130  Fetch latest release, return UpdateInfo if newer
-  download_and_stage         ~L160  Download zip, verify sha256, extract to updates/pending
-  pending_update             ~L210  Is a validated update staged?
-  apply_pending_update       ~L225  Swap staged code into place (called by launcher.py)
+  parse_version / is_newer   ~L60   Version compare (handles "-alpha" pre-releases)
+  parse_release              ~L105  GitHub releases/latest JSON → UpdateInfo
+  UpdateUnreachable          ~L135  Raised when GitHub can't be reached (≠ "up to date")
+  check_for_update           ~L155  Fetch latest release, return UpdateInfo if newer
+  check_and_stage            ~L180  Startup one-shot: check + download + stage, never raises
+  download_and_stage         ~L205  Download zip, verify sha256, extract to updates/pending
+  pending_update             ~L260  Is a validated update staged?
+  apply_pending_update       ~L275  Swap staged code into place (called by launcher.py)
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -52,6 +56,8 @@ APPLY_MARKER = "APPLY_VERSION"                            # file in PENDING_DIR 
 RESTART_FLAG = UPDATES_DIR / "RESTART_REQUESTED"          # launcher relaunches when this exists
 
 _API_TIMEOUT = 15.0
+_STARTUP_TIMEOUT = 5.0            # launcher.py: never make an offline user wait longer than this
+_DOWNLOAD_READ_TIMEOUT = 120.0    # a stalled socket, not a slow one, should abort the download
 
 
 @dataclass
@@ -129,36 +135,67 @@ def parse_release(data: dict) -> Optional[UpdateInfo]:
 # Check
 # ---------------------------------------------------------------------------
 
-def _fetch_latest_release(owner: str, repo: str) -> Optional[dict]:
+class UpdateUnreachable(Exception):
+    """GitHub could not be reached (offline, DNS, timeout, 5xx). Distinct from 'up to date',
+    so the UI can say "couldn't check" instead of falsely claiming you're current."""
+
+
+def _fetch_latest_release(owner: str, repo: str,
+                         timeout: float = _API_TIMEOUT) -> Optional[dict]:
+    """The latest release JSON, or None when the repo has no releases. Raises UpdateUnreachable
+    when the network call itself fails."""
     import httpx
     url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
     try:
-        with httpx.Client(timeout=_API_TIMEOUT, follow_redirects=True) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             r = client.get(url, headers={"Accept": "application/vnd.github+json"})
             if r.status_code == 404:
-                return None   # no releases yet
+                return None   # no releases yet (or the repo went private)
             r.raise_for_status()
             return r.json()
     except Exception as exc:
         log.debug("update check network error: %s", exc)
-        return None
+        raise UpdateUnreachable(str(exc)) from exc
 
 
-def check_for_update(current_version: str,
-                     owner: str = None, repo: str = None) -> Optional[UpdateInfo]:
+def check_for_update(current_version: str, owner: str = None, repo: str = None,
+                     timeout: float = _API_TIMEOUT) -> Optional[UpdateInfo]:
     """Return an UpdateInfo when a newer release than `current_version` exists, else None.
     Silent (returns None) when updates aren't configured or on any network error."""
     owner = (owner if owner is not None else GITHUB_OWNER)
     repo  = (repo if repo is not None else GITHUB_REPO)
     if not owner:
         return None
-    data = _fetch_latest_release(owner, repo)
+    try:
+        data = _fetch_latest_release(owner, repo, timeout=timeout)
+    except UpdateUnreachable:
+        return None
     if not data:
         return None
     info = parse_release(data)
     if info and is_newer(info.version, current_version):
         return info
     return None
+
+
+def check_and_stage(current_version: str, timeout: float = _API_TIMEOUT,
+                    root: Path = ROOT) -> Optional[str]:
+    """Startup path: check GitHub and stage a newer release so the caller's apply step installs
+    it in this SAME launch. Returns the staged version, or None when up to date, already staged,
+    offline, or anything at all went wrong — an update must never stand between the user and
+    their app, so every failure here is swallowed."""
+    try:
+        if pending_update(root):
+            return None          # a previous session already staged it; apply will pick it up
+        info = check_for_update(current_version, timeout=timeout)
+        if info is None:
+            return None
+        if download_and_stage(info, root, timeout=timeout) is None:
+            return None
+        return info.version
+    except Exception as exc:
+        log.debug("startup update check skipped: %s", exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -173,18 +210,23 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def download_and_stage(info: UpdateInfo, root: Path = ROOT) -> Optional[Path]:
+def download_and_stage(info: UpdateInfo, root: Path = ROOT,
+                       timeout: Optional[float] = None) -> Optional[Path]:
     """Download the release zip, verify its sha256 (when provided), and extract it into
     updates/pending/. The zip must contain a top-level `web_watcher/` directory. Returns
-    the pending dir on success, None on failure (a bad hash never gets staged)."""
+    the pending dir on success, None on failure (a bad hash never gets staged).
+
+    `timeout` bounds the *connect* and *read* stalls, not the whole transfer — a slow link on a
+    big asset must still finish. None means no limit (the background checker, which has all day)."""
     import httpx
+    limits = httpx.Timeout(timeout, read=_DOWNLOAD_READ_TIMEOUT) if timeout else None
     updates = root / "updates"
     pending = updates / "pending"
     dl_dir  = updates / "download"
     dl_dir.mkdir(parents=True, exist_ok=True)
     zip_path = dl_dir / f"web-watcher-{info.version}.zip"
     try:
-        with httpx.Client(timeout=None, follow_redirects=True) as client:
+        with httpx.Client(timeout=limits, follow_redirects=True) as client:
             with client.stream("GET", info.download_url) as resp:
                 resp.raise_for_status()
                 with zip_path.open("wb") as f:

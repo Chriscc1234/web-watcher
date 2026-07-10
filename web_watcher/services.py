@@ -67,6 +67,8 @@ class ServiceManager:
         # Auto-update state (populated by the background checker; surfaced via /api/update).
         self._window          = None    # pywebview window — set by main.py, used to restart
         self._update_available = None   # dict {version, notes} when a newer release is staged
+        self._update_checked_at = None  # epoch seconds of the last completed check
+        self._update_error    = None    # human-readable reason the last check failed
         self._update_thread:  Optional[threading.Thread] = None
         self._update_stop     = threading.Event()
 
@@ -111,20 +113,33 @@ class ServiceManager:
 
     def check_updates_now(self) -> dict:
         """Check GitHub for a newer release; if found, download + stage it so a one-click
-        restart can apply it. Returns the current update status. Safe to call anytime."""
+        restart can apply it. Returns the current update status. Safe to call anytime.
+
+        An unreachable GitHub is recorded rather than swallowed: "we couldn't check" and "you're
+        up to date" look identical to the user otherwise, and only one of them is reassuring."""
         from web_watcher import updater
         from web_watcher.__version__ import __version__
+        self._update_checked_at = time.time()
         # Already staged? then we're done — surface it.
         staged = updater.pending_update()
         if staged:
+            self._update_error = None
             self._update_available = {"version": staged, "notes": (self._update_available or {}).get("notes", "")}
             return self.update_status()
-        info = updater.check_for_update(__version__)
-        if info is None:
+        try:
+            data = updater._fetch_latest_release(updater.GITHUB_OWNER, updater.GITHUB_REPO)
+        except updater.UpdateUnreachable as exc:
+            self._update_error = f"Couldn't reach GitHub: {exc}"
+            return self.update_status()
+        self._update_error = None
+        info = updater.parse_release(data) if data else None
+        if info is None or not updater.is_newer(info.version, __version__):
             return self.update_status()
         if updater.download_and_stage(info) is not None:
             self._update_available = {"version": info.version, "notes": info.notes}
             log.info("update %s staged and ready to apply", info.version)
+        else:
+            self._update_error = "The update downloaded but failed its integrity check."
         return self.update_status()
 
     def update_status(self) -> dict:
@@ -136,6 +151,8 @@ class ServiceManager:
             "available": self._update_available,     # {version, notes} or None
             "staged":    bool(staged),               # downloaded + ready to apply on restart
             "configured": bool(updater.GITHUB_OWNER),
+            "checked_at": self._update_checked_at,   # epoch seconds, or None if never checked
+            "error":     self._update_error,         # why the last check failed, or None
         }
 
     def request_restart(self) -> bool:

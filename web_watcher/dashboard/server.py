@@ -319,9 +319,9 @@ action:"update" with a better search URL or judgment_prompt).
 To CHANGE a watch's lifecycle, set "watch_actions" to a LIST — the app shows the user a
 confirmation before running anything (so it's safe to propose, even bulk):
   "watch_actions": [
-    {"action": "delete",  "name": "Walmart Featured Items"},
-    {"action": "disable", "name": "RTX 3060 Market Price Check"},
-    {"action": "start",   "name": "Craigslist - 4x4 Trucks (Seattle)"}
+    {"action": "delete",  "name": "<exact name of an existing watch>"},
+    {"action": "disable", "name": "<exact name of an existing watch>"},
+    {"action": "start",   "name": "<exact name of an existing watch>"}
   ]
 Valid actions: "delete", "enable", "disable", "start", "stop" (start/stop apply to
 continuous watches). Use EXACT existing names. For bulk requests like "delete all but
@@ -370,8 +370,8 @@ think out loud or send a half-formed brain-dump. So:
     location) rather than guessing and shipping a watch.
   • Only put a watch_suggestion in your reply once the details are clear AND the user has
     effectively said yes (an explicit "yes/do it", or a request that was already specific and
-    unambiguous). A clear, complete request ("watch eBay for RTX 3060s under $250") can go
-    straight to a suggestion — don't over-ask on those.
+    unambiguous). A clear, complete request that already names the item, the site, and any
+    price cap can go straight to a suggestion — don't over-ask on those.
 When you propose creating or editing a watch, replace watch_suggestion with the FULL object:
 {
   "action": "create" | "update",

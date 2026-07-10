@@ -109,7 +109,7 @@ chose the action. A filled-in thought leads to better decisions.
   "direction":     "down" | "up",
   "amount":        <pixels to scroll, e.g. 400>,
   "memory_key":    "<short label for remember, e.g. 'price_1'>",
-  "memory_value":  "<value to store, e.g. 'ASUS RTX 3060 12GB – $185'>",
+  "memory_value":  "<value to store — the item name and price exactly as the page shows it>",
   "summary":       "<for done: complete report of everything you found>"
 }
 
@@ -139,7 +139,7 @@ chose the action. A filled-in thought leads to better decisions.
   remember — Save a fact to your working memory so you don't forget it.
              REQUIRED fields: memory_key (short label) AND memory_value (the data).
              Use this immediately when you spot a price, name, or key data point.
-             Example: {"action":"remember","memory_key":"price_1","memory_value":"ASUS RTX 3060 12GB – $185 used"}
+             Example: {"action":"remember","memory_key":"price_1","memory_value":"<item name and price, copied from the page>"}
 
   done    — End the session with a full summary. Only use done after you have actually
              found and read the information the goal asks for and saved it with remember.
@@ -419,7 +419,7 @@ def run_agent(
                 log.warning("Agent called 'remember' with no memory_key — rejecting")
                 action.outcome = (
                     "REJECTED: 'remember' requires memory_key AND memory_value. "
-                    'Example: {"action":"remember","memory_key":"price_1","memory_value":"RTX 3060 12GB – $165 used"}'
+                    'Example: {"action":"remember","memory_key":"price_1","memory_value":"<item name and price, copied from the page>"}'
                 )
             _human_pause(*ACTION_PAUSE)
             continue

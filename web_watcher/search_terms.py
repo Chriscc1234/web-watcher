@@ -45,6 +45,9 @@ literally, so:
   "sport", which matches "Sport Utility"/SUVs).
 - Keep each term short (1-3 words), the way a person types into a search box.
 
+The items named above are EXAMPLES of the technique only. Expand ONLY the request you are
+given — never emit a term for an example item unless it genuinely matches that request.
+
 Return ONLY JSON: {"terms": ["...", "..."]} with 3-6 terms, best first. No other text."""
 
 

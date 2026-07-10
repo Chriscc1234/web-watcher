@@ -1042,11 +1042,14 @@ def create_app(manager: "ServiceManager") -> FastAPI:
 
     @app.post("/api/update/apply")
     def update_apply():
-        """Apply the staged update: flag a restart and close the window so launcher.py swaps
-        the new code in and relaunches. 409 if nothing is staged."""
+        """Apply whichever update is waiting. A full-installer update (runtime bump) runs the
+        verified .exe and closes the app; a code update flags a restart so launcher.py swaps the
+        new code in and relaunches. 409 if nothing is ready."""
+        if manager.run_installer():
+            return {"ok": True, "restarting": True, "kind": "installer"}
         if manager.request_restart():
-            return {"ok": True, "restarting": True}
-        raise HTTPException(409, detail="No update is staged to apply.")
+            return {"ok": True, "restarting": True, "kind": "code"}
+        raise HTTPException(409, detail="No update is ready to apply.")
 
     @app.post("/api/reset")
     def factory_reset(body: dict):

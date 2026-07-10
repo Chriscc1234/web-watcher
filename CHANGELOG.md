@@ -11,6 +11,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.22.0-alpha] — 2026-07-09 (Full updates install themselves)
+
+### Fixed — a release that added a dependency would have bricked every install
+- Auto-update ships `web_watcher/` and the root scripts, and nothing runs `pip install`. So a
+  release that added a Python dependency, bumped the bundled Python, or changed the shipped DLLs
+  would have dropped new code onto missing dependencies — the app dies on import, with no working
+  code left to repair itself. (The greenlet DLL bug was exactly this class of problem, and we only
+  survived it because it happened before anyone had auto-update.)
+
+### Added — full-installer updates, downloaded in the background
+- The installer now writes a **`RUNTIME`** marker (an integer) into the app folder. It is
+  deliberately *not* shipped in the code bundle — a code-only update must never be able to claim
+  it upgraded a runtime it didn't touch.
+- Releases declare `runtime: <int>` in their body. When it exceeds the installed marker, the code
+  path **refuses to stage** and the app takes the installer path instead.
+- The 291 MB installer downloads **in the background while Web Watcher keeps working**, and its
+  sha256 is checked against `installer_sha256:` in the release body. A release with no declared
+  hash, or a download that doesn't match, is **refused and deleted** — this is the only binary the
+  app ever executes.
+- Only then does a banner appear: *"Version X is a full update, downloaded and verified.
+  Installing closes Web Watcher and reopens it."* Nothing runs until you click.
+- Clicking spawns the installer detached and closes the app (Windows holds `python.exe` locked, so
+  Web Watcher cannot install over itself). Inno relaunches the app afterward via a new
+  `Check: WizardSilent` `[Run]` entry — the finish-page checkbox still covers manual installs.
+
+---
+
 ## [0.21.1-alpha] — 2026-07-09 (Updates actually install themselves)
 
 ### Fixed — the app could sit one version behind forever

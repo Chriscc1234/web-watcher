@@ -61,6 +61,9 @@ RESTART_FLAG = UPDATES_DIR / "RESTART_REQUESTED"          # launcher relaunches 
 # the replacement only takes effect on the next launch.
 ROOT_FILES = ("launcher.py", "provision.py", "install.py", "uninstall.py")
 
+# Deliberately NOT in ROOT_FILES: the installer owns this file. See local_runtime().
+RUNTIME_MARKER = "RUNTIME"
+
 _API_TIMEOUT = 15.0
 _STARTUP_TIMEOUT = 5.0            # launcher.py: never make an offline user wait longer than this
 _DOWNLOAD_READ_TIMEOUT = 120.0    # a stalled socket, not a slow one, should abort the download
@@ -69,9 +72,13 @@ _DOWNLOAD_READ_TIMEOUT = 120.0    # a stalled socket, not a slow one, should abo
 @dataclass
 class UpdateInfo:
     version:      str            # normalized, e.g. "0.16.4-alpha"
-    notes:        str            # changelog / release body (sha line stripped)
+    notes:        str            # changelog / release body (metadata lines stripped)
     download_url: str            # the code-zip asset URL
     sha256:       Optional[str]  # expected hash, if the release provides one
+    runtime:        int = 1              # the runtime build this release needs (see local_runtime)
+    installer_url:  Optional[str] = None # the full-installer asset, when the release ships one
+    installer_sha256: Optional[str] = None
+    installer_size: int = 0              # bytes, from the GitHub asset metadata
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +115,21 @@ def is_newer(remote: str, local: str) -> bool:
 # GitHub release parsing
 # ---------------------------------------------------------------------------
 
-_SHA_RE = re.compile(r"sha256:\s*([0-9a-fA-F]{64})")
+# `(?<![\w-])` keeps the code-zip hash from also matching inside `installer_sha256:`.
+_SHA_RE           = re.compile(r"(?<![\w-])sha256:\s*([0-9a-fA-F]{64})")
+_INSTALLER_SHA_RE = re.compile(r"installer_sha256:\s*([0-9a-fA-F]{64})")
+_RUNTIME_RE       = re.compile(r"^runtime:\s*(\d+)\s*$", re.M)
 
 
 def parse_release(data: dict) -> Optional[UpdateInfo]:
     """Turn a GitHub releases/latest JSON object into an UpdateInfo, or None if it has no
-    usable code-zip asset. The expected sha256 is read from a `sha256: <hex>` line in the
-    release body (build_release.py puts it there); that line is stripped from the notes."""
+    usable code-zip asset. Three machine-readable lines are read out of the release body
+    (build_release.py puts them there) and stripped from the displayed notes:
+
+        sha256: <hex>            the code bundle's hash
+        installer_sha256: <hex>  the full installer's hash — REQUIRED before we ever run it
+        runtime: <int>           which runtime build this release needs (see local_runtime)
+    """
     if not isinstance(data, dict):
         return None
     tag = (data.get("tag_name") or data.get("name") or "").strip()
@@ -124,17 +139,55 @@ def parse_release(data: dict) -> Optional[UpdateInfo]:
     body = data.get("body") or ""
     sha_m = _SHA_RE.search(body)
     sha256 = sha_m.group(1).lower() if sha_m else None
-    notes = _SHA_RE.sub("", body).strip()
+    isha_m = _INSTALLER_SHA_RE.search(body)
+    installer_sha = isha_m.group(1).lower() if isha_m else None
+    rt_m = _RUNTIME_RE.search(body)
+    runtime = int(rt_m.group(1)) if rt_m else 1
 
-    zip_url = None
+    notes = body
+    for pat in (_INSTALLER_SHA_RE, _SHA_RE, _RUNTIME_RE):   # installer_sha first: it contains sha256:
+        notes = pat.sub("", notes)
+    notes = notes.strip()
+
+    zip_url = installer_url = None
+    installer_size = 0
     for asset in (data.get("assets") or []):
         name = (asset.get("name") or "").lower()
-        if name.endswith(".zip"):
+        if name.endswith(".zip") and not zip_url:
             zip_url = asset.get("browser_download_url")
-            break
+        elif name.endswith(".exe") and not installer_url:
+            installer_url = asset.get("browser_download_url")
+            installer_size = int(asset.get("size") or 0)
     if not zip_url:
         return None
-    return UpdateInfo(version=version, notes=notes, download_url=zip_url, sha256=sha256)
+    return UpdateInfo(version=version, notes=notes, download_url=zip_url, sha256=sha256,
+                      runtime=runtime, installer_url=installer_url,
+                      installer_sha256=installer_sha, installer_size=installer_size)
+
+
+# ---------------------------------------------------------------------------
+# Runtime build: when a code-only update is not enough
+# ---------------------------------------------------------------------------
+
+def local_runtime(root: Path = ROOT) -> int:
+    """Which build of the bundled Python runtime + pip dependencies this install has.
+
+    Written by the installer and deliberately NOT shipped in the code bundle: if a code-only
+    update could rewrite this file, it would claim to have upgraded a runtime it never touched.
+    Missing → 1, which is every install made before the marker existed."""
+    try:
+        return int((root / RUNTIME_MARKER).read_text(encoding="utf-8").strip())
+    except Exception:
+        return 1
+
+
+def needs_installer(info: UpdateInfo, root: Path = ROOT) -> bool:
+    """True when this release needs the full installer rather than a code swap — i.e. it bumped
+    the Python runtime, the pip dependencies, the bundled DLLs, or the Playwright browsers.
+
+    Applying such a release as a code-only update would drop new code onto missing dependencies
+    and the app would die on import, with no working code left to repair itself."""
+    return info.runtime > local_runtime(root)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +248,11 @@ def check_and_stage(current_version: str, timeout: float = _API_TIMEOUT,
             return None          # a previous session already staged it; apply will pick it up
         info = check_for_update(current_version, timeout=timeout)
         if info is None:
+            return None
+        if needs_installer(info, root):
+            # Code-only staging would drop new code onto missing dependencies. The running app
+            # handles this release: it downloads the installer and asks before running it.
+            log.info("update %s needs the full installer — not staging code", info.version)
             return None
         if download_and_stage(info, root, timeout=timeout) is None:
             return None
@@ -280,6 +338,82 @@ def stage_zip(zip_path: Path, version: str, root: Path = ROOT,
     (pending / APPLY_MARKER).write_text(version, encoding="utf-8")
     log.info("update %s staged (pending apply on next launch)", version)
     return pending
+
+
+# ---------------------------------------------------------------------------
+# Full-installer updates (runtime bumps: new pip deps, new Python, new DLLs)
+# ---------------------------------------------------------------------------
+
+def download_installer(info: UpdateInfo, root: Path = ROOT,
+                       on_progress=None) -> Optional[Path]:
+    """Download the release's installer .exe and verify its sha256. Returns the path, or None.
+
+    The hash is MANDATORY here, unlike the code bundle where it is merely expected. This is the
+    only place Web Watcher executes a binary, so a release without `installer_sha256:` in its
+    body, or a download that doesn't match it, is refused outright and the file deleted.
+
+    `on_progress(downloaded_bytes, total_bytes)` is called as the transfer runs."""
+    import httpx
+    if not info.installer_url:
+        log.error("release %s needs the installer but ships no .exe asset", info.version)
+        return None
+    if not info.installer_sha256:
+        log.error("release %s ships an installer with no installer_sha256 — refusing to run it",
+                  info.version)
+        return None
+
+    dl_dir = root / "updates" / "download"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    exe_path = dl_dir / f"WebWatcher-Setup-{info.version}.exe"
+    try:
+        with httpx.Client(timeout=httpx.Timeout(30.0, read=_DOWNLOAD_READ_TIMEOUT),
+                          follow_redirects=True) as client:
+            with client.stream("GET", info.installer_url) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or info.installer_size or 0)
+                done = 0
+                with exe_path.open("wb") as f:
+                    for chunk in resp.iter_bytes(1 << 18):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if on_progress:
+                            on_progress(done, total)
+    except Exception as exc:
+        log.warning("installer download failed: %s", exc)
+        exe_path.unlink(missing_ok=True)
+        return None
+
+    actual = _sha256_file(exe_path)
+    if actual.lower() != info.installer_sha256.lower():
+        log.error("installer sha256 mismatch (expected %s, got %s) — discarding",
+                  info.installer_sha256, actual)
+        exe_path.unlink(missing_ok=True)
+        return None
+    log.info("installer %s downloaded and verified", info.version)
+    return exe_path
+
+
+def launch_installer(exe_path: Path) -> bool:
+    """Start the verified installer detached and return True; the caller must then EXIT.
+
+    Web Watcher cannot install over itself — `python\\python.exe` is the running interpreter and
+    Windows holds it locked. So we hand off: spawn the installer as an independent process, quit,
+    and let it replace the folder. It relaunches the app when it's done (installer.iss runs the
+    launcher on a silent install). /SILENT rather than /VERYSILENT so the user sees a progress
+    window and knows the machine isn't hung."""
+    import subprocess
+    if not exe_path.is_file():
+        return False
+    flags = 0
+    if os.name == "nt":
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        subprocess.Popen([str(exe_path), "/SILENT", "/NOCANCEL"],
+                         creationflags=flags, close_fds=True)
+        return True
+    except Exception as exc:
+        log.error("could not start installer: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------

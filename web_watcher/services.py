@@ -69,6 +69,11 @@ class ServiceManager:
         self._update_available = None   # dict {version, notes} when a newer release is staged
         self._update_checked_at = None  # epoch seconds of the last completed check
         self._update_error    = None    # human-readable reason the last check failed
+        # Full-installer updates (runtime bumps). Downloaded in the background; NEVER run
+        # without the user clicking Install — it closes the app and replaces the folder.
+        self._installer_path  = None    # Path to the verified .exe, once downloaded
+        self._installer_pct   = 0       # 0-100 download progress
+        self._installer_busy  = False   # a download is in flight
         self._update_thread:  Optional[threading.Thread] = None
         self._update_stop     = threading.Event()
 
@@ -135,12 +140,70 @@ class ServiceManager:
         info = updater.parse_release(data) if data else None
         if info is None or not updater.is_newer(info.version, __version__):
             return self.update_status()
+
+        if updater.needs_installer(info):
+            # New pip deps / Python / DLLs: a code swap would leave the app unable to import.
+            # Fetch the installer in the background; the user decides when to run it.
+            self._update_available = {"version": info.version, "notes": info.notes,
+                                      "kind": "installer",
+                                      "size_mb": round((info.installer_size or 0) / 1_000_000)}
+            self._start_installer_download(info)
+            return self.update_status()
+
         if updater.download_and_stage(info) is not None:
-            self._update_available = {"version": info.version, "notes": info.notes}
+            self._update_available = {"version": info.version, "notes": info.notes, "kind": "code"}
             log.info("update %s staged and ready to apply", info.version)
         else:
             self._update_error = "The update downloaded but failed its integrity check."
         return self.update_status()
+
+    # -- full-installer path ------------------------------------------------
+
+    def _start_installer_download(self, info) -> None:
+        """Fetch + verify the installer on a worker thread. Idempotent: a second call while one
+        is in flight, or after it landed, does nothing."""
+        from web_watcher import updater
+        if self._installer_busy or self._installer_path:
+            return
+        self._installer_busy = True
+        self._installer_pct = 0
+
+        def _progress(done: int, total: int) -> None:
+            if total:
+                self._installer_pct = min(99, int(done * 100 / total))
+
+        def _run() -> None:
+            try:
+                path = updater.download_installer(info, on_progress=_progress)
+                if path is None:
+                    self._update_error = ("The full update could not be downloaded or failed its "
+                                          "security check. Your current version is untouched.")
+                    return
+                self._installer_path = path
+                self._installer_pct = 100
+                log.info("installer %s ready to run", info.version)
+            except Exception as exc:
+                log.warning("installer download failed: %s", exc)
+                self._update_error = f"The full update could not be downloaded: {exc}"
+            finally:
+                self._installer_busy = False
+
+        threading.Thread(target=_run, daemon=True, name="ww-installer-dl").start()
+
+    def run_installer(self) -> bool:
+        """Start the verified installer and close the app so it can replace the folder. Returns
+        False when nothing is downloaded yet — the UI must never offer this before then."""
+        from web_watcher import updater
+        if not self._installer_path:
+            return False
+        if not updater.launch_installer(self._installer_path):
+            return False
+        if self._window is not None:
+            try:
+                self._window.destroy()   # the installer waits for us to let go of the files
+            except Exception as exc:
+                log.debug("window destroy failed: %s", exc)
+        return True
 
     def update_status(self) -> dict:
         from web_watcher import updater
@@ -153,6 +216,10 @@ class ServiceManager:
             "configured": bool(updater.GITHUB_OWNER),
             "checked_at": self._update_checked_at,   # epoch seconds, or None if never checked
             "error":     self._update_error,         # why the last check failed, or None
+            # Full-installer update: downloading in the background, then one click to run it.
+            "installer_ready":       self._installer_path is not None,
+            "installer_downloading": self._installer_busy,
+            "installer_pct":         self._installer_pct,
         }
 
     def request_restart(self) -> bool:

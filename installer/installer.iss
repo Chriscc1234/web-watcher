@@ -76,6 +76,11 @@ Name: "{userdesktop}\{#AppName}";  Filename: "{app}\python\pythonw.exe"; Paramet
 ; it leaves a single obvious action, and the model download just shifts to first launch.
 Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\launcher.py"""; WorkingDir: "{app}\app"; Description: "Launch {#AppName} now"; Flags: postinstall nowait skipifsilent
 
+; SILENT install = the app updated itself (updater.launch_installer runs us with /SILENT after
+; closing its own window). There is no finish page to hold the checkbox above, so relaunch here
+; instead — otherwise the app would vanish mid-update and never come back.
+Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\launcher.py"""; WorkingDir: "{app}\app"; Flags: nowait; Check: WizardSilent
+
 ; NOTE: no [UninstallRun] to remove shortcuts — Inno automatically removes the [Icons] it
 ; created. We deliberately do NOT run uninstall.py here: it deletes "Web Watcher" shortcuts by
 ; NAME from the user's Desktop/Start Menu, which could clobber a *different* install's shortcuts.

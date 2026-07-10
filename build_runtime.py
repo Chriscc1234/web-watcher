@@ -59,6 +59,9 @@ APP_INCLUDE = [
     "web_watcher",
     "launcher.py",
     "provision.py",
+    # Which runtime build this install has. Only the installer ships it — a code-only update must
+    # never be able to claim it upgraded a runtime it didn't touch. See updater.local_runtime().
+    "RUNTIME",
     "requirements.txt",
     "config.example.yaml",
     "CHANGELOG.md",

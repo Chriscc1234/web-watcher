@@ -73,11 +73,24 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _runtime() -> int:
+    """The runtime build this release needs. The app compares it against the RUNTIME file its
+    installer wrote; a bump means a code-only update is not enough and the full installer runs."""
+    try:
+        return int((ROOT / "RUNTIME").read_text(encoding="utf-8").strip())
+    except Exception:
+        return 1
+
+
 def main() -> None:
     version = _version()
     zip_path = _zip_package(version)
     digest = _sha256(zip_path)
-    notes = _changelog_section(version) + f"\n\nsha256: {digest}\n"
+    # These two lines are machine-read by updater.parse_release() and stripped from the notes the
+    # user sees. build_installer.py appends `installer_sha256:` once the .exe exists.
+    notes = (_changelog_section(version)
+             + f"\n\nsha256: {digest}\n"
+             + f"runtime: {_runtime()}\n")
     notes_path = DIST / f"RELEASE_NOTES_{version}.md"
     notes_path.write_text(notes, encoding="utf-8")
 

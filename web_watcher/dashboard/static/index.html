@@ -741,7 +741,21 @@ function renderUpdatePanel(s) {
   cur.textContent = 'v' + (s.current || '?');
   const state = document.getElementById('upd-state');
   const apply = document.getElementById('upd-apply-btn');
-  if (s.staged && s.available) {
+  if (s.installer_downloading && s.available) {
+    // A FULL update (new Python runtime / dependencies). It downloads in the background while
+    // the app keeps working, and never runs until the user clicks.
+    const mb = s.available.size_mb ? ` (${s.available.size_mb} MB)` : '';
+    state.textContent =
+      `Downloading the full update to ${s.available.version}${mb}… ${s.installer_pct}%`;
+    state.style.color = 'var(--blue)';
+    apply.style.display = 'none';
+  } else if (s.installer_ready && s.available) {
+    state.innerHTML = `Version <b>${s.available.version}</b> is a full update, downloaded and ` +
+      `verified. Installing it closes Web Watcher and reopens it — your watches, results, and ` +
+      `settings are kept.`;
+    state.style.color = 'var(--blue)';
+    apply.style.display = '';
+  } else if (s.staged && s.available) {
     state.innerHTML = `Version <b>${s.available.version}</b> is downloaded and ready to install.`;
     state.style.color = 'var(--blue)';
     apply.style.display = '';
@@ -785,12 +799,15 @@ async function pollUpdate() {
     renderUpdatePanel(s);
     const banner = document.getElementById('update-banner');
     if (!banner) return;
-    if (s.staged && s.available && banner.dataset.dismissed !== '1') {
+    const ready = s.staged || s.installer_ready;
+    if (ready && s.available && banner.dataset.dismissed !== '1') {
       _updateInfo = s.available;
-      document.getElementById('update-banner-text').textContent =
-        `Version ${s.available.version} is ready to install.`;
+      document.getElementById('update-banner-text').textContent = s.installer_ready
+        ? `Version ${s.available.version} is a full update, downloaded and ready. ` +
+          `Installing closes and reopens Web Watcher.`
+        : `Version ${s.available.version} is ready to install.`;
       banner.style.display = 'flex';
-    } else if (!s.staged) {
+    } else if (!ready) {
       banner.style.display = 'none';
     }
   } catch (_) {}

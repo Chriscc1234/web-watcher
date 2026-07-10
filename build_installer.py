@@ -14,6 +14,7 @@ Requires Inno Setup 6 (ISCC.exe). Install once:  winget install JRSoftware.InnoS
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -75,6 +76,32 @@ def main() -> None:
     out = ROOT / "installer" / "Output" / f"WebWatcher-Setup-{version}.exe"
     print(f"[build_installer] DONE -> {out}"
           + ("" if out.exists() else "  (expected output not found - check ISCC log)"))
+    if out.exists():
+        _stamp_installer_hash(version, out)
+
+
+def _stamp_installer_hash(version: str, exe: Path) -> None:
+    """Append `installer_sha256: <hex>` to the release notes build_release.py wrote.
+
+    The app refuses to run a downloaded installer whose hash isn't declared here and matched
+    exactly — this is the only binary Web Watcher ever executes. Done in this script because the
+    hash cannot exist until ISCC has produced the .exe."""
+    import hashlib
+    notes = ROOT / "dist" / f"RELEASE_NOTES_{version}.md"
+    if not notes.exists():
+        print(f"[build_installer] no {notes.name} yet — run build_release.py, then re-run me "
+              "(or the release will ship without installer_sha256 and self-update will refuse it)")
+        return
+    h = hashlib.sha256()
+    with exe.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    text = notes.read_text(encoding="utf-8")
+    text = re.sub(r"^installer_sha256:.*\n?", "", text, flags=re.M)   # idempotent on a rebuild
+    notes.write_text(text.rstrip("\n") + f"\ninstaller_sha256: {digest}\n", encoding="utf-8")
+    print(f"[build_installer] installer_sha256: {digest}")
+    print(f"[build_installer] stamped into {notes.name}")
 
 
 if __name__ == "__main__":

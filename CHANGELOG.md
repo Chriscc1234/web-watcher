@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.22.3-alpha] — 2026-07-10 (The chat keeps track of what you're talking about)
+
+### Fixed — follow-ups landed on the wrong watch (reviewed against a real chat log)
+- **Details you add while setting up a new watch now stay with that new watch.** Previously the
+  focus tracker only knew about watches that already existed, so mid-setup follow-ups like
+  "i would prefer it to be black" slid off onto whichever OLD watch shared a word with earlier
+  conversation — the exact "fridge preference updates the sports-car watch" failure from the log.
+  Same for "the one I just specified earlier", which once turned into a trucks edit.
+- **"No, I meant…" is treated as a correction, not a cancellation.** The bot no longer replies
+  "OK, no fridge watch then" when you were redirecting it, and won't make you restate details.
+- **A question is never an edit.** "what are our search terms?" now gets an answer read from the
+  watch's config instead of an unrequested change proposal.
+- **"Also look for X" edits must actually contain X.** The requested change is now required to
+  appear in the proposed config, alongside everything already there — no more edits that commit
+  in prose and change nothing.
+- All four failures replayed verbatim from the real chat log: 4/4 fixed on qwen2.5:14b; 3/4 on
+  the weak 3b tier (the add-a-term merge is still shaky there — one more reason to use the
+  recommended model set for your hardware).
+
+---
+
 ## [0.22.2-alpha] — 2026-07-10 (The update you got is the update you see)
 
 ### Fixed — updates applied but the window kept showing the OLD interface

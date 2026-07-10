@@ -402,3 +402,67 @@ def test_single_watch_object_still_supported(monkeypatch):
     monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
     out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
     assert out["watch_suggestion"]["name"] == "Solo"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Focus tracking with a create in flight (#65 — the fridge/sports-car hijack)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cfg_with(*names):
+    import types
+    return types.SimpleNamespace(watches=[types.SimpleNamespace(name=n) for n in names])
+
+
+def test_pending_create_wins_focus_over_older_watch_words():
+    """Real failure: mid-fridge-creation, 'i would prefer it to be black' scanned past the
+    fridge talk and locked onto 'Manual Sports Cars' from six messages earlier."""
+    from web_watcher.dashboard import server as S
+    cfg = _cfg_with("Manual Sports Cars (Seattle)", "Craigslist - 4x4 Trucks (Seattle)")
+    msgs = [
+        {"role": "user", "content": "lets expand the sports car watch terms"},
+        {"role": "assistant", "content": "Done - widened the sports car searches."},
+        {"role": "user", "content": "create a watch for refrigerators under $800"},
+        {"role": "assistant", "content": "Sure - setting up a refrigerator watch now."},
+        {"role": "user", "content": "i would prefer it to be black but not critical"},
+    ]
+    assert S._focused_watch_name(msgs, cfg) == S.PENDING_CREATE
+
+
+def test_existing_watch_reference_beats_older_pending_create():
+    """Newest-first: naming an existing watch AFTER the create talk moves focus to it."""
+    from web_watcher.dashboard import server as S
+    cfg = _cfg_with("Manual Sports Cars (Seattle)")
+    msgs = [
+        {"role": "user", "content": "create a watch for refrigerators under $800"},
+        {"role": "assistant", "content": "Sure - setting up a refrigerator watch now."},
+        {"role": "user", "content": "actually, first widen the manual sports cars watch"},
+    ]
+    assert S._focused_watch_name(msgs, cfg) == "Manual Sports Cars (Seattle)"
+
+
+def test_applied_create_self_heals_to_the_real_watch():
+    """Once the create is applied the same words match the real watch by name tokens, so the
+    conversation stops being 'pending' without any state to clear."""
+    from web_watcher.dashboard import server as S
+    cfg = _cfg_with("Refrigerators under $800 (up to 36\" wide)")
+    msgs = [
+        {"role": "user", "content": "create a watch for refrigerators under $800"},
+    ]
+    assert S._focused_watch_name(msgs, cfg) == "Refrigerators under $800 (up to 36\" wide)"
+
+
+def test_pending_create_sentinel_never_becomes_a_watch_name(monkeypatch):
+    """An update extracted while focus is the sentinel must not get '__pending_create__' as
+    its name."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[])
+    _mock_two_phase(monkeypatch,
+                    "Updating that now.",
+                    {"intent": "update",
+                     "watches": [{"name": "Something", "instruction": "i",
+                                  "urls": ["https://x.org/s?q=1"]}]})
+    monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
+    monkeypatch.setattr(S, "_focused_watch_name", lambda msgs, cfg: S.PENDING_CREATE)
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    assert out["watch_suggestion"]["name"] == "Something"   # model's name kept, sentinel never used

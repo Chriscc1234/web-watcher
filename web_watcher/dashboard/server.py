@@ -1595,6 +1595,15 @@ Your job here is only to UNDERSTAND and RESPOND:
 - Track which watch the user is talking about. If they say "it", "that one", "the watch",
   or "change something else on it", they mean the watch CURRENTLY IN FOCUS (named below)
   unless they clearly name a different one. Do not switch watches on your own.
+- While a NEW watch is being set up, follow-up details belong to IT. "I'd prefer it in black",
+  "cap it at $500", "the one I just described" refer to the watch under discussion — never
+  bolt them onto an older existing watch because it shares a word.
+- "No" + a clarification is a CORRECTION, not a cancellation. "no, for the new fridge watch" /
+  "no, I mean the search terms" means you attached the request to the wrong thing — re-read
+  their earlier messages and redo it for the RIGHT thing. Never reply "OK, never mind then" to
+  a correction, and never make the user restate details they already gave.
+- A QUESTION about a watch ("what are its search terms?", "what is it looking for?") gets an
+  ANSWER from the config shown below — not a proposal to change anything.
 - New vs. existing: if the user asks to watch something NEW or DIFFERENT from the watches
   they already have (e.g. "also watch for canoes", "set up a watch for…", "can you watch X"),
   treat it as a BRAND-NEW watch and say you'll set one up. Having other watches does NOT mean
@@ -1669,6 +1678,14 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
   "the watch" / "change something else on it" (which mean the watch CURRENTLY IN FOCUS).
   Start from that watch's current config (below) and change ONLY what the user asked; keep
   the same name.
+  A QUESTION IS NOT AN UPDATE. "what are its search terms?", "what is that watch looking
+  for?", "how's it doing?" are the user ASKING — answer-only turns, intent "none" (or "lookup"
+  for found listings). Emit an update ONLY for an explicit request to CHANGE something.
+  THE REQUESTED CHANGE MUST BE IN THE CONFIG YOU EMIT. "also look for <another thing>" on a
+  watch means the new config CONTAINS searches/instruction text for <another thing> IN
+  ADDITION to everything already there. Before answering, check: does the emitted config
+  actually contain what the user just asked for? If it is identical to the current config,
+  you have not made the change.
 
 - "actions" — the user asked to start/stop/enable/disable/delete watch(es).
 - "lookup"  — the user asked what's been found / to see listings.
@@ -1761,12 +1778,26 @@ def _watch_focus_tokens(name: str) -> list[str]:
     return [t for t in toks if t not in _FOCUS_STOP and len(t) > 2]
 
 
+# A create being DISCUSSED — "create a watch for X…", "I'll set up a watch…" — that hasn't been
+# applied yet. While one is in play, follow-ups belong to IT, not to whichever existing watch
+# shares a word with something said earlier.
+PENDING_CREATE = "__pending_create__"
+_CREATEISH_RE = re.compile(
+    r"(\b(create|make|add|set ?up|start)\b.{0,40}\bwatch\b)|(\bwatch\b.{0,20}\bfor\b)|"
+    r"\bnew watch\b|\bi['’]?ll set up\b|\bsetting up a\b",
+    re.IGNORECASE | re.DOTALL)
+
+
 def _focused_watch_name(messages: list, cfg) -> str | None:
-    """The existing watch most recently referenced in the conversation — so 'it' / 'that watch'
-    / 'change something else on it' resolves to the right one across turns. Matches on the
-    watch's distinctive NAME tokens (e.g. 'sports car' → 'Manual Sports Cars (Seattle)'), not a
-    full-string or site-name match, so paraphrases track and site words don't hijack it."""
-    import re
+    """What the conversation is currently about: the EXISTING watch most recently referenced —
+    so 'it' / 'that watch' / 'change something else on it' resolves across turns — or
+    PENDING_CREATE when the most recent topic is a NEW watch still being set up.
+
+    Scanned newest-first; within each message, an existing-watch token match wins over the
+    create-ish check. That ordering makes an applied create self-heal: once the watch exists,
+    the same words that made the conversation 'pending' now match the real watch by name.
+    (Real failure this prevents: mid-fridge-creation, 'i would prefer it to be black' walked
+    past the fridge talk and hit 'Manual Sports Cars' from six messages earlier.)"""
     watches = [(w.name, _watch_focus_tokens(w.name)) for w in getattr(cfg, "watches", [])]
     for m in reversed(messages or []):
         c = m.get("content") if isinstance(m, dict) else None
@@ -1785,6 +1816,8 @@ def _focused_watch_name(messages: list, cfg) -> str | None:
                 best, best_hits = name, hits
         if best:
             return best
+        if _CREATEISH_RE.search(c):
+            return PENDING_CREATE
     return None
 
 
@@ -1851,11 +1884,19 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
     """Phase 2 — decide if the conversation warrants a concrete watch action and, if so,
     return it as {watch_suggestion?, watch_actions?, listing_query?}. Returns {} for 'none'.
     A dedicated call so extraction can't be crowded out by conversation. Never raises."""
-    focus_line = (f"\n\nCURRENTLY IN FOCUS: \"{focus}\" — use this ONLY when the user refers "
-                  "back to it with 'it' / 'that one' / 'the watch' / 'change something else on "
-                  "it'. If the user is asking to watch a NEW or DIFFERENT thing, that is a "
-                  "CREATE — do NOT force it onto this focus watch."
-                  if focus else "\n\nCURRENTLY IN FOCUS: (none yet)")
+    if focus == PENDING_CREATE:
+        focus_line = ("\n\nCURRENTLY IN FOCUS: a NEW watch the user is in the middle of setting "
+                      "up (it does NOT exist yet — it is not in the list above). Follow-up "
+                      "details ('make it black', 'the one I just described', 'add a price cap') "
+                      "refer to THAT new watch: fold them into the CREATE. Do NOT attach them "
+                      "to any existing watch, no matter which words they share.")
+    elif focus:
+        focus_line = (f"\n\nCURRENTLY IN FOCUS: \"{focus}\" — use this ONLY when the user refers "
+                      "back to it with 'it' / 'that one' / 'the watch' / 'change something else on "
+                      "it'. If the user is asking to watch a NEW or DIFFERENT thing, that is a "
+                      "CREATE — do NOT force it onto this focus watch.")
+    else:
+        focus_line = "\n\nCURRENTLY IN FOCUS: (none yet)"
     system = (_EXTRACT_SYSTEM + "\n\n" + _watches_config_context(cfg) + focus_line
               + "\n\nThe assistant just told the user:\n\"" + (reply or "") + "\"")
     payload = {
@@ -1897,7 +1938,9 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
             if intent == "update":
                 # Snap the name to the real stored watch (model often drops the site suffix),
                 # falling back to the focus watch — so applying the edit can't 404.
-                real = _resolve_watch_name(w.get("name", ""), cfg) or focus
+                # (PENDING_CREATE is a sentinel, not a watch name — never write it into one.)
+                real = (_resolve_watch_name(w.get("name", ""), cfg)
+                        or (focus if focus != PENDING_CREATE else None))
                 if real:
                     w["name"] = real
                 # An edit that doesn't touch the urls often omits them entirely; that means

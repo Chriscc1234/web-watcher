@@ -11,6 +11,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.22.1-alpha] — 2026-07-09
+
+### Removed
+- The **"Let The Watcher run my watches"** toggle in Settings. It was a third control for state the
+  **▶ Start watching** button already owns — once in the dock, where it's always reachable, and
+  once on the Watches tab, where you're looking when you care. The toggle sat two tabs away from
+  either. Nothing about how The Watcher runs has changed.
+
+---
+
 ## [0.22.0-alpha] — 2026-07-09 (Full updates install themselves)
 
 ### Fixed — a release that added a dependency would have bricked every install

@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.22.4-alpha] — 2026-07-10 (Chat that knows when — and gets big when you need it)
+
+### Added — timestamps in the chat
+- When you scroll back through a conversation, a small "when" divider now marks each new day or
+  any long quiet gap ("Yesterday · 4:33 PM", "Today · 6:33 PM"). Before this, chat history had no
+  sense of time — you couldn't tell if a message was from an hour ago or last week. Each turn is
+  stamped going forward; older messages without a stamp simply show no divider.
+
+### Added — expand the chat into a side panel
+- A new ⤢ button in the chat header expands The Watcher into a tall panel down the right edge —
+  big and present when you're working with it, without covering the whole app. Click ⤡ to shrink
+  back. The change animates smoothly, and grabbing either resize edge drops you out of the
+  expanded mode so your manual size sticks.
+
+---
+
 ## [0.22.3-alpha] — 2026-07-10 (The chat keeps track of what you're talking about)
 
 ### Fixed — follow-ups landed on the wrong watch (reviewed against a real chat log)

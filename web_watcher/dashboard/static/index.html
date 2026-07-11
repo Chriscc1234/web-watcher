@@ -76,7 +76,13 @@ section h2{font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:up
 /* Height is AUTO so the window grows with its content (a big response makes it longer),
    floored at min-height and capped at max-height (then the convo scrolls). The top grip
    lets the user drag it taller/shorter manually (sets an inline height). */
-.watcher-dock{position:fixed;right:22px;bottom:86px;z-index:901;width:380px;max-width:calc((100vw - 44px) / var(--zoom));height:auto;min-height:min(150px, calc((100vh - 130px) / var(--zoom)));max-height:calc((100vh - 130px) / var(--zoom));background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 44px rgba(0,0,0,.55);display:flex;flex-direction:column;overflow:hidden;animation:ovIn .2s ease}
+.watcher-dock{position:fixed;right:22px;bottom:86px;z-index:901;width:380px;max-width:calc((100vw - 44px) / var(--zoom));height:auto;min-height:min(150px, calc((100vh - 130px) / var(--zoom)));max-height:calc((100vh - 130px) / var(--zoom));background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 44px rgba(0,0,0,.55);display:flex;flex-direction:column;overflow:hidden;animation:ovIn .2s ease;transition:width .3s cubic-bezier(.33,1,.68,1),height .3s cubic-bezier(.33,1,.68,1),max-height .3s cubic-bezier(.33,1,.68,1),box-shadow .3s ease}
+/* "Big and present" side-panel mode: a tall column down the right edge that fills the height and
+   a comfortable reading width, without covering the whole app. Overrides drag/auto-grow inline
+   sizes (they're cleared when entering this mode; !important guards against a late auto-grow). */
+.watcher-dock.expanded{width:min(560px, calc((100vw - 44px) / var(--zoom)))!important;height:calc((100vh - 118px) / var(--zoom))!important;max-height:calc((100vh - 118px) / var(--zoom))!important;box-shadow:0 18px 70px rgba(0,0,0,.62)}
+.dock-expand{background:none;border:none;color:var(--dim);font-size:15px;line-height:1;padding:0 4px;cursor:pointer}
+.dock-expand:hover{color:var(--text);background:none}
 /* Drag handle along the top edge — the dock is bottom-anchored, so dragging UP grows it. */
 .dock-resize-grip{flex-shrink:0;height:11px;display:flex;align-items:center;justify-content:center;cursor:ns-resize;touch-action:none}
 .dock-resize-grip::before{content:"";width:38px;height:3px;border-radius:3px;background:var(--border)}
@@ -189,6 +195,9 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:3px}
 .msg.assistant{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:3px}
 .msg.thinking{color:var(--dim);font-style:italic}
+/* "when" divider between chat messages separated by a day or a long quiet gap. */
+.chat-time-divider{align-self:center;font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:6px 0 2px;opacity:.75;display:flex;align-items:center;gap:8px}
+.chat-time-divider::before,.chat-time-divider::after{content:"";height:1px;width:26px;background:var(--border)}
 .thinking-wave{display:inline-flex}
 .thinking-wave span{display:inline-block;animation:twave 1s ease-in-out infinite}
 @keyframes twave{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-5px)}}
@@ -673,6 +682,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
     <div style="display:flex;align-items:center;gap:8px">
       <button id="dock-run-btn" onclick="toggleWatcherRun()" title="Start or stop The Watcher driving your watches"
               style="font-size:11px;padding:4px 11px">▶ Start watching</button>
+      <button class="dock-expand" id="dock-expand-btn" onclick="toggleDockExpand()" title="Expand to a side panel">⤢</button>
       <button class="dock-close" onclick="closeWatcherDock()" title="Close">×</button>
     </div>
   </div>
@@ -1250,6 +1260,41 @@ async function watcherAction(action, btn) {
 // dragging the grip UP makes it taller (grows upward) and DOWN shorter — matching the cursor.
 // Sets an inline height (overriding the auto height); double-click clears it to auto-fit again.
 // CSS max-height still caps it to the viewport, and min keeps it usable.
+// Toggle the tall right-side "big and present" panel. Clears any drag/auto-grow inline size so
+// the .expanded CSS wins, and restores those sizes on collapse — the transition on .watcher-dock
+// animates both ways. Grabbing a resize grip exits this mode (see _exitExpanded).
+function toggleDockExpand() {
+  const dock = document.getElementById('watcher-dock');
+  const btn = document.getElementById('dock-expand-btn');
+  if (!dock) return;
+  if (dock.classList.contains('expanded')) {
+    dock.classList.remove('expanded');
+    dock.style.width = dock._savedW || '';     // restore whatever size it had before
+    dock.style.height = dock._savedH || '';
+    btn.textContent = '⤢'; btn.title = 'Expand to a side panel';
+  } else {
+    dock._savedW = dock.style.width;           // remember so collapse returns here
+    dock._savedH = dock.style.height;
+    dock.style.width = ''; dock.style.height = '';   // let .expanded's sizes take over
+    dock.classList.add('expanded');
+    btn.textContent = '⤡'; btn.title = 'Shrink the panel';
+  }
+  const convo = document.getElementById('dock-convo');
+  if (convo) setTimeout(() => { convo.scrollTop = convo.scrollHeight; }, 320);
+}
+
+// A manual drag should feel snappy (no transition) and take the dock out of expanded mode so the
+// user's size sticks. Shared by both resize grips.
+function _exitExpanded(dock) {
+  if (dock.classList.contains('expanded')) {
+    dock.classList.remove('expanded');
+    const btn = document.getElementById('dock-expand-btn');
+    if (btn) { btn.textContent = '⤢'; btn.title = 'Expand to a side panel'; }
+  }
+  dock.style.transition = 'none';
+}
+function _restoreTransition(dock) { dock.style.transition = ''; }
+
 function _initDockResize() {
   const dock = document.getElementById('watcher-dock');
   const grip = document.getElementById('dock-resize-grip');
@@ -1262,11 +1307,12 @@ function _initDockResize() {
     e.preventDefault();
   };
   const up = () => {
-    dragging = false;
+    dragging = false; _restoreTransition(dock);
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
   };
   grip.addEventListener('pointerdown', (e) => {
+    _exitExpanded(dock);
     dragging = true; startY = e.clientY; startH = dock.offsetHeight;
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', up);
@@ -1292,11 +1338,12 @@ function _initDockResizeX() {
     e.preventDefault();
   };
   const up = () => {
-    dragging = false;
+    dragging = false; _restoreTransition(dock);
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
   };
   grip.addEventListener('pointerdown', (e) => {
+    _exitExpanded(dock);
     dragging = true; startX = e.clientX; startW = dock.offsetWidth;
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', up);
@@ -1311,7 +1358,7 @@ function _initDockResizeX() {
 function _growDockWidth() {
   const dock = document.getElementById('watcher-dock');
   const convo = document.getElementById('dock-convo');
-  if (!dock || !convo || dock.dataset.manualW) return;
+  if (!dock || !convo || dock.dataset.manualW || dock.classList.contains('expanded')) return;
   const overflow = convo.scrollWidth - convo.clientWidth;
   if (overflow > 2) dock.style.width = (dock.offsetWidth + overflow + 8) + 'px';
 }
@@ -1334,8 +1381,9 @@ async function watcherSend() {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  appendMsg('user', text, 'dock-convo');
-  watcherHistory.push({ role: 'user', content: text });
+  const nowTs = Date.now() / 1000;
+  appendMsg('user', text, 'dock-convo', nowTs);
+  watcherHistory.push({ role: 'user', content: text, ts: nowTs });
 
   const thinking = appendMsg('assistant', '', 'dock-convo');
   thinking.classList.add('thinking');
@@ -1346,7 +1394,7 @@ async function watcherSend() {
     });
     thinking.remove();
     const replyText = resp.message || '(no response)';
-    appendMsg('assistant', replyText, 'dock-convo');
+    appendMsg('assistant', replyText, 'dock-convo', Date.now() / 1000);
     watcherHistory.push({ role: 'assistant', content: replyText });
     // The Watcher can propose more than one watch at once (e.g. "broaden both") — render each.
     const suggestions = resp.watch_suggestions || (resp.watch_suggestion ? [resp.watch_suggestion] : []);
@@ -1388,7 +1436,7 @@ async function loadWatcherHistory() {
       box.innerHTML = '';
       for (const m of history) {
         if (m.role !== 'user' && m.role !== 'assistant') continue;
-        appendMsg(m.role, historyText(m.content || ''), 'dock-convo');
+        appendMsg(m.role, historyText(m.content || ''), 'dock-convo', m.ts || null);
       }
     } else {
       showWatcherGreeting();
@@ -1804,8 +1852,41 @@ async function loadHistory() {
 // ============================================================ THE WATCHER — chat rendering
 // Shared render helpers (also used by the dock). appendMsg/cards default to the dock's
 // conversation container.
-function appendMsg(role, content, boxId = 'dock-convo') {
+// Human-friendly stamp for a chat divider: "Today 3:04 PM", "Yesterday", or "Mar 4".
+function _chatWhen(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  const isYest = d.toDateString() === yest.toDateString();
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (sameDay) return 'Today · ' + t;
+  if (isYest)  return 'Yesterday · ' + t;
+  const day = d.toLocaleDateString([], { month: 'short', day: 'numeric',
+    year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+  return day + ' · ' + t;
+}
+
+// Insert a "when" divider before a message if it opens a new day or follows a long quiet gap —
+// so scrolling back through history tells you when things happened. _lastMsgTs tracks the last
+// stamped message per box; a >30-min jump or a date change earns a divider.
+const _GAP_DIVIDER_MS = 30 * 60 * 1000;
+window._lastMsgTs = window._lastMsgTs || {};
+function _maybeTimeDivider(box, boxId, ts) {
+  if (!ts) return;
+  const prev = window._lastMsgTs[boxId];
+  window._lastMsgTs[boxId] = ts;
+  const newDay = !prev || new Date(prev * 1000).toDateString() !== new Date(ts * 1000).toDateString();
+  const bigGap = prev && (ts - prev) * 1000 > _GAP_DIVIDER_MS;
+  if (prev && !newDay && !bigGap) return;
+  const sep = document.createElement('div');
+  sep.className = 'chat-time-divider';
+  sep.textContent = _chatWhen(ts);
+  box.appendChild(sep);
+}
+
+function appendMsg(role, content, boxId = 'dock-convo', ts = null) {
   const box = document.getElementById(boxId);
+  _maybeTimeDivider(box, boxId, ts);
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   div.textContent = content;

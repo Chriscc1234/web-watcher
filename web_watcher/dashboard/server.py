@@ -759,9 +759,15 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         result = _complete_assistant_turn(system, messages, cfg, model)
 
         if messages and "raw" in result:
+            import time as _t
+            now = _t.time()
             history = _load_watcher_history()
-            history.append(messages[-1])
-            history.append({"role": "assistant", "content": result["raw"]})
+            # Stamp both turns so the UI can show "when" dividers on scroll-back. Keep the
+            # client's own ts if it sent one (the user typed slightly earlier than we replied).
+            user_msg = dict(messages[-1])
+            user_msg.setdefault("ts", now)
+            history.append(user_msg)
+            history.append({"role": "assistant", "content": result["raw"], "ts": now})
             _save_watcher_history(history[-200:])
         result.pop("raw", None)
         return result

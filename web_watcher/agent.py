@@ -102,9 +102,9 @@ chose the action. A filled-in thought leads to better decisions.
 
 {
   "thought":       "<REQUIRED — restate what you see and why you chose this action. Never leave empty.>",
-  "action":        "click" | "type" | "press" | "navigate" | "scroll" | "remember" | "done",
-  "element_index": <integer from the element list — REQUIRED for click and type>,
-  "text":          "<text to type into the field, OR a complete https:// URL for navigate>",
+  "action":        "click" | "type" | "select" | "press" | "navigate" | "scroll" | "remember" | "done",
+  "element_index": <integer from the element list — REQUIRED for click, type, and select>,
+  "text":          "<text to type, the exact option text for select, OR a complete https:// URL for navigate>",
   "key":           "<key name for press: Enter, Tab, Escape, ArrowDown, etc.>",
   "direction":     "down" | "up",
   "amount":        <pixels to scroll, e.g. 400>,
@@ -124,6 +124,11 @@ chose the action. A filled-in thought leads to better decisions.
              Do NOT use 'type' on BUTTON, LINK, CHECKBOX, or any other element type.
              After typing a search query, the system will automatically press Enter
              if the page does not navigate. You do not need to press Enter yourself.
+
+  select  — Choose an option in a DROPDOWN element. Requires element_index of the
+             DROPDOWN and text = the option to pick, copied EXACTLY from that
+             element's "options:" list. This is the ONLY way to change a DROPDOWN
+             (sort order, category, price filter) — clicking one does nothing.
 
   press   — Send a keyboard key without targeting an element.
              Use when you need Enter, Tab, Escape, or arrow keys globally.
@@ -166,9 +171,15 @@ chose the action. A filled-in thought leads to better decisions.
     3. After clicking, check the RESULT — if the page navigated or title changed,
        the filter was applied. If unchanged, the click may have missed — try again.
 
-  Dropdowns and select elements:
-    1. Click the dropdown to open it.
-    2. On the next step, new options appear — click the one you want.
+  Sorting and filtering results:
+    - An element marked DROPDOWN lists its choices after "options:". Use the 'select'
+      action with that element's index and the option text — e.g. to sort by newest,
+      select the option that says "newest". Never 'click' a DROPDOWN; it does nothing.
+    - Menus that are BUTTONs or LINKs (common on Facebook: "Sort by", "Date listed")
+      work in two steps: click the button, then on the NEXT step the open menu's
+      choices appear as new elements — click the one you want.
+    - Filter panels: click "Filters", then set the relevant controls (a price field is
+      a >>> TEXT INPUT <<< — type the number; a category is a LINK or DROPDOWN).
 
   Tabs and sections:
     Click the tab or section heading to reveal its content.
@@ -178,8 +189,10 @@ chose the action. A filled-in thought leads to better decisions.
   - 'thought' is REQUIRED. Always describe what you currently see before choosing an action.
   - When the goal specifies a search term in quotes, type EXACTLY that text — do not
     substitute, paraphrase, or use a different product name.
-  - element_index is REQUIRED for 'click' and 'type'. Always pick a real index from
-    the numbered list. Never guess or invent an index.
+  - element_index is REQUIRED for 'click', 'type', and 'select'. Always pick a real
+    index from the numbered list. Never guess or invent an index.
+  - DROPDOWN elements only respond to 'select' (with exact option text) — never
+    'click' or 'type' on them.
   - 'type' ONLY works on >>> TEXT INPUT <<< elements. Using 'type' on a LINK or BUTTON
     will fail and waste a step. If you need to search, find the >>> TEXT INPUT <<< in
     the list and use its index.
@@ -378,12 +391,14 @@ def run_agent(
             _detail = f" text={action.text[:50]!r}"
         elif action.action == "click" and action.element_index is not None:
             _detail = f" el={action.element_index}"
+        elif action.action == "select":
+            _detail = f" el={action.element_index} option={(action.text or '')[:30]!r}"
         log.info("Agent action: %s%s  (thought: %s)", action.action, _detail, action.thought[:80])
 
-        # ── Validate element_index for click / type ──────────────────────────
+        # ── Validate element_index for click / type / select ─────────────────
         # Reject the action immediately rather than failing silently deeper in
         # the stack, and feed clear corrective feedback into the history.
-        if action.action in ("click", "type") and action.element_index is None:
+        if action.action in ("click", "type", "select") and action.element_index is None:
             log.warning("Agent returned %r with no element_index — rejecting", action.action)
             action.outcome = (
                 f"REJECTED: '{action.action}' requires element_index. "
@@ -599,6 +614,27 @@ def run_agent(
             _post_url = page.url
             _post_ttl = page.title() or ""
             action.outcome = _action_outcome(_pre_url, _post_url, _pre_ttl, _post_ttl)
+
+        # A click that opens a custom dropdown/panel changes no URL or title, so it
+        # reads as "page unchanged" — which tells the model its click DID NOTHING and
+        # steers it away from the menu it just opened (real failure: craigslist's
+        # sort menu). Diff the interactive elements and report what appeared instead.
+        if action.action == "click" and action.outcome == "page unchanged":
+            try:
+                after = _snapshot_elements(page)
+                before_keys = {(e["tag"], e["label"]) for e in elements}
+                fresh = [e for e in after
+                         if (e["tag"], e["label"]) not in before_keys
+                         and e.get("inViewport") and (e.get("label") or "").strip()]
+                if fresh:
+                    names = " | ".join(f'"{e["label"][:40]}"' for e in fresh[:8])
+                    action.outcome = (
+                        f"the click OPENED A MENU/PANEL — new choices are now on screen: {names}. "
+                        "NEXT STEP: click the choice you want (look it up in the new element list "
+                        "by its label — indexes have changed)."
+                    )
+            except Exception:
+                pass
         log.debug("Action outcome: %s", action.outcome)
 
         # ── Auto-submit: type landed in an input but page didn't move ─────────
@@ -690,9 +726,9 @@ Output ONLY this JSON object — no prose, no code fences:
 {
   "diagnosis":     "<one sentence: which failure mode above applies and why>",
   "thought":       "<why this action, max 60 chars>",
-  "action":        "click" | "type" | "press" | "navigate" | "scroll" | "done",
+  "action":        "click" | "type" | "select" | "press" | "navigate" | "scroll" | "done",
   "element_index": <int from the element list, or null>,
-  "text":          "<text to type or URL to navigate to, else null>",
+  "text":          "<text to type, exact DROPDOWN option text for select, or URL for navigate, else null>",
   "key":           "<key for press, e.g. \\"Enter\\", else null>",
   "direction":     "down",
   "amount":        300,
@@ -760,7 +796,7 @@ def _convene_council(
         rec = AgentAction(
             thought       = data.get("thought") or data.get("diagnosis") or "recovery action",
             action        = data.get("action", "done"),
-            element_index = data.get("element_index"),
+            element_index = _coerce_index(data.get("element_index")),
             text          = data.get("text"),
             key           = data.get("key"),
             direction     = data.get("direction", "down"),
@@ -1252,6 +1288,7 @@ _SNAPSHOT_JS = """() => {
     ];
     const seen = new Set();
     const raw  = [];
+    let selSeq = 0;
 
     document.querySelectorAll(tags.join(',')).forEach(el => {
         if (seen.has(el)) return;
@@ -1287,19 +1324,32 @@ _SNAPSHOT_JS = """() => {
         // Is this element inside a header/nav band (top 80px of viewport)?
         const inNav = r.y < 80 && !!el.closest('header, nav, [role=banner], [role=navigation]');
 
+        // Native <select>: record its options + selected text and stamp a stable id so
+        // the 'select' action can drive it with select_option (a synthetic click opens
+        // the OS-rendered dropdown, which no automation can see — clicks CANNOT work).
+        let options = null, selectedText = '', selId = null;
+        if (el.tagName === 'SELECT') {
+            options = [...el.options].map(o => (o.text || '').trim()).filter(Boolean).slice(0, 12);
+            selectedText = (el.selectedOptions[0]?.text || '').trim();
+            selId = String(++selSeq);   // restamped fresh every snapshot — the select
+            el.dataset.wwSel = selId;   // action executes against THIS snapshot's ids
+        }
+
         raw.push({
             tag:        el.tagName.toLowerCase(),
             type:       el.getAttribute('type') || el.getAttribute('role') || '',
             label:      label,
             value:      (el.type === 'checkbox' || el.type === 'radio')
                             ? String(el.checked)
-                            : (el.value || ''),
+                            : (el.tagName === 'SELECT' ? selectedText : (el.value || '')),
             href:       el.getAttribute('href') || '',
             cx:         Math.round(cx),
             cy:         Math.round(cy),
             focused:    el === document.activeElement,
             inViewport: inViewport,
             inNav:      inNav,
+            options:    options,
+            sel_id:     selId,
         });
     });
 
@@ -1378,7 +1428,10 @@ def _elements_text(elements: list[dict]) -> str:
 
         elif tag == "select":
             cur = f"  (selected: {e['value']!r})" if e.get("value") else ""
-            lines.append(f"  [{e['index']}] DROPDOWN  \"{label}\"{cur}{focused}")
+            opts = e.get("options") or []
+            opt_str = ("  options: " + " | ".join(opts)) if opts else ""
+            lines.append(f"  [{e['index']}] DROPDOWN  \"{label}\"{cur}{opt_str}"
+                         f"{focused}  (use select + this index + exact option text)")
 
         else:
             kind = f"{tag}[{etype}]" if etype else tag
@@ -1544,7 +1597,7 @@ def _query_llm(
     return AgentAction(
         thought       = data.get("thought", ""),
         action        = data.get("action", "done"),
-        element_index = data.get("element_index"),
+        element_index = _coerce_index(data.get("element_index")),
         text          = data.get("text"),
         key           = data.get("key"),
         direction     = data.get("direction", "down"),
@@ -1553,6 +1606,24 @@ def _query_llm(
         memory_key    = data.get("memory_key"),
         memory_value  = str(data.get("memory_value", "")) if data.get("memory_value") is not None else None,
     )
+
+
+def _coerce_index(v) -> Optional[int]:
+    """Best-effort element_index → int. The model sometimes echoes the display format
+    back ("[29]", "29", 29.0, [29]) — all of those mean 29; only true garbage is None."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    if isinstance(v, list) and len(v) == 1:
+        return _coerce_index(v[0])
+    if isinstance(v, str):
+        m = re.search(r"\d+", v)
+        if m:
+            return int(m.group())
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1638,6 +1709,48 @@ def _execute(page: Page, action: AgentAction, elements: list[dict]) -> None:
             page.goto(url, timeout=30_000, wait_until="domcontentloaded")
             _emit_focus_events(page)
             _wait_for_settle(page)
+
+    elif a == "select":
+        # Choose an option in a native <select>. A synthetic click on one opens the
+        # OS-rendered dropdown that no automation can see, so this is the ONLY way the
+        # agent can change a sort order / category filter implemented as a real select.
+        el = _require_element(action, elements)
+        if el.get("tag") != "select" or not el.get("sel_id"):
+            action.outcome = (
+                f"REJECTED: element_index={action.element_index} is not a DROPDOWN. "
+                "'select' only works on elements marked DROPDOWN."
+            )
+            return
+        want = (action.text or "").strip()
+        if not want:
+            action.outcome = "REJECTED: 'select' needs text = the exact option text to choose."
+            return
+        # Look like a person reaching for the control before the value changes.
+        _human_mouse_move(page, el["cx"], el["cy"])
+        time.sleep(max(0.06, random.gauss(0.18, 0.04)))
+        picked = page.evaluate(
+            """([selId, want]) => {
+                const sel = document.querySelector('select[data-ww-sel="' + selId + '"]');
+                if (!sel) return null;
+                const opts = [...sel.options];
+                const match = opts.find(o => (o.text || '').trim() === want)
+                    || opts.find(o => (o.text || '').trim().toLowerCase() === want.toLowerCase())
+                    || opts.find(o => (o.text || '').toLowerCase().includes(want.toLowerCase()));
+                if (!match) return null;
+                sel.value = match.value;
+                sel.dispatchEvent(new Event('input',  { bubbles: true }));
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                return (match.text || '').trim();
+            }""",
+            [el["sel_id"], want],
+        )
+        if picked is None:
+            opts = ", ".join(el.get("options") or [])
+            action.outcome = (f"REJECTED: no option matching {want!r} in this dropdown. "
+                              f"Its options are: {opts}")
+            return
+        action.outcome = f"selected {picked!r}"
+        _wait_for_settle(page)
 
     elif a == "scroll":
         dist = action.amount if action.direction == "down" else -action.amount

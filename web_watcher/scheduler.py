@@ -549,6 +549,19 @@ _EXPLORATION_STYLES = [
                  "category) and click into the most relevant one, then browse its listings."),
     ("search",   "Find the search box, type a relevant search term for what you're looking "
                  "for, submit it (press Enter), and browse the results."),
+    ("sort",     "FIRST change how the results are sorted: find the sort control (a DROPDOWN "
+                 "— use the 'select' action with its exact option text — or a button showing "
+                 "the current sort, often 'newest': click it, then on the next step click one "
+                 "of the choices that appears). Pick a DIFFERENT order than the current one — "
+                 "prefer 'newest' if not already active, else a price order (price options "
+                 "may be labeled with symbols like '$ → $$$' for cheapest-first). THEN scroll "
+                 "the re-sorted results — a different order surfaces listings the default "
+                 "hides."),
+    ("filter",   "FIRST apply ONE relevant filter so the results better match the goal: a "
+                 "price limit (type the number into the min/max price field if there is "
+                 "one), a category refinement, or a condition/type filter. Filters live in "
+                 "a sidebar or behind a 'Filters' button; DROPDOWN filters need the "
+                 "'select' action. THEN scroll the filtered results."),
 ]
 
 
@@ -621,7 +634,9 @@ def _run_agent_continuous_sweep(
         "YOUR ONLY JOB is to LOAD as many relevant listings as possible onto the page. "
         "You do NOT need to open or read individual listings — that is done for you "
         "afterwards automatically. So:\n"
-        "- Mostly SCROLL: keep scrolling down to load more results.\n"
+        "- Do the setup step from 'How to browse this time' FIRST (a sort change, a "
+        "filter, a category, or a search — at most one or two interactions), then "
+        "mostly SCROLL: keep scrolling down to load more results.\n"
         "- You MAY run a search, but only ONCE per term, and only with a DIFFERENT "
         "term than before — never re-type a search you already did (the results won't "
         "change). If you've already searched, scroll instead.\n"

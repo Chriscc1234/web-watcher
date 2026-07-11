@@ -359,7 +359,7 @@ def test_exploration_plan_uses_watch_urls_and_known_style():
     for i in range(6):
         plan = _exploration_plan(i, watch)
         assert plan["start_url"] in watch.urls
-        assert plan["style"] in {"scroll", "category", "search"}
+        assert plan["style"] in {"scroll", "category", "search", "sort", "filter"}
     # Rotates the start URL across sweeps (2 urls → alternates).
     assert _exploration_plan(0, watch)["start_url"] != _exploration_plan(1, watch)["start_url"]
 

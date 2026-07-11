@@ -104,3 +104,26 @@ def test_normalize_turn_backfills_creates_not_updates():
     create, update = out["watch_suggestions"]
     assert create["interval_minutes"] == 30
     assert "interval_minutes" not in update
+
+
+def test_normalize_urls_propagates_zip_across_sites():
+    """'vehicles in anacortes on craigslist and ebay' — the craigslist postal must
+    localize the eBay search too (eBay gets _stpos from the sibling URL's zip)."""
+    from web_watcher.dashboard.server import _normalize_marketplace_urls
+    out, changes = _normalize_marketplace_urls([
+        "https://seattle.craigslist.org/search/sss?query=vehicles+in+anacortes+under+10k",
+        "https://www.ebay.com/sch/i.html?_nkw=vehicles",
+    ])
+    cl, eb = out
+    assert "skagit.craigslist.org" in cl and "postal=" in cl
+    assert "_stpos=" in eb and "_sadis=50" in eb
+    assert changes  # both rewrites reported
+
+
+def test_normalize_urls_fixes_offerup_fabricated_path():
+    from web_watcher.dashboard.server import _normalize_marketplace_urls
+    out, _ = _normalize_marketplace_urls(
+        ["https://www.offerup.com/WA-Anacortes/search?q=vehicles&priceMax=10000"])
+    assert out[0].startswith("https://offerup.com/search?")
+    assert "price_max=10000" in out[0]
+    assert "WA-Anacortes" not in out[0]

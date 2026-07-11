@@ -11,6 +11,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.24.0-alpha] — 2026-07-11 (Locations everywhere + the agent works the controls)
+
+### Fixed — locations on EVERY site, not just craigslist
+- **OfferUp searches were "all over the place"** because the model invented city paths
+  (`offerup.com/WA-Anacortes/search`) that error out, plus fake params. Established
+  OfferUp's REAL interface by live probing: only `q`, `radius`, `price_min`, `price_max`
+  exist, and location cannot be set by URL at all — OfferUp locates you by your own
+  internet connection (which is exactly right for a local watch). Every OfferUp URL is now
+  rewritten onto the real `/search` endpoint with real params, and location words are
+  moved out of the search text.
+- **eBay searches are now localized**: zips and "in <town>" phrases become `_stpos`
+  (zip) + `_sadis` (50-mile radius); prices become `_udhi`/`_udlo`.
+- **One watch, one location**: if any site in a watch knows the zip (craigslist's
+  postal), the eBay searches in the same watch inherit it — "vehicles in anacortes on
+  craigslist, offerup and ebay" localizes all three correctly (verified live).
+- Facebook Marketplace queries get their prices moved into the real `minPrice`/`maxPrice`
+  params; the city stays in the URL path where FB wants it.
+- All of it runs on create, edit, chat cards, AND every sweep — existing watches with
+  broken URLs self-heal on their next run.
+
+### Added — the agent can now work sort menus and filters (#77)
+- New `select` ability for real dropdown controls (the only way to change a native
+  sort/filter dropdown — clicking one opens a menu automation can't see).
+- When a click opens a menu or filter panel, the agent is now TOLD what appeared
+  ("the click opened a menu — new choices: oldest, distance, price…") instead of being
+  told "page unchanged" — it used to abandon menus it had successfully opened.
+- Two new browsing styles in the always-on rotation: **sort** (switch the results to a
+  different order each visit) and **filter** (apply a relevant price/category filter
+  first). Live-verified on craigslist: the agent changed the sort to "distance" through
+  the UI and the sweep harvested **394 listings vs 200** with the default order.
+
+### Fixed — a batch of paper cuts
+- Chat cards now show EVERY site a watch covers ("on craigslist.org + offerup.com +
+  ebay.com"), not just the first one.
+- The lonely "Enabled" checkbox in the watch editor (it looked like a notification
+  option) is now a labeled "Watch status" row: "Watch is active (uncheck to pause)".
+- Show-the-browser is now truly the default everywhere: fresh installs, resets, AND
+  existing installs (a one-time migration flips it once; turn headless back on in
+  Settings and it stays your way).
+
+### Changed — this update delivers the full installer automatically
+- This release bumps the runtime marker, so the app downloads the new installer in the
+  background and asks before installing — nobody needs to visit GitHub. The new
+  installer closes a running Web Watcher before installing/uninstalling (the
+  "reset kept my chat history" fix).
+
+---
+
 ## [0.23.0-alpha] — 2026-07-11 (The location fix — plus a night of squashed bugs)
 
 ### Fixed — "can't create watches anymore" (error 500 on both machines)

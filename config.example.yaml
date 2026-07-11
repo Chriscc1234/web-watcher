@@ -20,7 +20,7 @@ models:
   ocr_threshold: 200
 
 browser:
-  headless: true         # false = show the browser so you can watch the agent work
+  headless: false        # the browser is visible so you can watch the agent work; true = hide it
   stealth: true
   show_agent_cursor: false
   profile_dir: null      # persistent login profile dir (for sites needing sign-in)

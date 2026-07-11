@@ -1,30 +1,43 @@
 """
-Craigslist URL refinement — deterministic query hygiene + region correction.
+Marketplace search-URL refinement — deterministic query hygiene + location correction.
 
-The chat model builds craigslist search URLs from what the user SAID, and small local
-models reliably make two mistakes:
+The chat model builds search URLs from what the user SAID, and small local models
+reliably make the same mistakes on EVERY site:
 
   1. They stuff everything into the query text: "vehicles owner 98221 under 10k" —
-     a literal search that matches nothing. Craigslist wants those as PARAMS
-     (postal=, max_price=, purveyor=) with only real item words in query=.
-  2. They guess the region subdomain from fame, not geography: "anacortes" became
-     seattle.craigslist.org when Anacortes is served by skagit.craigslist.org.
-     (Bare craigslist.org can't be used instead — search paths 404 there.)
+     a literal search that matches nothing. Each site wants those as its real PARAMS.
+  2. They invent locations: "anacortes" became seattle.craigslist.org (wrong region —
+     skagit serves Anacortes), and OfferUp got a fabricated "/WA-Anacortes/search"
+     path that 403s (VERIFIED live — that's the "all over the place on OfferUp" bug).
 
-Both are fixable without any model: a bundled US zip→lat/lon table (Census ZCTA
-gazetteer, public domain) plus craigslist's own area list (reference.craigslist.org/Areas,
-bundled snapshot) resolve any zip to its true nearest region, and the query text can be
-parsed for prices/zips/owner-words deterministically.
+All fixable without any model: a bundled US zip→lat/lon table + places gazetteer
+(Census, public domain) plus craigslist's own area list resolve any location, and the
+query text is parsed for prices/zips/"in <town>" phrases deterministically.
 
-`refine_craigslist_url` is idempotent and failure-tolerant (any error returns the URL
-unchanged), so it's safe to run on every create/update AND every sweep — stored bad URLs
-self-heal the next time they're used.
+Per-site facts (established by live probing — do not guess new params):
+  craigslist  postal= & search_distance= & max_price/min_price & purveyor; region is
+              the SUBDOMAIN (bare craigslist.org 404s search paths).
+  offerup     q, radius, price_min, price_max ONLY. Location CANNOT be set by URL —
+              OfferUp geolocates the requester's IP (which is the user's real area, so
+              that's exactly right). Any other path/param (e.g. /WA-Anacortes/search,
+              priceMax=) is fabricated and 403s.
+  ebay        _nkw (query), _stpos (zip) + _sadis (radius mi), _udlo/_udhi (price).
+  facebook    /marketplace/<city>/search with query, minPrice/maxPrice.
+
+`refine_search_url` dispatches by site; every refiner is idempotent and failure-
+tolerant (any error returns the URL unchanged), so they run on every create/update AND
+every sweep — stored bad URLs self-heal the next time they're used. Watch-level zip
+propagation (a craigslist postal feeding eBay's _stpos) happens in the server's
+_normalize_marketplace_urls, which sees the whole URL list.
 
 ── KEY LOCATIONS ─────────────────────────────────────────────────────────────
-  zip_latlon          ~L60   zip5 → (lat, lon) from the bundled gazetteer (lazy, cached)
-  nearest_region_host ~L80   lat/lon → closest craigslist region hostname
-  refine_craigslist_url ~L110  the full clean-up: query → params + region rewrite
-  _extract_price / _extract_zip / _extract_purveyor    query-text parsers
+  zip_latlon / place_latlon / nearest_zip / nearest_region_host   geo lookups
+  refine_search_url        dispatcher (craigslist/offerup/ebay/facebook)
+  refine_craigslist_url    query → params + region-from-zip rewrite
+  refine_offerup_url       canonicalize to /search, alias fake params, drop location
+  refine_ebay_url          _stpos/_sadis/_udlo/_udhi from query text (+fallback zip)
+  refine_facebook_url      minPrice/maxPrice from query text
+  _extract_price / _extract_zip / _extract_purveyor / _extract_in_place   parsers
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -200,6 +213,25 @@ def _extract_purveyor(text: str) -> tuple[str, str | None]:
     return text, None
 
 
+def _extract_in_place(text: str, anchor: tuple[float, float] | None = None,
+                      ) -> tuple[str, tuple[float, float] | None]:
+    """Pull an 'in/near/around <town>' phrase out of the text and resolve it. Tries the
+    full captured phrase then trims words off the end ('in anacortes for cheap' →
+    'anacortes'). Preposition-gated — see _IN_PLACE_RE."""
+    m = _IN_PLACE_RE.search(text)
+    if not m:
+        return text, None
+    words = re.findall(r"[a-z.'\-]+", m.group(1).lower())
+    for n in range(min(3, len(words)), 0, -1):
+        cand = " ".join(words[:n])
+        ll = place_latlon(cand, anchor)
+        if ll:
+            text = re.sub(r"\b(?:in|near|around)\s+" + re.escape(cand),
+                          " ", text, count=1, flags=re.I)
+            return text, ll
+    return text, None
+
+
 # ---------------------------------------------------------------------------
 # The refinement
 # ---------------------------------------------------------------------------
@@ -246,19 +278,7 @@ def refine_craigslist_url(url: str) -> str:
         #    "in <place>" in the query > a hallucinated place-name subdomain.
         loc = zip_latlon(q["postal"]) if q.get("postal") else None
         if loc is None:
-            m = _IN_PLACE_RE.search(text)
-            if m:
-                # Try the full captured phrase, then trim words off the end ("in anacortes
-                # for cheap" → "anacortes for cheap" → "anacortes").
-                words = re.findall(r"[a-z.'\-]+", m.group(1).lower())
-                for n in range(min(3, len(words)), 0, -1):
-                    cand = " ".join(words[:n])
-                    ll = place_latlon(cand, anchor)
-                    if ll:
-                        loc = ll
-                        text = re.sub(r"\b(?:in|near|around)\s+" + re.escape(cand),
-                                      " ", text, count=1, flags=re.I)
-                        break
+            text, loc = _extract_in_place(text, anchor)
         if loc is None and sub and sub not in _known_hosts():
             # "anacortes.craigslist.org" isn't a region — it's the town the user named.
             loc = place_latlon(sub.replace("-", " "))
@@ -307,3 +327,173 @@ def refine_craigslist_url(url: str) -> str:
     except Exception as exc:
         log.debug("refine_craigslist_url failed for %s: %s", url, exc)
         return url
+
+
+# Fake price-param names the model invents, per canonical target. Seen live:
+# OfferUp got "priceMax=10000" (no such param) on a fabricated city path that 403'd.
+_MAX_ALIASES = ("max_price", "price_max", "pricemax", "maxprice", "_udhi", "priceceiling")
+_MIN_ALIASES = ("min_price", "price_min", "pricemin", "minprice", "_udlo", "pricefloor")
+
+
+def _pull_price_aliases(q: dict) -> tuple[int | None, int | None]:
+    """Remove every price param variant from q, returning (min, max) if any parse."""
+    lo = hi = None
+    for k in list(q):
+        kl = k.lower()
+        try:
+            if kl in _MAX_ALIASES:
+                hi = hi or int(float(str(q.pop(k)).replace(",", "").lstrip("$")))
+            elif kl in _MIN_ALIASES:
+                lo = lo or int(float(str(q.pop(k)).replace(",", "").lstrip("$")))
+        except (ValueError, TypeError):
+            q.pop(k, None)
+    return lo, hi
+
+
+def refine_offerup_url(url: str) -> str:
+    """Canonicalize an OfferUp search URL. VERIFIED live: offerup.com/search honors ONLY
+    q, radius, price_min, price_max; location cannot be set by URL (OfferUp geolocates
+    the requester's IP — the user's real area, which is what a local watch wants). The
+    model's invented city paths ("/WA-Anacortes/search") 403 — everything is rewritten
+    onto the real /search endpoint and location words are dropped from q."""
+    try:
+        p = urlparse(url)
+        host = (p.netloc or "").lower()
+        if not host.endswith("offerup.com"):
+            return url
+
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+        text = q.get("q") or q.get("query") or ""
+        q.pop("query", None)
+        lo, hi = _pull_price_aliases(q)
+
+        # Clean the query text with the shared parsers. The zip/place is DISCARDED
+        # (nowhere to put it — IP geolocation localizes instead), but its presence
+        # signals local intent → keep the default 50-mile radius explicit.
+        text, min_p, max_p = _extract_price(text)
+        text, zip5 = _extract_zip(text)
+        text, loc = _extract_in_place(text)
+        had_location = bool(zip5 or loc)
+        text = re.sub(r"\s+", " ", text).strip(" ,-")
+
+        out = {}
+        if text:
+            out["q"] = text
+        if (hi or max_p) is not None:
+            out["price_max"] = str(hi or max_p)
+        if (lo or min_p) is not None:
+            out["price_min"] = str(lo or min_p)
+        radius = q.get("radius")
+        if radius or had_location:
+            out["radius"] = str(radius or 50)
+
+        return urlunparse(p._replace(netloc="offerup.com", path="/search",
+                                     query=urlencode(out), fragment=""))
+    except Exception as exc:
+        log.debug("refine_offerup_url failed for %s: %s", url, exc)
+        return url
+
+
+def refine_ebay_url(url: str, fallback_zip: str | None = None) -> str:
+    """Clean an eBay search URL: prices → _udlo/_udhi, zips/'in <town>' phrases in the
+    _nkw text → _stpos (zip) + _sadis (radius, miles). `fallback_zip` lets a location
+    known from ANOTHER url of the same watch (e.g. craigslist's postal) localize eBay
+    too — 'vehicles in anacortes on craigslist and ebay' localizes both."""
+    try:
+        p = urlparse(url)
+        host = (p.netloc or "").lower()
+        if not host.endswith("ebay.com"):
+            return url
+
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+        text = q.pop("_nkw", "") or q.pop("q", "") or q.pop("query", "")
+        lo, hi = _pull_price_aliases(q)
+
+        text, min_p, max_p = _extract_price(text)
+        text, zip5 = _extract_zip(text)
+        text, loc = _extract_in_place(text)
+        if not zip5 and loc:
+            zip5 = nearest_zip(*loc)
+        if not zip5 and fallback_zip:
+            zip5 = fallback_zip
+        text = re.sub(r"\s+", " ", text).strip(" ,-")
+
+        if text:
+            q["_nkw"] = text
+        if (hi or max_p) is not None and "_udhi" not in q:
+            q["_udhi"] = str(hi or max_p)
+        if (lo or min_p) is not None and "_udlo" not in q:
+            q["_udlo"] = str(lo or min_p)
+        if zip5 and "_stpos" not in q:
+            q["_stpos"] = zip5
+        if q.get("_stpos") and not q.get("_sadis"):
+            q["_sadis"] = "50"
+
+        path = p.path if p.path.startswith("/sch/") else "/sch/i.html"
+        return urlunparse(p._replace(netloc="www.ebay.com", path=path, query=urlencode(q)))
+    except Exception as exc:
+        log.debug("refine_ebay_url failed for %s: %s", url, exc)
+        return url
+
+
+def refine_facebook_url(url: str) -> str:
+    """Clean a Facebook Marketplace search URL: prices in the query text → the real
+    minPrice/maxPrice params; zips/'in <town>' phrases are stripped from the query (the
+    CITY PATH segment carries location on FB, and it's already there when the model
+    followed the URL-format rules)."""
+    try:
+        p = urlparse(url)
+        host = (p.netloc or "").lower()
+        if not host.endswith("facebook.com") or "/marketplace" not in p.path:
+            return url
+
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+        text = q.get("query", "")
+        lo, hi = _pull_price_aliases(q)
+
+        text, min_p, max_p = _extract_price(text)
+        text, _zip5 = _extract_zip(text)
+        text, _loc = _extract_in_place(text)
+        text = re.sub(r"\s+", " ", text).strip(" ,-")
+
+        if text:
+            q["query"] = text
+        else:
+            q.pop("query", None)
+        if (hi or max_p) is not None:
+            q["maxPrice"] = str(hi or max_p)
+        if (lo or min_p) is not None:
+            q["minPrice"] = str(lo or min_p)
+
+        return urlunparse(p._replace(query=urlencode(q)))
+    except Exception as exc:
+        log.debug("refine_facebook_url failed for %s: %s", url, exc)
+        return url
+
+
+def refine_search_url(url: str, fallback_zip: str | None = None) -> str:
+    """Site-dispatching URL refiner — the one entry point callers should use."""
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except Exception:
+        return url
+    if "craigslist" in host:
+        return refine_craigslist_url(url)
+    if "offerup" in host:
+        return refine_offerup_url(url)
+    if "ebay" in host:
+        return refine_ebay_url(url, fallback_zip=fallback_zip)
+    if "facebook" in host:
+        return refine_facebook_url(url)
+    return url
+
+
+def url_zip(url: str) -> str | None:
+    """The zip a refined URL is localized to, if any (craigslist postal / eBay _stpos).
+    Used to propagate one site's location to sites in the same watch that lack one."""
+    try:
+        q = dict(parse_qsl(urlparse(url).query))
+        z = q.get("postal") or q.get("_stpos")
+        return z if z and zip_latlon(z) else None
+    except Exception:
+        return None

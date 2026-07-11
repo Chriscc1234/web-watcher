@@ -441,14 +441,20 @@ RULES:
   not a subdomain); Kijiji = https://www.kijiji.ca/... ; GovDeals = \
   https://www.govdeals.com/... . If the user corrects a URL, APPLY the correction exactly \
   and re-emit the watch_suggestion with the fixed urls — do not repeat the bad host.
-- The query= text is ONLY item words ("ford f150", "kayak"). NEVER put a location, zip, \
-  price, or "by owner" into the query text — those are separate params. Craigslist: the \
-  location goes in postal=<5-digit zip>&search_distance=50 (you know most towns' zips — \
-  e.g. Anacortes WA = 98221; use the town's own zip, and do NOT also guess the city \
-  subdomain if unsure — any craigslist subdomain plus the right postal works, the app \
-  corrects the region from the zip). Price limits go in max_price= / min_price= (e.g. \
-  "under 10k" → max_price=10000). "by owner" → purveyor=owner. A generic vehicle search \
-  ("any vehicles/cars/trucks") = category /search/cta with NO query param at all.
+- The query text (query=/q=/_nkw=) is ONLY item words ("ford f150", "kayak"). NEVER put \
+  a location, zip, price, or "by owner" into the query text — every site has its own \
+  REAL params for those, and they differ:\n\
+    Craigslist: location = postal=<5-digit zip>&search_distance=50 (you know most towns' \
+    zips — e.g. Anacortes WA = 98221; use the town's own zip; don't stress the city \
+    subdomain, the app corrects the region from the zip). Price = max_price=/min_price=. \
+    "by owner" = purveyor=owner. Generic vehicle search = category /search/cta, no query.\n\
+    OfferUp: ONLY q, radius, price_min, price_max exist. There is NO location param and \
+    NO city path — NEVER write "offerup.com/<city>/search" (it errors). OfferUp shows \
+    the user's own area automatically, so just https://offerup.com/search?q=TERM \
+    (+price_max=/price_min=/radius=50). Put the location in the instruction text instead.\n\
+    eBay: location = _stpos=<zip>&_sadis=50. Price = _udhi= (max) / _udlo= (min).\n\
+    Facebook: location = the CITY PATH segment (/marketplace/<city>/search). Price = \
+    maxPrice=/minPrice=.
 - Set judgment_prompt to a string for research/comparison/filtering tasks (and for \
   any logged-out Facebook feed); null for simple alert watches.
 - Always include "action". If you are unsure whether a watch exists, prefer \
@@ -1246,7 +1252,7 @@ def _normalize_marketplace_urls(urls) -> tuple[list, list]:
     """Rewrite obviously-wrong hosts (a city/geo subdomain on a flat site → the bare
     domain). Returns (normalized_urls, changes) where changes is a list of (before, after)."""
     from urllib.parse import urlparse, urlunparse
-    from web_watcher.cl_geo import refine_craigslist_url
+    from web_watcher.cl_geo import refine_search_url, url_zip
     from web_watcher.storage import site_key
     out, changes = [], []
     for u in urls or []:
@@ -1255,21 +1261,30 @@ def _normalize_marketplace_urls(urls) -> tuple[list, list]:
             host = (p.netloc or "").lower()
             sk = site_key(u)
             if sk in _FLAT_SITES and host not in (sk, "www." + sk):
-                nu = urlunparse(p._replace(netloc=sk))
+                u2 = urlunparse(p._replace(netloc=sk))
+            else:
+                u2 = u
+            # Per-site refine: junk query text → real params, wrong/invented locations
+            # corrected (craigslist region, OfferUp canonical /search, eBay _stpos…).
+            nu = refine_search_url(u2)
+            if nu != u:
                 changes.append((u, nu))
-                out.append(nu)
-                continue
-            if sk == "craigslist.org":
-                # Move zips/prices/owner-words out of the query text into real params and
-                # fix the region subdomain from the zip (the model guesses famous cities).
-                nu = refine_craigslist_url(u)
+            out.append(nu)
+        except Exception:
+            out.append(u)
+    # Watch-level location propagation: if ANY url in this watch is localized to a zip
+    # (craigslist postal, eBay _stpos), give that zip to the eBay urls that lack one —
+    # "vehicles in anacortes on craigslist and ebay" localizes BOTH searches.
+    try:
+        watch_zip = next((z for z in (url_zip(u) for u in out) if z), None)
+        if watch_zip:
+            for i, u in enumerate(out):
+                nu = refine_search_url(u, fallback_zip=watch_zip)
                 if nu != u:
                     changes.append((u, nu))
-                out.append(nu)
-                continue
-        except Exception:
-            pass
-        out.append(u)
+                    out[i] = nu
+    except Exception:
+        pass
     return out, changes
 
 
@@ -1725,9 +1740,14 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
     • Each URL is a REAL SEARCH for the item: the query is the item's name or a close synonym.
       Do NOT emit a bare adjective, price, or size as its own search (no "?query=black",
       "?query=under+800"), and do NOT invent query parameters a site doesn't have. The ONLY
-      price/location params you may use are craigslist's real ones (max_price/min_price/
-      postal/search_distance/purveyor, per the URL-format rules) — everywhere else, price
-      caps and size limits belong in the instruction text, not the URL.
+      price/location params that exist, per site: craigslist max_price/min_price/postal/
+      search_distance/purveyor; OfferUp price_max/price_min/radius (NO location param, NO
+      city path — offerup.com/search only; it shows the user's own area automatically);
+      eBay _udhi/_udlo/_stpos/_sadis; Facebook maxPrice/minPrice (+ the city PATH segment).
+      Anywhere else, price caps and locations belong in the instruction text, not the URL.
+      When the user named a town, express it as its 5-digit zip (craigslist postal= and
+      eBay _stpos= — you know most towns' zips) and add the 50-mile radius param; never
+      as words in the query text.
     • Watching a SPECIFIC website/page/topic/schedule/news (not a marketplace item search) where
       the user has NOT given a URL → you do NOT know the address; return intent "none" (the
       assistant is asking them for the link). Do NOT fabricate a URL and do NOT turn it into a

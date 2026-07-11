@@ -145,3 +145,91 @@ def test_ambiguous_place_with_anchor_resolves_nearby():
     # Vancouver WA is ~130 mi from the Seattle anchor → resolves; region flips to portland
     assert q.get("postal", "").startswith("986")
     assert host == "portland.craigslist.org"
+
+
+# ── #87: locations on every site, not just craigslist ───────────────────────
+
+from web_watcher.cl_geo import (
+    refine_ebay_url,
+    refine_facebook_url,
+    refine_offerup_url,
+    refine_search_url,
+    url_zip,
+)
+
+
+def test_offerup_fabricated_city_path_is_canonicalized():
+    """The live '/WA-Anacortes/search?priceMax=' URL 403s — must become the real
+    /search endpoint with real params, location words dropped (IP geolocates)."""
+    url = "https://www.offerup.com/WA-Anacortes/search?q=vehicles+in+anacortes&priceMax=10000"
+    host, path, q = _parts(refine_offerup_url(url))
+    assert host == "offerup.com"
+    assert path == "/search"
+    assert q["price_max"] == "10000"          # fake priceMax → real price_max
+    assert q["radius"] == "50"                # location intent → explicit radius
+    assert "anacortes" not in q.get("q", "").lower()
+    assert q["q"] == "vehicles"
+
+
+def test_offerup_price_words_in_query_become_params():
+    url = "https://offerup.com/search?q=diesel+truck+under+8k"
+    _, _, q = _parts(refine_offerup_url(url))
+    assert q["q"] == "diesel truck"
+    assert q["price_max"] == "8000"
+
+
+def test_offerup_clean_url_untouched_shape():
+    url = "https://offerup.com/search?q=kayak"
+    host, path, q = _parts(refine_offerup_url(url))
+    assert (host, path, q) == ("offerup.com", "/search", {"q": "kayak"})
+
+
+def test_ebay_zip_and_price_from_query_text():
+    url = "https://www.ebay.com/sch/i.html?_nkw=vehicles+98221+under+10k"
+    host, path, q = _parts(refine_ebay_url(url))
+    assert host == "www.ebay.com"
+    assert q["_stpos"] == "98221"
+    assert q["_sadis"] == "50"
+    assert q["_udhi"] == "10000"
+    assert "98221" not in q.get("_nkw", "")
+
+
+def test_ebay_fallback_zip_from_sibling_url():
+    url = "https://www.ebay.com/sch/i.html?_nkw=diesel+truck"
+    _, _, q = _parts(refine_ebay_url(url, fallback_zip="98221"))
+    assert q["_stpos"] == "98221"
+    assert q["_sadis"] == "50"
+    assert q["_nkw"] == "diesel truck"
+
+
+def test_ebay_explicit_stpos_wins_over_fallback():
+    url = "https://www.ebay.com/sch/i.html?_nkw=truck&_stpos=98273&_sadis=25"
+    _, _, q = _parts(refine_ebay_url(url, fallback_zip="98221"))
+    assert q["_stpos"] == "98273"
+    assert q["_sadis"] == "25"
+
+
+def test_facebook_price_moves_to_real_params():
+    url = "https://www.facebook.com/marketplace/seattle/search?query=trucks+under+10k+in+anacortes"
+    host, path, q = _parts(refine_facebook_url(url))
+    assert path == "/marketplace/seattle/search"
+    assert q["maxPrice"] == "10000"
+    assert q["query"] == "trucks"
+
+
+def test_dispatcher_routes_by_site():
+    cl = refine_search_url("https://seattle.craigslist.org/search/sss?query=truck+98221")
+    ou = refine_search_url("https://www.offerup.com/WA-X/search?q=truck+under+5k")
+    eb = refine_search_url("https://www.ebay.com/sch/i.html?_nkw=truck", fallback_zip="98221")
+    other = refine_search_url("https://example.com/search?q=truck+98221+under+5k")
+    assert "postal=98221" in cl
+    assert "price_max=5000" in ou and "/search" in ou
+    assert "_stpos=98221" in eb
+    assert other == "https://example.com/search?q=truck+98221+under+5k"  # unknown site untouched
+
+
+def test_url_zip_reads_localized_urls():
+    assert url_zip("https://skagit.craigslist.org/search/cta?postal=98221") == "98221"
+    assert url_zip("https://www.ebay.com/sch/i.html?_stpos=98221") == "98221"
+    assert url_zip("https://offerup.com/search?q=truck") is None
+    assert url_zip("https://x.com/?postal=00000") is None   # fake zip rejected

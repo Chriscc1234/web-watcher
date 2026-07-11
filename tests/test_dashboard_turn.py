@@ -89,7 +89,7 @@ def test_normalize_marketplace_urls_strips_bogus_city_subdomain():
     assert out[1] == "https://offerup.com/search?q=kayak"
     assert out[2] == "https://seattle.craigslist.org/search/cta?query=truck"  # untouched
     assert out[3] == "https://www.ebay.com/sch/i.html?_nkw=rtx"               # untouched
-    assert out[4] == "https://ebay.com/sch/i.html?_nkw=gpu"
+    assert out[4] == "https://www.ebay.com/sch/i.html?_nkw=gpu"  # canonical search host
     assert len(changes) == 2   # offerup + ebay city subdomains fixed
 
 

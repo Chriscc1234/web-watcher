@@ -615,7 +615,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       <div class="checkbox-row"><input type="checkbox" id="f-email" checked><label for="f-email">Email</label></div>
     </div>
     <div class="form-row">
-      <div class="checkbox-row"><input type="checkbox" id="f-enabled" checked><label for="f-enabled">Enabled</label></div>
+      <label>Watch status</label>
+      <div class="checkbox-row"><input type="checkbox" id="f-enabled" checked><label for="f-enabled">Watch is active (uncheck to pause it without deleting)</label></div>
     </div>
 
     <!-- ── Advanced (smart defaults otherwise) ────────────────── -->
@@ -1927,15 +1928,22 @@ function appendWatchCard(suggestion, boxId = 'dock-convo') {
   // Show the search TERMS (decoded from the query params), not a wall of 8 long URLs —
   // that wall was what squished the card. Falls back to the raw URLs if we can't decode.
   const urls = suggestion.urls || [];
-  const terms = urls.map(u => {
+  const terms = [...new Set(urls.map(u => {
     try { const q = new URL(u).searchParams; return decodeURIComponent(q.get('query') || q.get('q') || q.get('_nkw') || q.get('keywords') || ''); }
     catch (e) { return ''; }
-  }).filter(Boolean);
-  const site = (() => { try { return new URL(urls[0]).hostname.replace(/^www\./, ''); } catch (e) { return ''; } })();
+  }).filter(Boolean))];
+  // EVERY distinct site, not just the first — a multi-site watch used to render as
+  // single-site on the card even though all the URLs were right underneath in Edit.
+  const sites = [...new Set(urls.map(u => {
+    try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
+  }).filter(Boolean))];
+  const siteStr = sites.join(' + ');
   const searchLine = terms.length
-    ? `<span>${esc(terms.join(' · '))}${site ? ` <span style="color:var(--dim)">on ${esc(site)}</span>` : ''}</span>`
+    ? `<span>${esc(terms.join(' · '))}${siteStr ? ` <span style="color:var(--dim)">on ${esc(siteStr)}</span>` : ''}</span>`
     : `<span>${esc(urls.join(' '))}</span>`;
-  const searchLabel = terms.length ? `Searches (${terms.length})` : 'URL';
+  const searchLabel = terms.length
+    ? (sites.length > 1 ? `Searches (${urls.length} across ${sites.length} sites)` : `Searches (${urls.length})`)
+    : 'URL';
   card.innerHTML = `
     <div class="watch-card">
       <h4>${isUpdate ? '✏️ Edit: ' : ''}${esc(suggestion.name)}</h4>

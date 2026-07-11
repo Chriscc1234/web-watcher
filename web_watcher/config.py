@@ -214,6 +214,11 @@ class AppConfig(BaseModel):
     # set false to keep each watch fully independent.
     cross_watch_matching: bool = True
 
+    # One-time config migrations already applied to THIS file (see load()). Lets a
+    # changed default reach existing installs exactly once without ever re-overriding
+    # a value the user later sets back deliberately.
+    applied_migrations: list[str] = Field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Load / save helpers
@@ -251,6 +256,17 @@ def load(path: Path | str | None = None) -> AppConfig:
         if not w.id:
             w.id = uuid.uuid4().hex
             assigned = True
+
+    # Migration: show the browser by default (0.23.x flipped the DEFAULT to visible,
+    # but both existing installs carry headless: true from when that was OUR default,
+    # not a choice anyone made). Applied exactly once — if the user turns headless
+    # back on afterwards, it stays on.
+    if "show_browser_default" not in config.applied_migrations:
+        config.applied_migrations.append("show_browser_default")
+        if config.browser.headless:
+            config.browser.headless = False
+        assigned = True
+
     if assigned and p.exists():
         try:
             save(config, p)

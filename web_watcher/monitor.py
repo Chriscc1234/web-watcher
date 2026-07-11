@@ -551,12 +551,13 @@ def vary_search(base_url: str, sweep_index: int, enabled: bool = True) -> str:
     different inventory each pass. When disabled, returns base_url unchanged (a
     plain refresh). sweep_index increments every sweep.
     """
-    # Self-heal stored craigslist URLs every sweep (idempotent): junk query text →
-    # real params, wrong region subdomain → the zip's true region. Watches created
-    # before the refiner existed get fixed without the user touching anything.
+    # Self-heal stored marketplace URLs every sweep (idempotent): junk query text →
+    # real params, wrong/invented locations corrected (craigslist region-from-zip,
+    # OfferUp's fabricated city paths → the real /search, eBay _stpos). Watches created
+    # before the refiners existed get fixed without the user touching anything.
     try:
-        from web_watcher.cl_geo import refine_craigslist_url
-        base_url = refine_craigslist_url(base_url)
+        from web_watcher.cl_geo import refine_search_url
+        base_url = refine_search_url(base_url)
     except Exception:
         pass
     if not enabled:

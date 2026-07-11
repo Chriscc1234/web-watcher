@@ -47,6 +47,11 @@ log = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434"
 
+# When the app runs windowless (pythonw), a console child (nvidia-smi, powershell) gets a
+# brand-new visible console that flashes and steals focus on EVERY probe — the "window
+# popping up over and over" during a hardware re-scan. 0 on non-Windows.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ---------------------------------------------------------------------------
 # Tier table — ordered from highest to lowest VRAM requirement
 # ---------------------------------------------------------------------------
@@ -298,7 +303,7 @@ def _gpu_name() -> Optional[str]:
     try:
         proc = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
         )
         if proc.returncode == 0:
             names = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
@@ -313,7 +318,7 @@ def _gpu_name() -> Optional[str]:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-WmiObject Win32_VideoController | Select-Object -ExpandProperty Name"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW,
         )
         if proc.returncode == 0:
             names = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
@@ -362,6 +367,7 @@ def _vram_from_nvidia_smi() -> Optional[int]:
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=_NO_WINDOW,
         )
         if proc.returncode != 0:
             return None
@@ -403,6 +409,7 @@ def _vram_from_wmi() -> Optional[int]:
             capture_output=True,
             text=True,
             timeout=15,
+            creationflags=_NO_WINDOW,
         )
         if proc.returncode != 0:
             return None

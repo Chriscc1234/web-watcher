@@ -441,6 +441,14 @@ RULES:
   not a subdomain); Kijiji = https://www.kijiji.ca/... ; GovDeals = \
   https://www.govdeals.com/... . If the user corrects a URL, APPLY the correction exactly \
   and re-emit the watch_suggestion with the fixed urls — do not repeat the bad host.
+- The query= text is ONLY item words ("ford f150", "kayak"). NEVER put a location, zip, \
+  price, or "by owner" into the query text — those are separate params. Craigslist: the \
+  location goes in postal=<5-digit zip>&search_distance=50 (you know most towns' zips — \
+  e.g. Anacortes WA = 98221; use the town's own zip, and do NOT also guess the city \
+  subdomain if unsure — any craigslist subdomain plus the right postal works, the app \
+  corrects the region from the zip). Price limits go in max_price= / min_price= (e.g. \
+  "under 10k" → max_price=10000). "by owner" → purveyor=owner. A generic vehicle search \
+  ("any vehicles/cars/trucks") = category /search/cta with NO query param at all.
 - Set judgment_prompt to a string for research/comparison/filtering tasks (and for \
   any logged-out Facebook feed); null for simple alert watches.
 - Always include "action". If you are unsure whether a watch exists, prefer \
@@ -549,10 +557,11 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         from web_watcher.config import Watch, load, save
         if isinstance(body.get("urls"), list):
             body["urls"], _ = _normalize_marketplace_urls(body["urls"])
+        body = _backfill_schedule(body)
         try:
             new_watch = Watch.model_validate(body)
         except ValidationError as exc:
-            raise HTTPException(400, detail=exc.errors())
+            raise HTTPException(400, detail=_validation_detail(exc))
 
         cfg = load()
         if any(w.name == new_watch.name for w in cfg.watches):
@@ -582,7 +591,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         try:
             updated = _merge_watch_update(cfg.watches[idx], body, watch_name)
         except ValidationError as exc:
-            raise HTTPException(400, detail=exc.errors())
+            raise HTTPException(400, detail=_validation_detail(exc))
 
         cfg.watches[idx] = updated
         save(cfg)
@@ -1173,6 +1182,29 @@ def _require_known_service(name: str) -> None:
         raise HTTPException(status_code=404, detail=f"Unknown service: {name!r}")
 
 
+def _validation_detail(exc) -> list[dict]:
+    """A JSON-safe rendering of a pydantic ValidationError. exc.errors() embeds the raw
+    ValueError object under ctx for model-validator failures — FastAPI can't serialize
+    that, so the intended 400 exploded into a 500 (the create-watch regression)."""
+    return [
+        {"loc": list(e.get("loc") or ()), "msg": str(e.get("msg", "")), "type": str(e.get("type", ""))}
+        for e in exc.errors()
+    ]
+
+
+def _backfill_schedule(body: dict) -> dict:
+    """Give a schedule-less watch body a sane default (every 30 min) instead of failing
+    validation. The chat extractor often proposes a watch with no interval/cron at all —
+    the card should still create cleanly rather than erroring at the user."""
+    if (body.get("mode") != "continuous"
+            and body.get("interval_minutes") in (None, "", 0)
+            and not body.get("cron_expression")):
+        body = dict(body)
+        body.pop("cron_expression", None)
+        body["interval_minutes"] = 30
+    return body
+
+
 def _load_cfg():
     from web_watcher.config import load
     return load()
@@ -1214,6 +1246,7 @@ def _normalize_marketplace_urls(urls) -> tuple[list, list]:
     """Rewrite obviously-wrong hosts (a city/geo subdomain on a flat site → the bare
     domain). Returns (normalized_urls, changes) where changes is a list of (before, after)."""
     from urllib.parse import urlparse, urlunparse
+    from web_watcher.cl_geo import refine_craigslist_url
     from web_watcher.storage import site_key
     out, changes = [], []
     for u in urls or []:
@@ -1224,6 +1257,14 @@ def _normalize_marketplace_urls(urls) -> tuple[list, list]:
             if sk in _FLAT_SITES and host not in (sk, "www." + sk):
                 nu = urlunparse(p._replace(netloc=sk))
                 changes.append((u, nu))
+                out.append(nu)
+                continue
+            if sk == "craigslist.org":
+                # Move zips/prices/owner-words out of the query text into real params and
+                # fix the region subdomain from the zip (the model guesses famous cities).
+                nu = refine_craigslist_url(u)
+                if nu != u:
+                    changes.append((u, nu))
                 out.append(nu)
                 continue
         except Exception:
@@ -1559,6 +1600,17 @@ def _normalize_turn(data: dict) -> dict:
         out = dict(data)
 
     if suggestions:
+        # New watches proposed without any schedule get the default up front, so the card
+        # shows a real schedule and Create can't fail validation. Updates are left alone —
+        # they merge onto the existing watch, which already has its schedule.
+        suggestions = [s if s.get("action") == "update" else _backfill_schedule(s)
+                       for s in suggestions]
+        # Clean each suggestion's URLs NOW (bogus hosts, craigslist junk queries / wrong
+        # region) so the CARD shows what will actually be watched — not a URL that gets
+        # silently rewritten at create time.
+        for s in suggestions:
+            if isinstance(s.get("urls"), list):
+                s["urls"], _ = _normalize_marketplace_urls(s["urls"])
         out["watch_suggestion"]  = suggestions[0]
         out["watch_suggestions"] = suggestions
 
@@ -1672,7 +1724,9 @@ STEP 1 — the most important decision: is this a CREATE or an UPDATE?
       places", cover Craigslist, OfferUp, and eBay.
     • Each URL is a REAL SEARCH for the item: the query is the item's name or a close synonym.
       Do NOT emit a bare adjective, price, or size as its own search (no "?query=black",
-      "?query=under+800"), and do NOT invent query parameters the site doesn't have — price
+      "?query=under+800"), and do NOT invent query parameters a site doesn't have. The ONLY
+      price/location params you may use are craigslist's real ones (max_price/min_price/
+      postal/search_distance/purveyor, per the URL-format rules) — everywhere else, price
       caps and size limits belong in the instruction text, not the URL.
     • Watching a SPECIFIC website/page/topic/schedule/news (not a marketplace item search) where
       the user has NOT given a URL → you do NOT know the address; return intent "none" (the
@@ -1868,6 +1922,28 @@ def _watches_config_context(cfg) -> str:
             "one and change ONLY what the user asked):\n" + body)
 
 
+def _converse_focus_line(focus: str | None, conv: list) -> str:
+    """A short 'what we're talking about RIGHT NOW' line for the CONVERSE phase. Without it,
+    only extraction knew the focus — the natural-reply model had to re-derive the topic from
+    raw history every turn and regularly dropped it mid-setup (asked 'what item are you
+    looking for?' three turns after the user said 'manual car under 8000')."""
+    if focus == PENDING_CREATE:
+        frag = ""
+        for m in reversed(conv or []):
+            if m.get("role") == "user" and _CREATEISH_RE.search(str(m.get("content", ""))):
+                frag = str(m.get("content", ""))[:200]
+                break
+        return ("\n\nRIGHT NOW: the user is in the middle of setting up a NEW watch"
+                + (f" (they asked: \"{frag}\")" if frag else "")
+                + ". Every follow-up answer — a price, extra sites, a color, 'under 8000' — is "
+                "a DETAIL OF THAT WATCH. Do NOT ask again what they're looking for; combine "
+                "everything they've said so far and commit to setting it up.")
+    if focus:
+        return (f"\n\nRIGHT NOW: the conversation is about the existing watch \"{focus}\" — "
+                "'it' / 'that one' refer to it.")
+    return ""
+
+
 def _chat_reply_natural(system: str, messages: list, model: str):
     """Phase 1 — a natural-language reply (NO forced JSON). Returns (text, eval, prompt, dur)."""
     payload = {
@@ -1949,6 +2025,13 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
                         or (focus if focus != PENDING_CREATE else None))
                 if real:
                     w["name"] = real
+                else:
+                    # An "update" naming NO real watch is a mislabeled CREATE (the model
+                    # says update mid-setup while the watch doesn't exist yet). Flipping it
+                    # keeps the card honest and makes Apply POST instead of 404-ing a PUT.
+                    w["action"] = "create"
+                    out.append(w)
+                    continue
                 # An edit that doesn't touch the urls often omits them entirely; that means
                 # "unchanged", not "no urls" — backfill from the stored watch so the no-URL
                 # safety net (which exists to stop unmonitorable CREATEs) can't eat the edit.
@@ -1985,7 +2068,8 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
             for m in messages]
     focus = _focused_watch_name(conv, cfg)
     try:
-        reply, eval_count, prompt_count, duration_ns = _chat_reply_natural(system, conv, model)
+        reply, eval_count, prompt_count, duration_ns = _chat_reply_natural(
+            system + _converse_focus_line(focus, conv), conv, model)
         action = _extract_watch_action(conv, reply, cfg, model, focus)
         data = _normalize_turn({"message": reply, **action})
 

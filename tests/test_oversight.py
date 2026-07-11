@@ -122,3 +122,33 @@ def test_snapshot_is_newest_first_and_bounded():
     snap = a.snapshot(limit=10)
     assert len(snap["entries"]) == 10
     assert snap["entries"][0]["text"] == "line 79"   # newest first
+
+
+def test_removed_watch_is_narrated():
+    a = _agent()
+    a._prev = {"Trucks": _w("Trucks")}
+    a._running_prev = {"Trucks"}
+    a._narrate_deltas([])   # watch deleted, nothing left
+    texts = _texts(a)
+    assert any("removed" in t and "Trucks" in t for t in texts)
+    # last-one case invites the user to set up the next watch
+    assert any("last one" in t for t in texts)
+
+
+def test_added_watch_is_narrated():
+    a = _agent()
+    a._prev = {"Trucks": _w("Trucks")}
+    a._running_prev = {"Trucks"}
+    a._narrate_deltas([_w("Trucks"), _w("Boats", running=False)])
+    assert any("New watch 'Boats'" in t for t in _texts(a))
+
+
+def test_removed_watch_forgets_flags_for_clean_recreate():
+    a = _agent()
+    dry = _w("Trucks", matches=0, observations=_DRY_OBS_THRESHOLD + 5)
+    a._prev = {"Trucks": dry}; a._running_prev = {"Trucks"}
+    a._narrate_deltas([dry])                      # flags it dry
+    assert "Trucks" in a._dry_flagged
+    a._prev = {"Trucks": dry}
+    a._narrate_deltas([])                         # deleted
+    assert "Trucks" not in a._dry_flagged

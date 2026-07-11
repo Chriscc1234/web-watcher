@@ -97,7 +97,9 @@ class ModelsConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BrowserConfig(BaseModel):
-    headless: bool = True
+    # Visible browser by default: a fresh install should SHOW the user what the agent is
+    # doing (trust + debuggability). Power users can turn headless back on in Settings.
+    headless: bool = False
     stealth:  bool = True  # human-like mouse/timing behaviour (disable for simple/trusted sites)
     # Draw a visible fake cursor in the agent's browser that follows its synthetic mouse, so
     # you can watch where it's clicking. Only visible with headless=False. Off by default: it

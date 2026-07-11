@@ -411,6 +411,9 @@ class ServiceManager:
             n = len(self.orchestrator_status().get("topics", []))
             log.info("Config reloaded — The Watcher (orchestrator) is driving %d continuous "
                      "watch(es) and will apply the change on its next cycle", n)
+        # Wake the narrator so an added/removed/edited watch shows up in its feed and
+        # per-watch view immediately, not a tick-interval later.
+        self._nudge_oversight()
 
     # ------------------------------------------------------------------
     # Continuous watches

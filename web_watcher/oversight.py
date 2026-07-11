@@ -279,6 +279,24 @@ class OversightAgent:
     def _narrate_deltas(self, state: list[dict]) -> None:
         running_now = {w["name"] for w in state if w["running"]}
 
+        # Watches added or removed since last look — without this, the greeting's
+        # "keeping an eye on N watches" stays the feed's last word on the count even
+        # after the user deletes every watch.
+        prev_names, now_names = set(self._prev), {w["name"] for w in state}
+        for name in sorted(now_names - prev_names):
+            self._emit("status", f"New watch '{name}' — added to my rounds.", watch=name)
+        for name in sorted(prev_names - now_names):
+            self._emit(
+                "status",
+                f"The '{name}' watch was removed — I'm not watching it anymore."
+                + (" That was the last one; tell me what to look for and I'll get back on watch."
+                   if not state else ""),
+                watch=name,
+            )
+            # Forget its per-watch flags so a same-name recreate starts clean.
+            self._error_seen.pop(name, None)
+            self._dry_flagged.discard(name)
+
         for w in state:
             name = w["name"]
             prev = self._prev.get(name)

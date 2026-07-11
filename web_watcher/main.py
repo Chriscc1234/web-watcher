@@ -119,10 +119,37 @@ class _WindowApi:
             except Exception:
                 pass
             self._window.resize(w, h)
+            # Growing the window keeps its top-left anchored — re-clamp so the grown
+            # window (and its title-bar buttons) stays fully on screen.
+            _clamp_window_on_screen(self._window)
             return True
         except Exception as exc:
             log.debug("resize_for_zoom failed: %s", exc)
             return False
+
+
+def _clamp_window_on_screen(window) -> None:
+    """Move/shrink the window so it sits fully inside the primary screen's bounds.
+    Windows sometimes places a new window mostly off the right edge (cascade placement on
+    small/multi-DPI displays) — the title-bar buttons end up unreachable and the app looks
+    broken on first open. Best-effort: any failure leaves the window where it is."""
+    try:
+        import webview
+        scr = webview.screens[0]
+        sw, sh = int(getattr(scr, "width", 0)), int(getattr(scr, "height", 0))
+        if not sw or not sh:
+            return
+        w = min(int(window.width), sw)
+        h = min(int(window.height), sh - 48)      # leave room for the taskbar
+        if (w, h) != (int(window.width), int(window.height)):
+            window.resize(w, h)
+        x, y = int(window.x), int(window.y)
+        nx = min(max(0, x), max(0, sw - w))
+        ny = min(max(0, y), max(0, sh - h - 48))
+        if (nx, ny) != (x, y):
+            window.move(nx, ny)
+    except Exception as exc:
+        log.debug("could not clamp window on screen: %s", exc)
 
 
 def _wait_for_server(timeout: float = SERVER_TIMEOUT) -> bool:
@@ -181,6 +208,9 @@ def main() -> None:
     )
     window_api.bind(window)
     manager._window = window   # lets the update flow close+relaunch the app
+    # Make sure the freshly-placed window is actually reachable (title bar + buttons on
+    # screen) — the buddy's first launch opened far right with the buttons cut off.
+    window.events.shown += lambda: _clamp_window_on_screen(window)
 
     def _on_closed() -> None:
         log.info("Window closed — shutting down services")

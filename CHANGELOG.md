@@ -11,6 +11,64 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.23.0-alpha] — 2026-07-11 (The location fix — plus a night of squashed bugs)
+
+### Fixed — "can't create watches anymore" (error 500 on both machines)
+- Creating a watch whose config failed validation (most commonly a chat suggestion with no
+  schedule) crashed the server with a 500 instead of a clear error. Root cause: the validation
+  error object wasn't JSON-serializable, so the intended "400 with details" itself blew up.
+  Fixed, and schedule-less suggestions now default to "every 30 min" instead of failing at all.
+
+### Fixed — the location thing (Anacortes ≠ Seattle)
+- **Craigslist searches are now geographically correct.** The app bundles the US zip/place
+  gazetteer (Census, public domain) plus craigslist's own region list, and deterministically
+  fixes every craigslist search URL — no model guessing:
+  - "vehicles owner 98221 under 10k" as a literal search → a real search: the zip becomes
+    `postal=98221` (+ 50-mile radius), "under 10k" becomes `max_price=10000`, "owner" becomes
+    the by-owner filter, and "vehicles" becomes the cars+trucks CATEGORY instead of a word.
+  - The region subdomain is corrected from the zip: 98221 → `skagit.craigslist.org` (the region
+    that actually serves Anacortes), not the model's "seattle" guess.
+  - Hallucinated regions like `anacortes.craigslist.org` (no such region) resolve via the town's
+    real coordinates; "in <town>" phrases left in the query move into the postal filter.
+  - Place-named car models are protected: "toyota tacoma" / "chevy colorado" / "dodge dakota"
+    are never mistaken for locations (place words only count after "in/near/around").
+- Runs on every create, edit, chat card, AND every sweep — existing broken watches self-heal
+  the next time they run, no edits needed.
+
+### Fixed — chat loses the thread mid-setup
+- The conversational reply now gets told what's being set up RIGHT NOW, so "let's look on
+  offerup and ebay as well" no longer draws "what item are you looking for?" three turns after
+  you said "manual car under 8000". Verified live against the exact failing conversation.
+- An "update" card for a watch that doesn't exist yet (the model mislabels mid-setup creates)
+  now flips to a create — no more Edit-labeled cards you can't apply.
+- When the bot proposes changes to SEVERAL watches at once, a single "Apply all" button appears
+  under the cards — you're no longer made to click through each one.
+- Watch cards now say what they are: a draft that changes nothing until you apply it, refreshed
+  as you keep talking.
+
+### Fixed — window kept popping up and stealing focus during the hardware scan
+- The GPU/VRAM probes (nvidia-smi, PowerShell) each flashed a console window when the app runs
+  windowless — over and over during a re-scan. All probes are now windowless.
+
+### Fixed — deleted the last watch, badge still said "keeping an eye on 1 watch"
+- The Watcher now narrates watch additions and removals ("That was the last one; tell me what
+  to look for next") and refreshes immediately on any create/edit/delete.
+
+### Fixed — app opened off-screen on first launch
+- The window now clamps itself fully on-screen at launch (and after accessibility-zoom
+  resizes), so the title-bar buttons can't end up unreachable off the right edge.
+
+### Fixed — "reset to fresh install" kept the chat history
+- The installer/uninstaller now closes a running Web Watcher before touching files (graceful
+  close first, then force). Previously a still-running app re-wrote its chat history and config
+  right after the uninstall's data wipe, resurrecting them.
+
+### Changed — fresh installs show the browser
+- New installs default to a VISIBLE browser so you can watch the agent work; turn headless
+  back on in Settings if you prefer.
+
+---
+
 ## [0.22.4-alpha] — 2026-07-10 (Chat that knows when — and gets big when you need it)
 
 ### Added — timestamps in the chat

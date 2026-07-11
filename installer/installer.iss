@@ -106,6 +106,30 @@ begin
     Result := v;
 end;
 
+// Close any running Web Watcher before we touch files. Without this, an app left running
+// during an install/uninstall (a) holds files the installer wants to replace/delete, and
+// (b) re-writes its chat history + config right after an uninstall's data wipe — the
+// "reset to fresh install kept my chat history" bug. The window title is exactly
+// "Web Watcher", so a title-filtered taskkill hits only us (not other python apps).
+procedure KillRunningApp();
+var
+  R: Integer;
+begin
+  // Graceful first (WM_CLOSE → the app saves state and stops services), force what's left.
+  Exec(ExpandConstant('{sys}\taskkill.exe'),
+       '/FI "WINDOWTITLE eq Web Watcher*"', '', SW_HIDE, ewWaitUntilTerminated, R);
+  Sleep(2500);
+  Exec(ExpandConstant('{sys}\taskkill.exe'),
+       '/F /FI "WINDOWTITLE eq Web Watcher*"', '', SW_HIDE, ewWaitUntilTerminated, R);
+  Sleep(500);  // let file handles release before we delete/replace
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  KillRunningApp();
+  Result := '';
+end;
+
 // If Web Watcher is already installed, reframe the first screen as an UPDATE (not a fresh
 // install) and reassure the user their data is kept. The same installer handles both — Inno
 // upgrades in place because the AppId matches — so this is messaging, not a code path change.
@@ -133,6 +157,8 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: string;
 begin
+  if CurUninstallStep = usUninstall then
+    KillRunningApp();   // a still-running app would resurrect chat history/config post-wipe
   if CurUninstallStep = usPostUninstall then
   begin
     DataDir := ExpandConstant('{localappdata}\WebWatcher');

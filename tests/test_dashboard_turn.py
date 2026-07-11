@@ -466,3 +466,25 @@ def test_pending_create_sentinel_never_becomes_a_watch_name(monkeypatch):
     monkeypatch.setattr(S, "_focused_watch_name", lambda msgs, cfg: S.PENDING_CREATE)
     out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
     assert out["watch_suggestion"]["name"] == "Something"   # model's name kept, sentinel never used
+
+
+def test_update_naming_no_real_watch_flips_to_create(monkeypatch):
+    """3b canary failure: mid-setup the model labels the still-unbuilt watch an 'update'.
+    With no matching stored watch (and no focus), the suggestion must flip to a create —
+    so the card doesn't say Edit and Apply doesn't 404 a PUT."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[])
+
+    _mock_two_phase(monkeypatch,
+                    "Adding OfferUp and eBay too — setting that up now.",
+                    {"intent": "update",
+                     "watch": {"name": "manual cars under 8000",
+                               "urls": ["https://seattle.craigslist.org/search/cta?query=manual"],
+                               "instruction": "manual cars under $8000"}})
+    monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    s = out["watch_suggestion"]
+    assert s is not None
+    assert s["action"] == "create"
+    assert s["interval_minutes"] == 30   # schedule backfill applies to the flipped create

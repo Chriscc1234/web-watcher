@@ -1396,9 +1396,12 @@ async function watcherSend() {
     const replyText = resp.message || '(no response)';
     appendMsg('assistant', replyText, 'dock-convo', Date.now() / 1000);
     watcherHistory.push({ role: 'assistant', content: replyText });
-    // The Watcher can propose more than one watch at once (e.g. "broaden both") — render each.
+    // The Watcher can propose more than one watch at once (e.g. "broaden both") — render each,
+    // plus one "Apply all" so the user isn't made to click through every card when the bot
+    // just said it would change all of them.
     const suggestions = resp.watch_suggestions || (resp.watch_suggestion ? [resp.watch_suggestion] : []);
     suggestions.forEach(s => appendWatchCard(s, 'dock-convo'));
+    if (suggestions.length > 1) appendApplyAllCard(suggestions, 'dock-convo');
     if (resp.listings)         appendListingResults(resp.listings, 'dock-convo');
     if (resp.watch_actions && resp.watch_actions.length)
       appendWatchActionsCard(resp.watch_actions, 'dock-convo');
@@ -1949,7 +1952,48 @@ function appendWatchCard(suggestion, boxId = 'dock-convo') {
           Edit before ${isUpdate ? 'saving' : 'creating'}
         </button>
       </div>
+      <div style="color:var(--dim);font-size:.85em;margin-top:6px">
+        This is a draft — nothing changes until you apply it. Keep talking and I'll post an updated card.
+      </div>
     </div>`;
+  box.appendChild(card);
+  box.scrollTop = box.scrollHeight;
+}
+
+// One-click apply for a multi-watch proposal ("broaden all three") — without it the bot
+// says it'll change every watch but the user has to click through each card one by one.
+function appendApplyAllCard(suggestions, boxId = 'dock-convo') {
+  const box = document.getElementById(boxId);
+  const card = document.createElement('div');
+  card.className = 'msg assistant';
+  card.innerHTML = `
+    <div class="watch-card">
+      <div class="actions">
+        <button class="success" style="width:100%">Apply all ${suggestions.length}</button>
+      </div>
+    </div>`;
+  const btn = card.querySelector('button');
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'Applying…';
+    for (const s of suggestions) {
+      const isUpdate = s.action === 'update';
+      const body = Object.assign({ enabled: true, notify: {telegram:true,email:true},
+                                   click_path: [], model_override: null }, s);
+      delete body.action;
+      body.urls = s.urls || [];
+      try {
+        if (isUpdate)
+          await api('/api/watches/' + encodeURIComponent(s.name), { method:'PUT', body: JSON.stringify(body) });
+        else
+          await api('/api/watches', { method:'POST', body: JSON.stringify(body) });
+      } catch(e) {
+        appendMsg('assistant', `Could not ${isUpdate ? 'update' : 'create'} "${s.name}": ${e.message}`, boxId);
+      }
+    }
+    btn.textContent = `Applied ${suggestions.length}`;
+    if (activeTab === 'watches') loadWatches();
+  };
   box.appendChild(card);
   box.scrollTop = box.scrollHeight;
 }
@@ -1986,8 +2030,15 @@ async function createWatchFromSuggestion(suggestion, btn, boxId = 'dock-convo') 
     body.urls = suggestion.urls || [];
 
     if (isUpdate) {
-      await api('/api/watches/' + encodeURIComponent(suggestion.name),
-                { method: 'PUT', body: JSON.stringify(body) });
+      try {
+        await api('/api/watches/' + encodeURIComponent(suggestion.name),
+                  { method: 'PUT', body: JSON.stringify(body) });
+      } catch (err) {
+        // An "update" for a watch that doesn't exist is a mislabeled create (the model
+        // says update mid-setup) — fall back to creating it instead of erroring out.
+        if (!/not found|404/i.test(String(err.message))) throw err;
+        await api('/api/watches', { method: 'POST', body: JSON.stringify(body) });
+      }
       btn.textContent = 'Updated!';
       appendMsg('assistant', `Watch "${suggestion.name}" has been updated.`, boxId);
     } else {

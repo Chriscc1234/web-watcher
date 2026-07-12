@@ -74,6 +74,7 @@ from web_watcher.storage import (
     list_site_profiles,
 )
 from web_watcher.monitor import parse_listing_attributes, listing_fingerprint
+from web_watcher import fb_safety
 
 log = logging.getLogger(__name__)
 
@@ -614,6 +615,13 @@ def _run_agent_continuous_sweep(
     plan   = _exploration_plan(sweep_index, watch)
     model  = watch.model_override or cfg.models.text_model
 
+    # Facebook cooldown: after a checkpoint we back off this watch's FB sweeps for hours
+    # instead of poking a flagged account every idle cycle.
+    if fb_safety.is_facebook(plan["start_url"]) and _fb_on_cooldown(watch.name):
+        log.info("Continuous agent sweep %d for %r: Facebook on cooldown — skipping",
+                 sweep_index, watch.name)
+        return
+
     # Accumulate listings across every page the agent visits, keeping the richest
     # title per stable key. Dedup vs seen-state happens later in the shared pipeline.
     # Learned site profiles let the extractor key listings on sites beyond the 3 built-ins.
@@ -642,8 +650,14 @@ def _run_agent_continuous_sweep(
         "change). If you've already searched, scroll instead.\n"
         "- Finish ('done') once you've scrolled through a good amount of results.\n\n"
         "HARD RULES — follow exactly:\n"
+        "- READ-ONLY. You are only LOOKING. NEVER message a seller, make an offer, buy, "
+        "add to cart, check out, like, react, comment, share, post, save/favorite, follow, "
+        "add a friend, or report anything. Only scroll, search, sort, filter, open a "
+        "listing to read it, and go back.\n"
         "- NEVER log in or sign up. NEVER type an email, password, or phone number. "
         "NEVER click 'Log In', 'Sign Up', or 'Continue with…'.\n"
+        "- If the page shows a security check, CAPTCHA, or 'confirm your identity' / "
+        "'unusual activity' message, do NOT try to solve it — just finish immediately.\n"
         "- If the page becomes a login or sign-up page, do NOT fill it in — just finish.\n"
         "- Stay on this website. Do NOT follow links to other sites.\n"
         "- Don't finish on the very first step — scroll first."
@@ -652,6 +666,8 @@ def _run_agent_continuous_sweep(
     # Guardrail: stop the agent the instant it leaves the start site or lands on a
     # login wall, so it never interacts with a login form or wanders off-site.
     start_site = _registrable_domain(plan["start_url"])
+
+    _checkpoint_hit = {"reason": None}   # set when a Facebook security checkpoint stops us
 
     def _should_stop(pg) -> bool:
         # Honour a stop request (Stop button / reload / delete) mid-browse so the loop
@@ -665,6 +681,13 @@ def _run_agent_continuous_sweep(
             return False
         if start_site and _registrable_domain(cur) != start_site:
             log.info("Agent left %s (now %s) — stopping sweep", start_site, cur[:60])
+            return True
+        # Facebook security checkpoint / block / CAPTCHA: STOP and remember why — never try
+        # to solve it (that turns a soft flag into a ban). The caller alerts + backs off.
+        if fb_safety.is_facebook(cur) and fb_safety.is_checkpoint(pg):
+            _checkpoint_hit["reason"] = fb_safety.checkpoint_reason(pg)
+            log.warning("Facebook checkpoint detected (%s) — STOPPING sweep for %r",
+                        _checkpoint_hit["reason"], watch.name)
             return True
         if "/login" in cur or "/checkpoint" in cur or is_login_wall(pg):
             log.info("Agent hit a login wall (%s) — stopping sweep", cur[:60])
@@ -700,14 +723,25 @@ def _run_agent_continuous_sweep(
                                perception_mode_used="continuous-agent"), db_path)
         return
 
-    log.info("Continuous agent sweep %d for %r: style=%s start=%s",
-             sweep_index, watch.name, plan["style"], plan["start_url"])
+    # A checkpoint the moment we land (before the agent acts) → stop, alert, back off.
+    if fb_safety.is_facebook(page.url) and fb_safety.is_checkpoint(page):
+        _handle_fb_checkpoint(watch, cfg, run_ts, db_path, fb_safety.checkpoint_reason(page))
+        return
+
+    # Facebook watches get a tighter per-sweep action cap (pacing / smaller footprint) —
+    # never more than the account-safety ceiling, whatever the watch configured.
+    steps = watch.max_agent_steps
+    if fb_safety.is_facebook(plan["start_url"]):
+        steps = min(steps, fb_safety.SESSION_ACTION_CAP)
+
+    log.info("Continuous agent sweep %d for %r: style=%s start=%s (max_steps=%d)",
+             sweep_index, watch.name, plan["style"], plan["start_url"], steps)
     try:
         run_agent(
             page,
             instruction   = instruction,
             model         = model,
-            max_steps     = watch.max_agent_steps,
+            max_steps     = steps,
             council_model = cfg.models.effective_council_model,
             vision_model  = cfg.models.vision_model or None,
             ocr_threshold = cfg.models.ocr_threshold,
@@ -719,6 +753,12 @@ def _run_agent_continuous_sweep(
         # Process whatever we harvested before the error rather than losing the sweep.
         log.error("Continuous agent sweep %d for %r errored mid-browse: %s",
                   sweep_index, watch.name, exc)
+
+    # The agent stopped on a Facebook checkpoint mid-browse → alert + back off, and do
+    # NOT process/alert listings from a flagged session.
+    if _checkpoint_hit["reason"]:
+        _handle_fb_checkpoint(watch, cfg, run_ts, db_path, _checkpoint_hit["reason"])
+        return
 
     listings = list(harvested.values())
     log.info("Continuous agent sweep %d for %r: harvested %d unique listing(s) while browsing",
@@ -1308,6 +1348,46 @@ def _alert_new_listings(
             log.warning("Overflow alert send failed for %r (%s) — will retry next sweep", watch.name, exc)
 
     return sent
+
+
+# A Facebook watch that hit a checkpoint is put on a cooldown so we don't keep poking a
+# flagged account every idle cycle. Keyed by watch name; value is the epoch until which
+# the watch's Facebook sweeps are skipped.
+_FB_COOLDOWN: dict[str, float] = {}
+_FB_COOLDOWN_SECONDS = 6 * 3600   # 6 hours — long enough for a soft flag to clear
+
+
+def _fb_on_cooldown(watch_name: str) -> bool:
+    return time.time() < _FB_COOLDOWN.get(watch_name, 0)
+
+
+def _handle_fb_checkpoint(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Optional[Path],
+                          reason: str) -> None:
+    """Facebook threw a security checkpoint / block / CAPTCHA. STOP (never solve it), alert
+    the user ONCE, and put this watch's Facebook sweeps on a cooldown so we back off instead
+    of hammering a flagged account — the behavior that turns a soft flag into a real ban."""
+    from datetime import datetime as _dt
+    _FB_COOLDOWN[watch.name] = time.time() + _FB_COOLDOWN_SECONDS
+    log.warning("Facebook checkpoint on %r (%s) — backing off for %d h",
+                watch.name, reason, _FB_COOLDOWN_SECONDS // 3600)
+
+    last = get_last_run(watch.name, db_path)
+    already = bool(last and last.get("error") and "checkpoint" in (last["error"] or "").lower())
+    _save_error(watch.name, run_ts, f"facebook checkpoint: {reason}", db_path,
+                perception_mode="continuous-agent")
+
+    if not already and (watch.notify.telegram or watch.notify.email):
+        msg = (f"'{watch.name}' stopped: Facebook showed a security check ({reason}). "
+               "I did NOT try to solve it — that protects the account. I'll leave Facebook "
+               "alone for a few hours. If it keeps happening, open Facebook yourself, clear "
+               "the check, and make sure the login is healthy before restarting the watch.")
+        result = ReasoningResult(found=True, summary=msg, confidence="high", link=watch.urls[0])
+        payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=_dt.fromisoformat(run_ts))
+        try:
+            send_notifications(payload, cfg.notifications,
+                               use_telegram=watch.notify.telegram, use_email=watch.notify.email)
+        except Exception as exc:
+            log.warning("Checkpoint notification failed for %r: %s", watch.name, exc)
 
 
 def _handle_login_wall(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Optional[Path]) -> None:

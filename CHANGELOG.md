@@ -11,6 +11,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.27.0-alpha] — 2026-07-11 (Facebook safety harness + a leaner, safer UI)
+
+### Added — Facebook safety harness (before any real account is used)
+Facebook is the one site where an automated browser can get an account restricted, so
+this is the gate that stands in front of it:
+- **Read-only, always.** On Facebook the agent can only browse — scroll, search, sort,
+  filter, open listings to read them. It is now *hard-blocked* from ever messaging a
+  seller, making an offer, buying, liking, commenting, sharing, posting, saving,
+  following, or reporting — the click is refused before it happens, and the AI is told
+  the rule too. (Ordinary navigation like "Sort by" or "See more" is unaffected.)
+- **Stop, don't solve.** If Facebook throws a security checkpoint, CAPTCHA, "confirm your
+  identity", or "unusual activity" block, the watch STOPS immediately, alerts you, and
+  never tries to click through it — trying to solve it is exactly what turns a soft flag
+  into a ban.
+- **Back off after a checkpoint.** A flagged Facebook watch is put on a multi-hour
+  cooldown instead of poking the account every cycle, and its listings from that session
+  are not processed.
+- **Gentler footprint.** Facebook sweeps use a tighter per-session action cap.
+- Credentials remain a hard no everywhere: the app never types a password — you sign in
+  once yourself and it reuses that session.
+
+### Removed — the Console tab
+- Dropped the in-app Console (a shell that ran commands on the machine). It was a
+  developer-only tool your buddy would never need, and running arbitrary commands is a
+  security risk on an end-user's computer. The new **Live** tab already shows activity;
+  use a real terminal if you ever need a shell.
+
+---
+
 ## [0.26.0-alpha] — 2026-07-11 (Live activity feed — see what it's doing, right now)
 
 ### Added — a new "Live" tab

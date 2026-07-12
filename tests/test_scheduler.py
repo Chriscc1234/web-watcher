@@ -750,3 +750,57 @@ def test_unrated_listing_is_not_silently_dropped(monkeypatch):
 def test_min_rating_clamped_to_1_5():
     assert _cont_watch(min_rating=9).min_rating == 5
     assert _cont_watch(min_rating=0).min_rating == 1
+
+
+# ── #78: Facebook safety harness wiring ────────────────────────────────────
+
+def test_fb_checkpoint_on_landing_stops_and_backs_off(db, monkeypatch):
+    """Landing on a Facebook checkpoint must alert + set a cooldown + NOT process listings."""
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    watch = _cont_watch(name="FB Trucks",
+                        urls=["https://www.facebook.com/marketplace/seattle/search?query=truck"],
+                        use_login_profile=True)
+
+    class _Page:
+        url = "https://www.facebook.com/marketplace/seattle/search?query=truck"
+        def goto(self, *a, **k): pass
+        def inner_text(self, *a, **k): return "We've temporarily restricted your account"
+
+    called = {"checkpoint": False, "process": False}
+    monkeypatch.setattr(sch, "maybe_warm_homepage", lambda *a, **k: None)
+    monkeypatch.setattr(sch, "dismiss_popups", lambda *a, **k: 0)
+    monkeypatch.setattr(sch, "is_login_wall", lambda *a, **k: False)
+    monkeypatch.setattr(sch, "_handle_fb_checkpoint",
+                        lambda *a, **k: called.__setitem__("checkpoint", True))
+    monkeypatch.setattr(sch, "_process_sweep_listings",
+                        lambda *a, **k: called.__setitem__("process", True))
+
+    sch._run_agent_continuous_sweep(watch, cfg, db, 0, _Page())
+    assert called["checkpoint"] is True
+    assert called["process"] is False   # a flagged session's listings are NOT processed
+
+
+def test_fb_cooldown_skips_the_sweep(db, monkeypatch):
+    import web_watcher.scheduler as sch
+    import time as _t
+    cfg = AppConfig.model_validate({})
+    watch = _cont_watch(name="FB Boats",
+                        urls=["https://www.facebook.com/marketplace/seattle/search?query=boat"])
+    sch._FB_COOLDOWN[watch.name] = _t.time() + 3600   # on cooldown
+
+    ran = {"agent": False}
+    monkeypatch.setattr(sch, "maybe_warm_homepage",
+                        lambda *a, **k: ran.__setitem__("agent", True))
+    try:
+        sch._run_agent_continuous_sweep(watch, cfg, db, 0, object())
+    finally:
+        sch._FB_COOLDOWN.pop(watch.name, None)
+    assert ran["agent"] is False   # skipped before touching the browser
+
+
+def test_non_facebook_watch_ignores_cooldown_map(db, monkeypatch):
+    """A craigslist watch is never affected by the FB cooldown machinery."""
+    import web_watcher.scheduler as sch
+    from web_watcher import fb_safety
+    assert not fb_safety.is_facebook("https://seattle.craigslist.org/search/cta")

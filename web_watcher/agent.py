@@ -45,6 +45,7 @@ from typing import Any, Callable, Optional
 import httpx
 from playwright.sync_api import Page, TimeoutError as PWTimeoutError
 
+from web_watcher import fb_safety
 from web_watcher.monitor import dismiss_popups, has_blocking_overlay
 
 log = logging.getLogger(__name__)
@@ -394,6 +395,24 @@ def run_agent(
         elif action.action == "select":
             _detail = f" el={action.element_index} option={(action.text or '')[:30]!r}"
         log.info("Agent action: %s%s  (thought: %s)", action.action, _detail, action.thought[:80])
+
+        # ── Facebook read-only guard ──────────────────────────────────────────
+        # On Facebook the agent may only browse — never message/offer/buy/like/comment/
+        # post/save/follow. Reject a click on any such control BEFORE it happens; this is
+        # the hard rule that keeps an account from being flagged for automated activity.
+        if action.action == "click" and action.element_index is not None and fb_safety.is_facebook(page.url):
+            _tgt = next((e for e in elements if e["index"] == action.element_index), None)
+            if _tgt and fb_safety.is_blocked_action(_tgt.get("label", "")):
+                log.warning("Agent tried a blocked Facebook action %r — refusing (read-only)",
+                            _tgt.get("label", "")[:40])
+                action.outcome = (
+                    f"REFUSED: '{_tgt.get('label','')[:40]}' takes a social/transactional action "
+                    "on Facebook. This watch is READ-ONLY — only scroll, search, sort, filter, "
+                    "and open listings to read them. Never message, offer, buy, like, comment, "
+                    "post, save, or follow. Choose a browsing action instead."
+                )
+                _human_pause(*ACTION_PAUSE)
+                continue
 
         # ── Validate element_index for click / type / select ─────────────────
         # Reject the action immediately rather than failing silently deeper in

@@ -819,6 +819,15 @@ def human_scroll(page: Page, passes: int = 4) -> None:
             for _ in range(random.randint(3, 6)):
                 page.mouse.wheel(0, random.randint(280, 520))
                 time.sleep(max(0.02, random.gauss(0.12, 0.04)))
+            # Occasionally scroll BACK UP a little, like a person re-reading a card they
+            # scrolled past, then continue down. A feed that only ever scrolls one
+            # direction at constant speed is a bot tell; this breaks that pattern (and it's
+            # what the user sees on-screen — the agent no longer only ever goes down).
+            if i > 0 and random.random() < 0.25:
+                for _ in range(random.randint(1, 3)):
+                    page.mouse.wheel(0, -random.randint(120, 300))
+                    time.sleep(max(0.02, random.gauss(0.14, 0.05)))
+                time.sleep(max(0.15, random.gauss(0.5, 0.2)))   # dwell, as if reading
             # Settle so new cards load before we measure / the next pass.
             time.sleep(max(0.3, random.gauss(0.9, 0.25)))
             h = page.evaluate(height_js) or 0

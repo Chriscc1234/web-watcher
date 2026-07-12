@@ -333,11 +333,15 @@ class WatchScheduler:
             self._add_job(watch)
 
     def _add_job(self, watch: Watch) -> None:
-        trigger = (
-            IntervalTrigger(minutes=watch.interval_minutes)
-            if watch.interval_minutes
-            else CronTrigger.from_crontab(watch.cron_expression)
-        )
+        # Jitter interval runs so a watch doesn't fire on a perfectly regular clock (a bot
+        # tell, and it thunders all watches at once). Up to ±20% of the interval, capped at
+        # 5 min so long intervals don't drift wildly. Cron watches are left exact (the user
+        # picked a specific time).
+        if watch.interval_minutes:
+            jitter = min(300, int(watch.interval_minutes * 60 * 0.2))
+            trigger = IntervalTrigger(minutes=watch.interval_minutes, jitter=jitter)
+        else:
+            trigger = CronTrigger.from_crontab(watch.cron_expression)
         self._apscheduler.add_job(
             _execute_watch,
             trigger=trigger,

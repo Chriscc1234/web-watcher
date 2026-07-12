@@ -804,3 +804,15 @@ def test_non_facebook_watch_ignores_cooldown_map(db, monkeypatch):
     import web_watcher.scheduler as sch
     from web_watcher import fb_safety
     assert not fb_safety.is_facebook("https://seattle.craigslist.org/search/cta")
+
+
+# ── #94/#86: interval jitter + visible-cursor default ──────────────────────
+
+def test_interval_jobs_get_jitter(config_file, db):
+    """A scheduled watch fires on a jittered interval (anti-pattern), not a perfect clock."""
+    s = WatchScheduler(config_path=config_file, db_path=db)
+    s.start()
+    job = next(j for j in s._apscheduler.get_jobs() if j.id == "test-watch")
+    # WATCH_DEF is interval_minutes=5 → jitter = min(300, 5*60*0.2) = 60s
+    assert getattr(job.trigger, "jitter", None) == 60
+    s.stop()

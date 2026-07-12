@@ -102,9 +102,12 @@ class BrowserConfig(BaseModel):
     headless: bool = False
     stealth:  bool = True  # human-like mouse/timing behaviour (disable for simple/trusted sites)
     # Draw a visible fake cursor in the agent's browser that follows its synthetic mouse, so
-    # you can watch where it's clicking. Only visible with headless=False. Off by default: it
-    # adds a DOM element a site could see, so it slightly reduces stealth when on.
-    show_agent_cursor: bool = False
+    # you can watch where it's clicking (CDP moves the browser's mouse without moving a
+    # visible OS cursor — this dot is what makes the motion visible). Only shows with
+    # headless=False. ON by default now the browser is visible by default; the drawn dot is
+    # a same-origin overlay a site could in principle detect, so turn it off in Settings if
+    # you'd rather maximize stealth on a touchy site.
+    show_agent_cursor: bool = True
     # Persistent profile directory for login-required sites (e.g. Facebook). When a
     # watch sets use_login_profile=True the browser launches with this on-disk profile
     # so a one-time manual login is reused. None => default location (data/profiles/default).
@@ -289,6 +292,15 @@ def load(path: Path | str | None = None) -> AppConfig:
         config.applied_migrations.append("show_browser_default")
         if config.browser.headless:
             config.browser.headless = False
+        assigned = True
+
+    # Migration: turn the visible agent cursor ON once, so existing installs actually SEE
+    # the agent's mouse now that the browser is visible by default. One-time — a later
+    # off toggle sticks.
+    if "show_cursor_default" not in config.applied_migrations:
+        config.applied_migrations.append("show_cursor_default")
+        if not config.browser.show_agent_cursor:
+            config.browser.show_agent_cursor = True
         assigned = True
 
     if assigned and p.exists():

@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.28.0-alpha] — 2026-07-11 (See the agent work — visible cursor, natural scrolling)
+
+### Changed — you can now see where the agent's mouse is
+- The agent moves its mouse at the browser-protocol level, which doesn't move a visible
+  cursor — so it looked like clicks "jumped around." A soft red dot now follows the
+  agent's mouse (and pulses when it clicks), so you can actually watch what it's doing.
+  On by default now the browser is visible; existing installs get it turned on once
+  (toggle it off in Settings if you'd rather maximize stealth).
+
+### Changed — more human scrolling
+- The agent used to only ever scroll down at a steady pace — a pattern sites can watch
+  for. It now occasionally scrolls back up a little (like re-reading a card it passed)
+  before continuing, with natural pauses. Better camouflage, and it looks more lifelike
+  on-screen.
+
+### Changed — scheduled watches no longer fire on a perfect clock
+- Interval watches now run with a little random jitter (up to ±20%, capped at 5 min)
+  instead of exactly on the dot — less bot-like, and it stops every watch from thundering
+  at the same instant.
+
+---
+
 ## [0.27.0-alpha] — 2026-07-11 (Facebook safety harness + a leaner, safer UI)
 
 ### Added — Facebook safety harness (before any real account is used)

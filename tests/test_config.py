@@ -154,3 +154,30 @@ def test_save_then_load(tmp_path):
     save(original, cfg_path)
     reloaded = load(cfg_path)
     assert original.model_dump() == reloaded.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# One-time migrations (existing installs get changed defaults exactly once)
+# ---------------------------------------------------------------------------
+
+def test_migrations_flip_browser_and_cursor_once(tmp_path):
+    """An existing config with the OLD defaults (hidden browser, no cursor) is upgraded
+    once on load; a later user opt-out sticks."""
+    p = tmp_path / "config.yaml"
+    # Simulate a pre-0.24 install: browser hidden, cursor off, no migration markers.
+    p.write_text(yaml.dump({
+        "browser": {"headless": True, "show_agent_cursor": False},
+        "watches": [MINIMAL_WATCH],
+    }), encoding="utf-8")
+
+    cfg = load(p)
+    assert cfg.browser.headless is False           # show-browser migration applied
+    assert cfg.browser.show_agent_cursor is True   # cursor migration applied
+    assert "show_browser_default" in cfg.applied_migrations
+    assert "show_cursor_default" in cfg.applied_migrations
+
+    # User turns the browser back to hidden; reload must NOT re-flip it (migration is once).
+    cfg.browser.headless = True
+    save(cfg, p)
+    cfg2 = load(p)
+    assert cfg2.browser.headless is True

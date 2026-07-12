@@ -53,6 +53,8 @@ class Listing:
     details: str = ""     # ad body / attributes, captured by visiting the listing page
     image:   str = ""     # thumbnail image URL from the card (best-effort), for the Results view
     posted_at: str = ""   # when the listing was POSTED (from the ad page's <time>), if read
+    rating:  int | None = None   # 1-5 graded match, set by the rating judge
+    judge_reason: str = ""       # the judge's / prefilter's one-line verdict
 
 
 # ---------------------------------------------------------------------------

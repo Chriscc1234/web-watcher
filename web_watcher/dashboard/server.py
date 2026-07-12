@@ -457,6 +457,16 @@ RULES:
     maxPrice=/minPrice=.
 - Set judgment_prompt to a string for research/comparison/filtering tasks (and for \
   any logged-out Facebook feed); null for simple alert watches.
+- The AI rates each find 1-5 (1 no match, 3 acceptable, 4 good match, 5 great deal) and \
+  only alerts at or above "min_rating" (default 3). Map the user's words to the number: \
+  "only great deals" / "only the best" → min_rating: 5; "good matches only" / "only \
+  strong ones" / "too many notifications" → 4; "show me everything" / "I'm missing some" \
+  / "more results" → 2. It only applies when a judgment_prompt is set, so add one if they \
+  ask to filter by quality.
+- "keywords" (must contain at least one) and "antikeywords" (exclude if any present) are \
+  cheap word filters. When the user says "ignore anything that mentions parts/repair/ \
+  salvage/for parts" → antikeywords: ["parts","repair","salvage"]. "must say 4x4" → \
+  keywords: ["4x4"]. Use plain words, not phrases.
 - Always include "action". If you are unsure whether a watch exists, prefer \
   "create" with a clearly new name.
 
@@ -1789,8 +1799,12 @@ Output STRICT JSON, no prose, no markdown:
   "watches": [ one full watch config PER DISTINCT ITEM the user asked to watch — usually
                exactly ONE; two different items → a list of TWO complete configs. Each
                INCLUDES "name" (for CREATE a NEW name not equal to any existing watch; for
-               UPDATE the EXACT existing name). COUNT the items before you answer: if the
-               user named two things, a one-element list is WRONG. ] | null,
+               UPDATE the EXACT existing name). Optional per-watch fields when the user
+               asked for them: "min_rating" (1-5 alert threshold — set it when they talk
+               about how many / how good the alerts should be), "keywords" (must-include
+               words), "antikeywords" (exclude words). On an UPDATE, INCLUDE the field you
+               are changing even if it's the only change. COUNT the items before you
+               answer: if the user named two things, a one-element list is WRONG. ] | null,
   "watch_actions": [ {"action": "start|stop|enable|disable|delete", "name": "..."} ] | null,
   "listing_query": { ... } | null   — ONLY for intent "lookup" (showing found listings).
                                       NEVER put a watch config here.

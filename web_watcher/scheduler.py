@@ -867,7 +867,9 @@ def _persist_listings(watch, listings: list, matched_keys: set, run_ts: str, db_
                            ts=run_ts, db_path=db_path)
             record_observation(wid, watch.name, l.key, run_ts,
                                matched=(l.key in matched_keys),
-                               judge_reason=reason_by_key.get(l.key), db_path=db_path)
+                               rating=getattr(l, "rating", None),
+                               judge_reason=reason_by_key.get(l.key) or getattr(l, "judge_reason", None),
+                               db_path=db_path)
         except Exception as exc:
             log.debug("Persist listing %s failed: %s", l.key, exc)
 
@@ -879,10 +881,13 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
     looking broken (hundreds found, nothing shown) and it showing real matches from the start,
     just without a wall of notifications."""
     to_judge = batch[:_BASELINE_JUDGE_CAP]
-    matched = to_judge
-    if watch.judgment_prompt and to_judge:
+    # Keyword prefilter first (free) — even on the baseline, so parts/salvage never reach
+    # the LLM and are recorded as keyword-excluded non-matches.
+    kw_kept, kw_dropped = _keyword_prefilter(to_judge, watch)
+    matched = kw_kept
+    if watch.judgment_prompt and kw_kept:
         # Card-level judge (no deep-read) — one LLM call for the slice; keeps priming cheap.
-        matched = _filter_listings_by_judgment(to_judge, watch, cfg)
+        matched = _filter_listings_by_judgment(kw_kept, watch, cfg)
     matched_keys = {l.key for l in matched}
     if to_judge:
         _persist_listings(watch, to_judge, matched_keys, run_ts, db_path)
@@ -970,18 +975,27 @@ def _process_sweep_listings(
         log.info("Continuous watch %r: %d listing(s) are reposts of already-seen items "
                  "(linked + noted, not re-alerted)", watch.name, len(reposts))
 
+    # Cheap keyword prefilter FIRST (free; before any deep-read or LLM): drop listings
+    # with an antikeyword / missing a required keyword. Dropped ones are still recorded
+    # (as non-matches, with the reason) so they show in the log/Results, just not alerted.
+    kw_dropped = []
+    if fresh:
+        fresh, kw_dropped = _keyword_prefilter(fresh, watch)
+
     # Deep-read the FRESH listings' ad pages so the judge can match on what's in the ad
     # (transmission, 4x4, mileage, condition), not just the card title. Only the agent
     # sweep enables this (fetch_bodies); the scraper sweep stays cheap. Capped per sweep.
     if fetch_bodies and page is not None and fresh:
         _capture_listing_bodies(page, fresh[:_MAX_BODY_FETCH], stop_event)
 
-    # Optional judgment filter: when a judgment_prompt is set, keep only listings
-    # that match the criteria. On any failure, fall back to alerting all fresh ones.
+    # Rating judge: when a judgment_prompt is set, keep only listings rated >= min_rating.
+    # On any failure, fall back to alerting all fresh ones.
     matched = fresh
     if fresh and watch.judgment_prompt:
         matched = _filter_listings_by_judgment(fresh, watch, cfg)
     matched_keys = {l.key for l in matched}
+    # Persist keyword-dropped listings too (non-match), so they're recorded, not lost.
+    fresh = fresh + kw_dropped
 
     # Persist fresh (with verdict + attributes).
     _persist_listings(watch, fresh, matched_keys, run_ts, db_path)
@@ -1092,46 +1106,84 @@ def _cross_watch_match(
             log.warning("Cross-watch match into %r failed: %s", other.name, exc)
 
 
+# The 1-5 rating rubric the graded judge scores against — lifted from
+# ai-marketplace-monitor's design (their best idea). A listing is a "match" (alertable)
+# when its rating >= the watch's min_rating (default 3).
+_RATING_RUBRIC = (
+    "Rate how well each listing matches the user's criteria on a 1-5 scale:\n"
+    "  1 = No match: wrong item/category/brand, or looks like spam/a scam.\n"
+    "  2 = Weak: missing essential info (condition, model, key spec) or barely relevant.\n"
+    "  3 = Acceptable: matches the basics but with some mismatch or missing detail.\n"
+    "  4 = Good match: clearly meets the criteria with relevant details.\n"
+    "  5 = Great deal: fully matches with excellent condition and/or price."
+)
+
+
+def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
+    """Cheap, deterministic keyword gate run BEFORE the LLM judge (free; cuts GPU load and
+    false alerts). Returns (kept, dropped). A listing is dropped if it contains ANY
+    antikeyword, or (when keywords are set) contains NONE of them. Matches case-insensitively
+    over the title + ad body. Each dropped listing gets .judge_reason set for the log/UI."""
+    kw   = [k.lower() for k in (watch.keywords or []) if k.strip()]
+    anti = [k.lower() for k in (watch.antikeywords or []) if k.strip()]
+    if not kw and not anti:
+        return listings, []
+    kept, dropped = [], []
+    for l in listings:
+        hay = f"{l.title or ''} {getattr(l, 'details', '') or ''}".lower()
+        hit_anti = next((a for a in anti if a in hay), None)
+        if hit_anti:
+            l.judge_reason = f"excluded by keyword {hit_anti!r}"
+            dropped.append(l); continue
+        if kw and not any(k in hay for k in kw):
+            l.judge_reason = "no required keyword present"
+            dropped.append(l); continue
+        kept.append(l)
+    if dropped:
+        log.info("Keyword prefilter dropped %d/%d listing(s) for %r",
+                 len(dropped), len(listings), watch.name)
+    return kept, dropped
+
+
 def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfig,
                                  fail_closed: bool = False) -> list:
     """
-    Batch-judge new listings against the watch's judgment criteria in a single LLM
-    call. Returns the matching subset.
+    Batch-judge new listings against the watch's criteria in ONE LLM call, RATING each
+    1-5 (see _RATING_RUBRIC). A listing is kept (alertable) when its rating >=
+    watch.min_rating. Each judged listing gets `.rating` and `.judge_reason` attached so
+    the persist/alert/Results path can show stars + the verdict. Returns the kept subset.
 
     On error the behavior depends on fail_closed:
       • fail_closed=False (default, a watch's OWN sweep) → return ALL new listings: for the
         watch the user explicitly created, over-alerting beats silently dropping a real match.
       • fail_closed=True (cross-watch matching) → return [] : injecting un-judged listings into
-        ANOTHER watch is how off-topic items leak in (e.g. a sports car landing in the trucks
-        results). When we can't confidently judge, don't cross-apply at all.
+        ANOTHER watch is how off-topic items leak in. When we can't confidently judge, skip.
     """
     import httpx
     OLLAMA_URL = "http://localhost:11434"
+    threshold = getattr(watch, "min_rating", 3)
 
     def _entry(i: int, l) -> str:
         line = f"{i}. {l.title} {l.price}".strip()
         if l.details:
-            # Give the judge the ad body/attributes (transmission, 4x4, miles…) so it
-            # can match on what's IN the ad, not just the title. Trimmed to stay cheap.
             line += f"\n   AD DETAILS: {l.details[:600]}"
         return line
 
     numbered = "\n".join(_entry(i, l) for i, l in enumerate(new_listings))
     system_prompt = (
-        "You filter marketplace listings against a user's criteria. Each entry has a "
+        "You rate marketplace listings against a user's criteria. Each entry has a "
         "title/price and, when available, an 'AD DETAILS' line with the listing's "
-        "description and attributes — USE those details (e.g. transmission, drivetrain, "
-        "mileage, condition) when judging. "
-        "Given the numbered list, return ONLY a JSON object: "
-        '{"matches": [<indices that satisfy the criteria>], '
-        '"reason": "<one short sentence on why the others were excluded>"}. '
-        "Include an index only if that listing clearly matches. No other text."
+        "description and attributes — USE those details (transmission, drivetrain, "
+        "mileage, condition) when rating.\n" + _RATING_RUBRIC + "\n"
+        "Return ONLY a JSON object of the form "
+        '{"ratings": [{"i": <index>, "r": <1-5>, "why": "<≤10 words>"}, ...]}. '
+        "Include EVERY listing exactly once. No other text."
     )
     user_msg = (
         f"Criteria: {watch.instruction}\n"
         f"{watch.judgment_prompt or ''}\n\n"
         f"Listings:\n{numbered}\n\n"
-        "Which indices match?"
+        "Rate every listing."
     )
     try:
         payload = {
@@ -1147,37 +1199,36 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             r.raise_for_status()
         data = json.loads(r.json()["message"]["content"])
-        idxs = data.get("matches", [])
-        # Coerce numeric-ish values to int and de-duplicate while preserving order, so
-        # a model returning [2, 2, 3] or ["2"] doesn't alert the same listing twice or
-        # drop a valid match.
-        clean: list[int] = []
-        for i in idxs:
+        by_idx: dict[int, tuple[int, str]] = {}
+        for item in (data.get("ratings") or []):
             try:
-                n = int(i)
+                n = int(item.get("i"))
+                r_ = max(1, min(5, int(item.get("r"))))
             except (TypeError, ValueError):
                 continue
-            if 0 <= n < len(new_listings) and n not in clean:
-                clean.append(n)
-        keep = [new_listings[n] for n in clean]
-        log.info("Judgment filter kept %d/%d new listings for %r", len(keep), len(new_listings), watch.name)
-        # Visibility: log what got rejected (and the judge's stated reason) so a
-        # surprising "kept 0/N" can be checked — is the feed genuinely off-target, or
-        # is the judge too strict? Logged at INFO so it shows without debug logging.
-        rejected = [l for i, l in enumerate(new_listings) if i not in clean]
-        if rejected:
-            reason = (data.get("reason") or "").strip()
-            log.info("Judgment filter rejected %d listing(s) for %r%s",
-                     len(rejected), watch.name, f" — judge: {reason}" if reason else "")
-            for l in rejected:
-                log.info("   rejected: %s %s", (l.title or "(no title)")[:80], l.price)
+            if 0 <= n < len(new_listings):
+                by_idx[n] = (r_, str(item.get("why", "")).strip())
+
+        keep = []
+        for i, l in enumerate(new_listings):
+            rating, why = by_idx.get(i, (threshold, ""))   # unrated → assume it clears (never drop silently)
+            l.rating = rating
+            l.judge_reason = why or getattr(l, "judge_reason", "")
+            if rating >= threshold:
+                keep.append(l)
+        log.info("Rating judge kept %d/%d (>=%d) for %r",
+                 len(keep), len(new_listings), threshold, watch.name)
+        for l in new_listings:
+            if getattr(l, "rating", threshold) < threshold:
+                log.info("   rated %d: %s %s — %s", l.rating,
+                         (l.title or "(no title)")[:70], l.price, getattr(l, "judge_reason", ""))
         return keep
     except Exception as exc:
         if fail_closed:
-            log.warning("Judgment filter failed for %r (%s) — cross-watch SKIPPED (fail-closed)",
+            log.warning("Rating judge failed for %r (%s) — cross-watch SKIPPED (fail-closed)",
                         watch.name, exc)
             return []
-        log.warning("Judgment filter failed for %r (%s) — alerting all new listings", watch.name, exc)
+        log.warning("Rating judge failed for %r (%s) — alerting all new listings", watch.name, exc)
         return new_listings
 
 
@@ -1209,14 +1260,24 @@ def _alert_new_listings(
         return 0
 
     cap   = max(1, watch.continuous_max_alerts)
+    # Best-rated finds first, so the per-sweep cap never truncates a 5-star deal in favor
+    # of a barely-passing 3. Stable sort keeps discovery order within a rating tier.
+    listings = sorted(listings, key=lambda l: getattr(l, "rating", 0) or 0, reverse=True)
     head  = listings[:cap]
     extra = listings[cap:]
     sent  = 0
 
+    _stars = lambda r: ("★" * r + "☆" * (5 - r)) if r else ""
+
     for l in head:
         title = _html.escape(l.title or "(listing)")
         price = _html.escape(l.price or "")
-        summary = f"New match: {title}" + (f" — {price}" if price else "")
+        rating = getattr(l, "rating", None)
+        why    = _html.escape(getattr(l, "judge_reason", "") or "")
+        star_prefix = f"{_stars(rating)} " if rating else ""
+        summary = f"{star_prefix}New match: {title}" + (f" — {price}" if price else "")
+        if why:
+            summary += f"\n{why}"      # the judge's one-line verdict, in the alert
         result = ReasoningResult(found=True, summary=summary, confidence="high", link=l.url)
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=ts)
         try:

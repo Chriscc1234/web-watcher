@@ -147,6 +147,23 @@ class Watch(BaseModel):
     max_agent_steps: int  = 15     # safety cap on autonomous actions
     judgment_prompt: str | None = None  # optional post-browse reasoning step
 
+    # ── Match quality (rating 1-5, inspired by ai-marketplace-monitor) ─────────
+    # The judge rates each listing 1-5 against the criteria (1=no match / suspicious,
+    # 2=missing essential info, 3=acceptable, 4=good match, 5=great deal). A listing is
+    # ALERTED only if its rating >= min_rating. This is the user's "alert volume knob":
+    # raise it to 4 to hear only about strong finds, drop to 2 to catch more. Only takes
+    # effect when a judgment_prompt is set (the graded judge runs then).
+    min_rating: int = 3
+
+    # ── Cheap keyword pre-filter (runs BEFORE the LLM judge) ───────────────────
+    # keywords: if set, the listing's title/details must contain AT LEAST ONE (any that
+    # matches passes). antikeywords: if the title/details contain ANY of these, the
+    # listing is dropped outright ("parts", "repair", "salvage", "wanted"). Both are
+    # plain case-insensitive substring lists — free, deterministic, and they cut the LLM
+    # judge's load + false alerts. The chat can set them ("ignore anything that says parts").
+    keywords:     list[str] = Field(default_factory=list)
+    antikeywords: list[str] = Field(default_factory=list)
+
     # ── Execution mode ────────────────────────────────────────────────────────
     # "schedule"   — run every interval_minutes / cron_expression (the default).
     # "continuous" — run a non-stop sweep loop (scroll → collect → dedup → alert on
@@ -168,6 +185,13 @@ class Watch(BaseModel):
         if v not in VALID_PERCEPTION:
             raise ValueError(f"perception must be one of {VALID_PERCEPTION}")
         return v
+
+    @field_validator("min_rating")
+    @classmethod
+    def min_rating_in_range(cls, v: int) -> int:
+        # Clamp rather than reject — a chat suggestion with an out-of-range value should
+        # still create a working watch, not 400.
+        return max(1, min(5, int(v)))
 
     @field_validator("mode")
     @classmethod

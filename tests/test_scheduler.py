@@ -650,3 +650,103 @@ def test_update_blind_streak_escalates_after_two_empty():
     s = 1
     s, esc = _update_blind_streak(-1, s); assert s == 1 and not esc
     assert _SCRAPER_BLIND_THRESHOLD == 2
+
+
+# ── #91/#92: keyword prefilter + 1-5 rating judge ──────────────────────────
+
+from web_watcher.scheduler import _keyword_prefilter, _filter_listings_by_judgment
+
+
+def _kw_listing(n, title, details=""):
+    l = Listing(key=f"k:{n}", url=f"https://x/{n}", title=title, price="$100")
+    l.details = details
+    return l
+
+
+def test_antikeyword_drops_listing():
+    w = _cont_watch(antikeywords=["parts", "salvage"])
+    kept, dropped = _keyword_prefilter(
+        [_kw_listing(1, "Ford F150 truck"),
+         _kw_listing(2, "F150 for parts only"),
+         _kw_listing(3, "clean truck", details="salvage title")], w)
+    assert [l.key for l in kept] == ["k:1"]
+    assert {l.key for l in dropped} == {"k:2", "k:3"}
+    assert "parts" in dropped[0].judge_reason
+
+
+def test_required_keyword_must_be_present():
+    w = _cont_watch(keywords=["4x4", "4wd"])
+    kept, dropped = _keyword_prefilter(
+        [_kw_listing(1, "F150 4x4 truck"),
+         _kw_listing(2, "F150 2wd truck"),
+         _kw_listing(3, "truck", details="has 4WD drivetrain")], w)
+    assert {l.key for l in kept} == {"k:1", "k:3"}    # title OR details
+    assert [l.key for l in dropped] == ["k:2"]
+
+
+def test_no_keywords_configured_is_passthrough():
+    w = _cont_watch()
+    listings = [_kw_listing(1, "anything")]
+    kept, dropped = _keyword_prefilter(listings, w)
+    assert kept == listings and dropped == []
+
+
+def _rating_reply(ratings):
+    """Mock Ollama returning a ratings array."""
+    import json as _json
+    payload = {"message": {"content": _json.dumps({"ratings": ratings})}}
+
+    class _R:
+        def raise_for_status(self): pass
+        def json(self): return payload
+    class _C:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, *a, **k): return _R()
+    return _C
+
+
+def test_rating_judge_keeps_at_or_above_threshold(monkeypatch):
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="diesel only", min_rating=4)
+    listings = [_kw_listing(i, f"item {i}") for i in range(4)]
+    monkeypatch.setattr("httpx.Client", _rating_reply([
+        {"i": 0, "r": 5, "why": "great deal"},
+        {"i": 1, "r": 4, "why": "good"},
+        {"i": 2, "r": 3, "why": "meh"},
+        {"i": 3, "r": 1, "why": "wrong item"},
+    ]))
+    kept = _filter_listings_by_judgment(listings, w, cfg)
+    assert {l.key for l in kept} == {"k:0", "k:1"}     # >= 4
+    assert listings[0].rating == 5 and listings[0].judge_reason == "great deal"
+    assert listings[3].rating == 1                      # ratings attached even when dropped
+
+
+def test_rating_threshold_lowered_lets_more_through(monkeypatch):
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="x", min_rating=2)
+    listings = [_kw_listing(i, f"item {i}") for i in range(3)]
+    monkeypatch.setattr("httpx.Client", _rating_reply([
+        {"i": 0, "r": 2, "why": ""}, {"i": 1, "r": 3, "why": ""}, {"i": 2, "r": 1, "why": ""},
+    ]))
+    kept = _filter_listings_by_judgment(listings, w, cfg)
+    assert {l.key for l in kept} == {"k:0", "k:1"}     # 2 and 3 pass, 1 drops
+
+
+def test_unrated_listing_is_not_silently_dropped(monkeypatch):
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="x", min_rating=3)
+    listings = [_kw_listing(i, f"item {i}") for i in range(3)]
+    # Model only rated index 0 — the other two must default to passing (threshold), never dropped blind.
+    monkeypatch.setattr("httpx.Client", _rating_reply([{"i": 0, "r": 5, "why": "top"}]))
+    kept = _filter_listings_by_judgment(listings, w, cfg)
+    assert {l.key for l in kept} == {"k:0", "k:1", "k:2"}
+
+
+def test_min_rating_clamped_to_1_5():
+    assert _cont_watch(min_rating=9).min_rating == 5
+    assert _cont_watch(min_rating=0).min_rating == 1

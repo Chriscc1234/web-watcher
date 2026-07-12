@@ -11,6 +11,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.25.0-alpha] — 2026-07-11 (Star ratings + keyword filters — a volume knob for alerts)
+
+Inspired by studying the (cloud-based, Facebook-only) ai-marketplace-monitor project — we
+adapted its best ideas to our offline, multi-site design.
+
+### Added — the AI rates every find 1 to 5
+- Instead of a plain match/no-match, the AI now grades each listing on a 1-5 scale
+  (1 = no match / spam, 2 = weak, 3 = acceptable, 4 = good match, 5 = great deal) and
+  only alerts you at or above the watch's threshold. **This is your alert volume knob:**
+  set it to 5 to hear only about great deals, drop to 2 to catch more. Default is 3.
+- Set it in the watch editor ("Alert when the AI rates a find at least…") or just tell
+  The Watcher: "only alert me on great deals" raises the bar; "I'm missing some, show me
+  more" lowers it.
+- Results now show a ★★★★☆ badge and the AI's one-line reason on each listing, a new
+  "Best rated" sort, and every notification leads with the stars + the verdict
+  ("★★★★★ New match: 2015 Ram 2500 Cummins — great price, clean title"). Best-rated finds
+  are alerted first so the per-sweep cap never buries a 5-star deal.
+
+### Added — cheap keyword include/exclude filters
+- Each watch can require words ("must include: 4x4, diesel") and exclude words
+  ("exclude: parts, repair, salvage, wanted"). These run BEFORE the AI — free, instant,
+  and they cut both false alerts and AI workload. Tell The Watcher "ignore anything that
+  says parts" and it sets them for you, or edit them directly under Advanced.
+
+### Notes
+- The rating only kicks in when a watch has a judgment filter (research/quality watches);
+  simple alert-on-anything watches are unaffected.
+- Studied their Facebook approach: they build marketplace URLs directly and parse the
+  results grid (no scrolling, no human-like motion, no block detection) — our agent path
+  is more resilient. Their Facebook safety model (persistent login, manual CAPTCHA solve,
+  conservative pacing) matches our planned #78 harness, which stays the gate before any
+  real Facebook account is used.
+
+---
+
 ## [0.24.0-alpha] — 2026-07-11 (Locations everywhere + the agent works the controls)
 
 ### Fixed — locations on EVERY site, not just craigslist

@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS observations (
     first_seen   TEXT,
     last_seen    TEXT,
     matched      INTEGER,
+    rating       INTEGER,
     judge_reason TEXT,
     UNIQUE(watch_id, listing_key)
 )
@@ -208,6 +209,10 @@ def init_db(db_path: Path | None = None) -> None:
         if "posted_at" not in cols:
             conn.execute("ALTER TABLE listings ADD COLUMN posted_at TEXT")
         conn.execute(_CREATE_LISTINGS_FP_INDEX)
+        # Migration: add `rating` (1-5 graded match) to a pre-existing observations table.
+        obs_cols = [r["name"] for r in conn.execute("PRAGMA table_info(observations)").fetchall()]
+        if "rating" not in obs_cols:
+            conn.execute("ALTER TABLE observations ADD COLUMN rating INTEGER")
 
 
 def save_run(record: RunRecord, db_path: Path | None = None) -> int:
@@ -403,26 +408,29 @@ def record_observation(
     ts:           str,
     matched:      bool,
     judge_reason: str | None = None,
+    rating:       int | None = None,
     db_path:      Path | None = None,
 ) -> None:
     """
     Record (or refresh) that a watch surfaced a listing: first/last seen, the match
-    verdict, and the judge's reason. Keyed by stable watch_id so renames don't orphan it.
+    verdict, the 1-5 rating, and the judge's reason. Keyed by stable watch_id so renames
+    don't orphan it.
     """
     path = _resolve(db_path)
     with _connect(path) as conn:
         conn.execute(
             """
             INSERT INTO observations
-                (watch_id, watch_name, listing_key, first_seen, last_seen, matched, judge_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (watch_id, watch_name, listing_key, first_seen, last_seen, matched, rating, judge_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(watch_id, listing_key) DO UPDATE SET
                 last_seen    = excluded.last_seen,
                 watch_name   = excluded.watch_name,
                 matched      = excluded.matched,
+                rating       = COALESCE(excluded.rating, observations.rating),
                 judge_reason = COALESCE(excluded.judge_reason, observations.judge_reason)
             """,
-            (watch_id, watch_name, listing_key, ts, ts, int(matched), judge_reason),
+            (watch_id, watch_name, listing_key, ts, ts, int(matched), rating, judge_reason),
         )
 
 
@@ -474,7 +482,7 @@ def query_listings(
              "ORDER BY d.last_seen DESC, d.first_seen DESC LIMIT 1)")
     with _connect(path) as conn:
         if watch_id:
-            sql = (f"SELECT l.*, o.matched, o.judge_reason, o.last_seen AS observed_at, "
+            sql = (f"SELECT l.*, o.matched, o.rating, o.judge_reason, o.last_seen AS observed_at, "
                    f"{dupc} AS dup_count, {whoq} AS watches, {fresh} AS best_url "
                    "FROM observations o JOIN listings l ON l.listing_key = o.listing_key "
                    "WHERE o.watch_id = ?")

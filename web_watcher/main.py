@@ -54,6 +54,10 @@ def _setup_logging() -> None:
     fh.setFormatter(logging.Formatter(_LOG_FMT))
     root.addHandler(fh)
 
+    # In-memory ring buffer that backs the dashboard's live Activity tab.
+    from web_watcher import logbuffer
+    logbuffer.install()
+
     # Quiet noisy third-party loggers. httpx logs every request at INFO, which
     # floods the log with the dashboard's 3s Ollama health-check (GET /api/tags)
     # and buries actual agent activity. WARNING keeps real failures visible.

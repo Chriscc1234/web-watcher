@@ -252,6 +252,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 <nav>
   <button class="active" onclick="showTab('watches',this)">Watches</button>
   <button onclick="showTab('results',this)">Results</button>
+  <button onclick="showTab('live',this)">Live</button>
   <button onclick="showTab('history',this)">Activity</button>
   <button onclick="showTab('services',this)">Settings</button>
   <button onclick="showTab('console',this)">Console</button>
@@ -425,6 +426,21 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 </div>
 
 <!-- ================================================================ CONSOLE -->
+<div id="tab-live" class="tab-panel">
+  <section>
+    <h2>Live activity</h2>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">A real-time feed of what The Watcher is doing right now — searches, AI ratings, alerts, and anything that went wrong.</div>
+    <div id="live-chips" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <input id="live-filter" type="text" placeholder="Filter text…" oninput="renderLive()"
+             style="flex:1;font-size:13px;padding:5px 8px">
+      <label style="font-size:12px;color:var(--dim);white-space:nowrap"><input type="checkbox" id="live-autoscroll" checked> Auto-scroll</label>
+      <button onclick="clearLive()" style="font-size:12px">Clear</button>
+    </div>
+    <div id="live-feed" style="background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:6px;height:60vh;overflow:auto;font-size:13px"></div>
+  </section>
+</div>
+
 <div id="tab-console" class="tab-panel">
   <section>
     <h2>Console</h2>
@@ -733,10 +749,91 @@ function showTab(name, btn) {
   activeTab = name;
   if (name === 'watches')  { loadWatches(); loadOversight(); }
   if (name === 'results')  loadResults();
+  if (name === 'live')     startLive();
   if (name === 'history')  loadHistory();
   if (name === 'services') loadOrchestrator();
   if (name !== 'console')  _stopLogTail();   // don't keep polling the log off-tab
+  if (name !== 'live')     stopLive();       // stop the activity poll when off-tab
 }
+
+// ============================================================ LIVE ACTIVITY
+// A categorized, filterable, real-time feed backed by GET /api/logs (an in-memory ring).
+// We poll incrementally with last_seq so we only ever fetch new lines.
+const LIVE_CATS = [
+  { key: '',        label: 'All',      color: 'var(--dim)'   },
+  { key: 'search',  label: 'Searches', color: '#5b9bd5' },
+  { key: 'ai',      label: 'AI',       color: '#c084fc' },
+  { key: 'alert',   label: 'Alerts',   color: '#4ade80' },
+  { key: 'skipped', label: 'Skipped',  color: '#94a3b8' },
+  { key: 'login',   label: 'Login',    color: '#fbbf24' },
+  { key: 'error',   label: 'Errors',   color: '#f87171' },
+];
+const CAT_COLOR = Object.fromEntries(LIVE_CATS.filter(c=>c.key).map(c=>[c.key, c.color]));
+let _liveCat = '', _liveSeq = 0, _liveRows = [], _liveTimer = null;
+
+function _renderLiveChips() {
+  const box = document.getElementById('live-chips');
+  if (!box) return;
+  box.innerHTML = LIVE_CATS.map(c => {
+    const on = _liveCat === c.key;
+    return `<button onclick="setLiveCat('${c.key}')" style="font-size:12px;padding:3px 10px;border-radius:12px;cursor:pointer;
+      border:1px solid ${on ? c.color : 'var(--border)'};
+      background:${on ? c.color+'22' : 'transparent'};
+      color:${on ? c.color : 'var(--dim)'}">${c.label}</button>`;
+  }).join('');
+}
+function setLiveCat(k) { _liveCat = k; _renderLiveChips(); renderLive(); }
+
+function startLive() {
+  _renderLiveChips();
+  _liveSeq = 0; _liveRows = [];
+  document.getElementById('live-feed').innerHTML =
+    '<div style="color:var(--dim);padding:12px">Listening for activity…</div>';
+  pollLive();
+  if (_liveTimer) clearInterval(_liveTimer);
+  _liveTimer = setInterval(pollLive, 2000);
+}
+function stopLive() { if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; } }
+
+async function pollLive() {
+  try {
+    const r = await api(`/api/logs?after=${_liveSeq}&limit=400`);
+    if (r.entries && r.entries.length) {
+      _liveRows.push(...r.entries);
+      if (_liveRows.length > 800) _liveRows = _liveRows.slice(-800);
+    }
+    _liveSeq = r.last_seq || _liveSeq;
+    renderLive();
+  } catch (e) { /* transient; keep polling */ }
+}
+
+function renderLive() {
+  const feed = document.getElementById('live-feed');
+  if (!feed) return;
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const txt = (document.getElementById('live-filter').value || '').trim().toLowerCase();
+  const time = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined,{hour12:false}); };
+  const rows = _liveRows.filter(e =>
+    (!_liveCat || e.category === _liveCat) &&
+    (!txt || e.message.toLowerCase().includes(txt) || (e.watch||'').toLowerCase().includes(txt)));
+  if (!rows.length) {
+    feed.innerHTML = '<div style="color:var(--dim);padding:12px">Nothing yet' +
+      (_liveCat || txt ? ' for this filter.' : ' — start a watch and activity will stream here.') + '</div>';
+    return;
+  }
+  feed.innerHTML = rows.map(e => {
+    const col = CAT_COLOR[e.category] || 'var(--dim)';
+    const w = e.watch ? `<span style="color:var(--dim)"> · ${esc(e.watch)}</span>` : '';
+    return `<div style="display:flex;gap:8px;padding:3px 6px;border-bottom:1px solid #131a2b;align-items:baseline">
+      <span style="color:#475569;font-family:monospace;font-size:11px;flex-shrink:0">${time(e.ts)}</span>
+      <span style="color:${col};font-size:10px;text-transform:uppercase;flex-shrink:0;width:56px;font-weight:600">${esc(e.category)}</span>
+      <span style="flex:1;color:#cbd5e1">${esc(e.message)}${w}</span>
+    </div>`;
+  }).join('');
+  if (document.getElementById('live-autoscroll').checked) feed.scrollTop = feed.scrollHeight;
+}
+function clearLive() { _liveRows = []; renderLive(); }
 
 // Poll The Watcher on EVERY view (not just Watches) so the omnipresent launcher pulses
 // and badges new narration wherever you are. Refresh the orchestrator card while it's open.

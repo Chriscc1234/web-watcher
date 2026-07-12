@@ -11,6 +11,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.26.0-alpha] — 2026-07-11 (Live activity feed — see what it's doing, right now)
+
+### Added — a new "Live" tab
+- A real-time, color-coded feed of everything The Watcher is doing as it happens:
+  searches, AI ratings, alerts, skips, login issues, and errors. One-click filter chips
+  (Searches / AI / Alerts / Skipped / Login / Errors), a text filter, and auto-scroll.
+- Each line shows the time, what kind of event it is, the message, and which watch it
+  belongs to — so you can watch a sweep unfold, see exactly why a listing was skipped
+  ("excluded by keyword 'parts'"), or spot an error the moment it happens.
+- This is the window that makes the app transparent: instead of wondering whether a watch
+  is working, you can just open Live and see it working (or see what's wrong).
+- Inspired by studying ai-marketplace-monitor's live-log panel — the one piece of their
+  UI genuinely worth adapting — but categorized and filtered so it reads at a glance
+  rather than as a raw log dump. Backed by a lightweight in-memory ring (no disk tailing),
+  and the same feed will let The Watcher review and fix its own watches down the line.
+
+---
+
 ## [0.25.0-alpha] — 2026-07-11 (Star ratings + keyword filters — a volume knob for alerts)
 
 Inspired by studying the (cloud-based, Facebook-only) ai-marketplace-monitor project — we

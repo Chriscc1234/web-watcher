@@ -745,6 +745,20 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         except Exception:
             return {"running": False, "updated_at": None, "entries": [], "watches": []}
 
+    @app.get("/api/logs")
+    def get_logs(after: int = 0, category: str = "", watch: str = "", text: str = "",
+                 limit: int = 300):
+        """Live activity feed (in-memory ring): categorized recent log records for the
+        Activity tab. Poll with the returned last_seq as `after` to stream only new lines.
+        Filters: category (search/ai/alert/skipped/error/login/system), watch, text."""
+        try:
+            from web_watcher import logbuffer
+            return logbuffer.get_ring().snapshot(
+                after=after, category=category or None, watch=watch or None,
+                text=text or None, limit=max(1, min(500, limit)))
+        except Exception:
+            return {"entries": [], "last_seq": after}
+
     @app.post("/api/oversight/action")
     def oversight_action(body: dict, bg: BackgroundTasks):
         """Run a one-click fix The Watcher offered on a concern (e.g. broaden a watch's

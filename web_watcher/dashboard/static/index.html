@@ -244,8 +244,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 <div id="update-banner" class="update-banner" style="display:none">
   <span style="font-size:15px">⬆️</span>
   <span id="update-banner-text" style="flex:1"></span>
-  <button onclick="showUpdateNotes()" style="font-size:12px;padding:5px 10px">What's new</button>
-  <button class="success" onclick="applyUpdate(this)" style="font-size:12px;padding:5px 12px">Update &amp; restart</button>
+  <button id="upd-banner-notes" onclick="showUpdateNotes()" style="font-size:12px;padding:5px 10px">What's new</button>
+  <button id="upd-banner-apply" class="success" onclick="applyUpdate(this)" style="font-size:12px;padding:5px 12px">Update &amp; restart</button>
   <button onclick="dismissUpdateBanner()" title="Dismiss" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:18px;line-height:1">×</button>
 </div>
 
@@ -887,18 +887,47 @@ async function pollUpdate() {
     renderUpdatePanel(s);
     const banner = document.getElementById('update-banner');
     if (!banner) return;
-    const ready = s.staged || s.installer_ready;
+    const ready   = s.staged || s.installer_ready;
+    // A full (installer) update fetches ~290MB in the background. Surface that as soon as it
+    // starts so the banner appears within seconds of launch, not only once the download finishes.
+    const downloading = s.installer_downloading && s.available && !s.installer_ready;
+    _lastUpdDownloading = downloading;
+    const applyBtn = document.getElementById('upd-banner-apply');
+    const notesBtn = document.getElementById('upd-banner-notes');
     if (ready && s.available && banner.dataset.dismissed !== '1') {
       _updateInfo = s.available;
+      if (applyBtn) applyBtn.style.display = '';
+      if (notesBtn) notesBtn.style.display = '';
       document.getElementById('update-banner-text').textContent = s.installer_ready
         ? `Version ${s.available.version} is a full update, downloaded and ready. ` +
           `Installing closes and reopens Web Watcher.`
         : `Version ${s.available.version} is ready to install.`;
       banner.style.display = 'flex';
-    } else if (!ready) {
+    } else if (downloading && banner.dataset.dismissed !== '1') {
+      _updateInfo = s.available;
+      // Still fetching — no Install button yet, just progress. Keep "What's new" available.
+      if (applyBtn) applyBtn.style.display = 'none';
+      if (notesBtn) notesBtn.style.display = '';
+      const pct = s.installer_pct ? ` — ${s.installer_pct}%` : '';
+      document.getElementById('update-banner-text').textContent =
+        `Version ${s.available.version} is a full update, downloading in the background${pct}. ` +
+        `You'll be prompted to install when it's ready.`;
+      banner.style.display = 'flex';
+    } else if (!ready && !downloading) {
       banner.style.display = 'none';
     }
   } catch (_) {}
+}
+// Adaptive cadence: the backend checks GitHub ~6s after launch, so poll quickly for the first
+// minute to catch the result promptly, then settle to a quiet steady-state. Also poll briskly
+// while an installer download is in flight so its % advances visibly.
+let _updPolls = 0;
+function _scheduleUpdatePoll() {
+  _updPolls += 1;
+  let delay = 60000;                         // steady state
+  if (_updPolls < 15) delay = 4000;          // first ~minute after launch: catch the check fast
+  else if (_lastUpdDownloading) delay = 5000; // keep the progress bar moving
+  setTimeout(async () => { await pollUpdate(); _scheduleUpdatePoll(); }, delay);
 }
 function showUpdateNotes() {
   if (!_updateInfo) return;
@@ -926,8 +955,9 @@ function dismissUpdateBanner() {
   const b = document.getElementById('update-banner');
   b.style.display = 'none'; b.dataset.dismissed = '1';
 }
-setInterval(pollUpdate, 60000);
+let _lastUpdDownloading = false;
 pollUpdate();
+_scheduleUpdatePoll();
 
 // ============================================================ RESULTS
 async function loadResults() {

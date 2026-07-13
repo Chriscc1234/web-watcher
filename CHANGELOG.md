@@ -11,6 +11,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.32.0-alpha] — 2026-07-13 (The update banner actually shows up fast now)
+
+### Fixed — update banner still took too long to appear after launch
+- The real bottleneck wasn't the backend check (already sped up in 0.31) — it was the window
+  itself, which only re-checked the update status **once a minute**. So even after the app knew
+  an update was available a few seconds in, the banner could sit hidden for up to a minute.
+  The window now checks briskly (every ~4s) for the first minute after launch, then settles to
+  a quiet once-a-minute — so the banner appears within seconds of the app detecting an update.
+- A full (installer) update is ~290 MB and downloads in the background. The banner used to stay
+  hidden until that whole download finished, which looked like "nothing is happening." It now
+  appears **as soon as the download starts**, showing live progress ("downloading in the
+  background — 42%"), and swaps to the Install button the moment it's ready.
+
+---
+
 ## [0.31.0-alpha] — 2026-07-12 (Right location, real matches, faster updates)
 
 ### Fixed — watches searching the wrong place (e.g. Las Vegas instead of Anacortes)

@@ -529,7 +529,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     @app.get("/api/watches")
     def list_watches():
         from web_watcher.config import load
-        from web_watcher.storage import get_last_run
+        from web_watcher.storage import get_last_run, watch_stats
 
         cfg      = load()
         job_map  = {j["watch_name"]: j for j in manager.get_job_info()}
@@ -537,6 +537,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         for w in cfg.watches:
             last = get_last_run(w.name)
             job  = job_map.get(w.name, {})
+            stats = watch_stats(w.id or w.name, w.name)
             result.append({
                 "name":             w.name,
                 "enabled":          w.enabled,
@@ -560,6 +561,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "continuous_running": bool(job.get("continuous_running", False)),
                 "last_run":         last,
                 "next_run_utc":     job.get("next_run_utc"),
+                "stats":            stats,
             })
         return result
 

@@ -731,6 +731,34 @@ def count_observations(watch_id: str, db_path: Path | None = None) -> int:
     return int(row["n"]) if row else 0
 
 
+def watch_stats(watch_id: str, watch_name: str, db_path: Path | None = None) -> dict:
+    """A compact at-a-glance health summary for one watch, for the Watches list:
+    how many listings it has seen, how many MATCHED, when it last found a match, and how
+    many separate runs it has done. One query per metric, all bounded — cheap enough to
+    call for every watch on the list. Keyed by stable watch_id (survives renames)."""
+    path = _resolve(db_path)
+    out = {"observations": 0, "matches": 0, "last_match_at": None, "runs": 0}
+    if not path.exists():
+        return out
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS obs, "
+            "SUM(CASE WHEN matched=1 THEN 1 ELSE 0 END) AS m, "
+            "MAX(CASE WHEN matched=1 THEN last_seen END) AS last_match "
+            "FROM observations WHERE watch_id=?",
+            (watch_id,),
+        ).fetchone()
+        if row:
+            out["observations"] = int(row["obs"] or 0)
+            out["matches"] = int(row["m"] or 0)
+            out["last_match_at"] = row["last_match"]
+        r2 = conn.execute(
+            "SELECT COUNT(*) AS n FROM run_history WHERE watch_name=?", (watch_name,),
+        ).fetchone()
+        out["runs"] = int(r2["n"]) if r2 else 0
+    return out
+
+
 def get_history(
     watch_name: str | None = None,
     limit: int = 50,

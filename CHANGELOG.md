@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.29.0-alpha] — 2026-07-11 (At-a-glance: is this watch actually working?)
+
+### Added — a health line on every watch
+- Each watch in the Watches list now shows a quick summary of how it's doing:
+  "2 found of 4 seen · last 3h ago" — how many listings it has matched, how many it has
+  looked at, and when it last found something.
+- This answers the question you actually have at a glance: is this watch working? A watch
+  that's seen a lot but found nothing is the tell-tale sign its search is too narrow or
+  its rating threshold is set too high — now you can spot that without digging.
+
+---
+
 ## [0.28.0-alpha] — 2026-07-11 (See the agent work — visible cursor, natural scrolling)
 
 ### Changed — you can now see where the agent's mouse is

@@ -1611,8 +1611,21 @@ function watchRowHtml(w, isActive) {
   const toggleBtn = isActive
     ? `<button onclick="setWatchActive('${nm}', false)" title="Make inactive — keep it but stop running">Deactivate</button>`
     : `<button class="primary" onclick="setWatchActive('${nm}', true)" title="Activate — turn it on">▶ Activate</button>`;
+  // Per-watch health line: at-a-glance "is this working?" — how many it has found (matches),
+  // how many it looked at, and when it last found something. A watch that's seen a lot but
+  // found nothing is the classic "search terms too narrow / rating too high" signal.
+  const st = w.stats || {};
+  let statsLine = '';
+  if (st.observations) {
+    const found = st.matches || 0;
+    const foundTxt = found
+      ? `<span style="color:#34d399">${found} found</span>`
+      : `<span style="color:var(--dim)">0 found</span>`;
+    const lastTxt = st.last_match_at ? ` · last ${timeAgo(st.last_match_at)}` : '';
+    statsLine = `<br><small style="color:var(--dim)">${foundTxt} of ${st.observations} seen${lastTxt}</small>`;
+  }
   return `<tr>
-    <td><strong>${w.name}</strong>${agentBadge}${modeBadge}<br><small style="color:var(--dim)">${w.urls[0]||''}</small></td>
+    <td><strong>${w.name}</strong>${agentBadge}${modeBadge}<br><small style="color:var(--dim)">${w.urls[0]||''}</small>${statsLine}</td>
     <td>${statusCell}</td>
     <td style="color:var(--dim)">${lr ? timeAgo(lr.run_timestamp) : '—'}</td>
     <td>${foundBadge}</td>

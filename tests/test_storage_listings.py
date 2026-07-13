@@ -231,3 +231,37 @@ def test_matched_only_filters_across_all_watches(db):
     assert keys == {"cl:good"}
     # Without the filter, both show.
     assert {r["listing_key"] for r in query_listings(db_path=db)} == {"cl:good", "cl:junk"}
+
+
+# ── #94: per-watch stats for the Watches list ──────────────────────────────
+
+def test_watch_stats_counts_matches_and_last_find(tmp_path):
+    from web_watcher import storage
+    db = tmp_path / "s.db"
+    storage.init_db(db)
+    wid, name = "wid-1", "Trucks"
+    for k in ("k1", "k2", "k3"):
+        storage.upsert_listing(k, source="x", url=f"https://x/{k}", title=k,
+                               ts="2026-07-01T00:00:00+00:00", db_path=db)
+    storage.record_observation(wid, name, "k1", "2026-07-01T10:00:00+00:00", matched=True, db_path=db)
+    storage.record_observation(wid, name, "k2", "2026-07-02T10:00:00+00:00", matched=True, db_path=db)
+    storage.record_observation(wid, name, "k3", "2026-07-03T10:00:00+00:00", matched=False, db_path=db)
+
+    st = storage.watch_stats(wid, name, db_path=db)
+    assert st["observations"] == 3
+    assert st["matches"] == 2
+    assert st["last_match_at"] == "2026-07-02T10:00:00+00:00"   # newest MATCHED, not the newer non-match
+
+
+def test_watch_stats_empty_watch(tmp_path):
+    from web_watcher import storage
+    db = tmp_path / "s.db"
+    storage.init_db(db)
+    st = storage.watch_stats("nobody", "Nobody", db_path=db)
+    assert st == {"observations": 0, "matches": 0, "last_match_at": None, "runs": 0}
+
+
+def test_watch_stats_missing_db_is_safe(tmp_path):
+    from web_watcher import storage
+    st = storage.watch_stats("x", "X", db_path=tmp_path / "nope.db")
+    assert st["observations"] == 0 and st["matches"] == 0

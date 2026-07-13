@@ -488,3 +488,32 @@ def test_update_naming_no_real_watch_flips_to_create(monkeypatch):
     assert s is not None
     assert s["action"] == "create"
     assert s["interval_minutes"] == 30   # schedule backfill applies to the flipped create
+
+
+def test_watcher_health_line_flags_dry_watch(tmp_path, monkeypatch):
+    """The Watcher's per-watch health context flags a watch that has seen a lot but matched
+    nothing, so it can proactively offer a fix (#94 diagnose)."""
+    import types
+    from web_watcher.dashboard import server as S
+    from web_watcher import storage
+    db = tmp_path / "h.db"
+    storage.init_db(db)
+    wid = "wid-dry"
+    for i in range(30):
+        k = f"k{i}"
+        storage.upsert_listing(k, source="cl", url=f"https://x/{k}", title=k,
+                               ts="2026-07-01T00:00:00+00:00", db_path=db)
+        storage.record_observation(wid, "Dry Watch", k, "2026-07-01T00:00:00+00:00",
+                                   matched=False, db_path=db)
+    # Point storage default at this db so _build_watches_context reads it.
+    monkeypatch.setattr(storage, "_resolve", lambda p=None: db)
+
+    from web_watcher.config import Watch
+    w = Watch.model_validate({"name": "Dry Watch", "id": wid, "urls": ["https://x/s"],
+                              "instruction": "diesels", "mode": "continuous",
+                              "continuous_idle_seconds": 45})
+    cfg = types.SimpleNamespace(watches=[w], models=types.SimpleNamespace())
+    mgr = types.SimpleNamespace(get_job_info=lambda: [])
+    ctx = S._build_watches_context(cfg, mgr)
+    assert "0 matched of 30 seen" in ctx
+    assert "DIAGNOSIS" in ctx

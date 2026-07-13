@@ -1309,7 +1309,14 @@ You have EVERY ability the main assistant has — create/edit watches (watch_sug
 manage them (watch_actions: start/stop/enable/disable/delete), and look up what's been
 found (listing_query). Use them to actually help, not just describe. When the user asks you
 to fix or change something, propose the concrete action. Reply in the SAME JSON format
-described below."""
+described below.
+
+REVIEWING A WATCH: when the user asks how a watch is doing / to review or fix it, read that
+watch's HEALTH line below and answer from it honestly — how many it has matched vs seen, and
+any error. If a health line carries a DIAGNOSIS, act on it: explain it plainly and propose a
+concrete fix as an update (broaden the search terms, relax a keyword filter, or lower
+min_rating) so the user can apply it in one click. Don't claim a watch is fine if its health
+says it has matched nothing."""
 
 
 from web_watcher import paths
@@ -1489,7 +1496,7 @@ def _build_watches_context(cfg, manager) -> str:
     """Render the user's watches IN FULL, each with a HEALTH line (state + last-run
     result/error + matches found), for the assistant/Watcher system prompt. Shared by
     the main assistant and the oversight Watcher so both review against the same facts."""
-    from web_watcher.storage import get_last_run, count_matches
+    from web_watcher.storage import get_last_run, watch_stats
     try:
         job_map = {j["watch_name"]: j for j in manager.get_job_info()}
     except Exception:
@@ -1508,7 +1515,14 @@ def _build_watches_context(cfg, manager) -> str:
                 health = f"last run ERROR: {str(last['error'])[:90]}"
             else:
                 health = f"last run: {str(last.get('summary') or '')[:90]}"
-            return f"      health: {state} | {health} | {count_matches(w.id or w.name)} matches found"
+            st = watch_stats(w.id or w.name, w.name)
+            found = st["matches"]
+            counts = f"{found} matched of {st['observations']} seen"
+            # The key diagnostic so the Watcher can proactively help: a watch that has looked
+            # at many listings but matched none has search terms too narrow / rating too high.
+            if st["observations"] >= 25 and found == 0:
+                counts += " — DIAGNOSIS: seen plenty but matched nothing; likely the search is too narrow, a keyword filter is too strict, or min_rating is too high. Offer to broaden it."
+            return f"      health: {state} | {health} | {counts}"
         except Exception:
             return "      health: (unavailable)"
 

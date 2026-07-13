@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.29.0-alpha] — 2026-07-11 (At-a-glance: is this watch actually working?)
+## [0.30.0-alpha] — 2026-07-11 (Is this watch working? — and The Watcher can now tell you)
 
 ### Added — a health line on every watch
 - Each watch in the Watches list now shows a quick summary of how it's doing:
@@ -20,6 +20,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - This answers the question you actually have at a glance: is this watch working? A watch
   that's seen a lot but found nothing is the tell-tale sign its search is too narrow or
   its rating threshold is set too high — now you can spot that without digging.
+
+### Added — The Watcher can review and fix a watch for you
+- Ask The Watcher "how's my diesel watch doing?" and it now answers honestly from that
+  watch's real numbers — how many it has matched vs seen, and whether it's erroring.
+- When a watch has looked at plenty of listings but matched nothing, The Watcher spots it
+  and offers a concrete fix — broaden the search, relax a keyword filter, or lower the
+  rating threshold — which you apply in one click. It won't tell you a watch is fine when
+  its own record says it has found nothing.
 
 ---
 

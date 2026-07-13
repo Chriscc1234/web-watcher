@@ -11,6 +11,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.31.0-alpha] — 2026-07-12 (Right location, real matches, faster updates)
+
+### Fixed — watches searching the wrong place (e.g. Las Vegas instead of Anacortes)
+- A watch whose stored URL pointed at the wrong region now self-heals from what you
+  actually asked for. If your instruction says "vehicles in anacortes", the watch corrects
+  itself to the Anacortes region + zip on its very next run — no need to delete and recreate
+  it. (A watch pointed at Las Vegas with an "in anacortes" instruction now fixes to
+  skagit.craigslist.org with the 98221 area.)
+
+### Fixed — "everything is a match" / the Matches-only filter did nothing
+- Every watch now rates its finds against what you asked for, even simple ones without an
+  explicit filter. Before, a plain watch marked EVERY listing it saw as a match, so the
+  "Matches only" toggle in Results showed the whole raw feed. Now "match" means the AI
+  judged it a genuine fit, so the filter actually filters.
+
+### Fixed — updates took too long to appear
+- The app now checks for updates a few seconds after launch instead of waiting ~25 seconds,
+  so the update banner shows up much sooner.
+
+### Note on getting current
+- If you're on an older version, the first update to this one is a full installer download
+  (a one-time ~290 MB, because the app's bundled Python changed). After you install it once,
+  every future update is a small, fast background update again — no more big downloads, and
+  the installer restores the Start Menu entry.
+
+---
+
 ## [0.30.0-alpha] — 2026-07-11 (Is this watch working? — and The Watcher can now tell you)
 
 ### Added — a health line on every watch

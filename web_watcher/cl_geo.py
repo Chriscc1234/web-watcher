@@ -236,11 +236,12 @@ def _extract_in_place(text: str, anchor: tuple[float, float] | None = None,
 # The refinement
 # ---------------------------------------------------------------------------
 
-def refine_craigslist_url(url: str) -> str:
+def refine_craigslist_url(url: str, fallback_zip: str | None = None) -> str:
     """Clean a craigslist search URL: move zips/prices/owner-words from the query text
     into their real params, pick the vehicles category for generic vehicle searches, and
-    rewrite the region subdomain to the one nearest the zip. Idempotent; on any error the
-    original URL is returned unchanged."""
+    rewrite the region subdomain to the one nearest the zip. `fallback_zip` localizes a URL
+    that carries NO location of its own (used to self-heal a watch from its instruction).
+    Idempotent; on any error the original URL is returned unchanged."""
     try:
         p = urlparse(url)
         host = (p.netloc or "").lower()
@@ -282,6 +283,11 @@ def refine_craigslist_url(url: str) -> str:
         if loc is None and sub and sub not in _known_hosts():
             # "anacortes.craigslist.org" isn't a region — it's the town the user named.
             loc = place_latlon(sub.replace("-", " "))
+        if loc is None and fallback_zip and zip_latlon(fallback_zip):
+            # No location anywhere in the URL — localize from the caller's hint (the watch's
+            # instruction). This is what corrects an existing "vehicles in anacortes" watch
+            # whose stored URL points at the wrong region with no postal.
+            loc = zip_latlon(fallback_zip)
         if loc:
             if not q.get("postal"):
                 z = nearest_zip(*loc)
@@ -478,7 +484,7 @@ def refine_search_url(url: str, fallback_zip: str | None = None) -> str:
     except Exception:
         return url
     if "craigslist" in host:
-        return refine_craigslist_url(url)
+        return refine_craigslist_url(url, fallback_zip=fallback_zip)
     if "offerup" in host:
         return refine_offerup_url(url)
     if "ebay" in host:
@@ -486,6 +492,44 @@ def refine_search_url(url: str, fallback_zip: str | None = None) -> str:
     if "facebook" in host:
         return refine_facebook_url(url)
     return url
+
+
+def zip_from_text(text: str) -> str | None:
+    """A US zip resolved from free text (a watch's instruction): a literal 5-digit zip, an
+    'in/near <town>' phrase, or a bare known town name. Lets a watch be localized from what
+    the user asked for when its URL carries no location. None if nothing resolves."""
+    if not text:
+        return None
+    for m in re.finditer(r"\b(\d{5})\b", text):
+        if zip_latlon(m.group(1)):
+            return m.group(1)
+    _, loc = _extract_in_place(text)
+    if loc is None:
+        # A bare town name anywhere in the text — only accept a nationally-UNIQUE one
+        # (place_latlon returns None for ambiguous names without an anchor), so we never
+        # guess the wrong Springfield.
+        for w in re.findall(r"[a-z][a-z.'\-]{3,}", (text or "").lower()):
+            ll = place_latlon(w)
+            if ll:
+                loc = ll
+                break
+    return nearest_zip(*loc) if loc else None
+
+
+def ensure_location(url: str, hint_text: str) -> str:
+    """Refine a search URL and, if it still carries no location, localize it from hint_text
+    (the watch's instruction). Existing watches created before the location fixes — whose
+    stored URL points at the wrong craigslist region — self-heal on their next sweep with
+    no recreation needed. Falls back to a plain refine on any failure."""
+    try:
+        host = (urlparse(url).netloc or "").lower()
+        if ("craigslist" in host or "ebay" in host) and url_zip(url) is None:
+            z = zip_from_text(hint_text)
+            if z:
+                return refine_search_url(url, fallback_zip=z)
+        return refine_search_url(url)
+    except Exception:
+        return url
 
 
 def url_zip(url: str) -> str | None:

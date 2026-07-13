@@ -99,7 +99,9 @@ class ServiceManager:
     # ------------------------------------------------------------------
 
     _UPDATE_CHECK_INTERVAL = 6 * 3600   # re-check every 6 hours
-    _UPDATE_CHECK_DELAY    = 25         # first check shortly after launch (let the UI settle)
+    _UPDATE_CHECK_DELAY    = 6          # first check soon after launch (was 25 — too long a wait
+                                        # before the update banner could appear, esp. on the one-time
+                                        # runtime-bump installer download)
 
     def _start_update_checker(self) -> None:
         def _loop():

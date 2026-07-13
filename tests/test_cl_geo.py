@@ -233,3 +233,49 @@ def test_url_zip_reads_localized_urls():
     assert url_zip("https://www.ebay.com/sch/i.html?_stpos=98221") == "98221"
     assert url_zip("https://offerup.com/search?q=truck") is None
     assert url_zip("https://x.com/?postal=00000") is None   # fake zip rejected
+
+
+# ── location self-heal from the watch instruction (0.31 — Las Vegas bug) ─────
+
+from web_watcher.cl_geo import ensure_location, zip_from_text
+
+
+def test_zip_from_text_resolves_town():
+    assert zip_from_text("look for vehicles in anacortes under 10000") == "98221"
+    assert zip_from_text("no location here") is None
+
+
+def test_ensure_location_fixes_wrong_region_from_instruction():
+    """A watch pointed at Las Vegas but asking for Anacortes must self-heal to skagit."""
+    bad = "https://lasvegas.craigslist.org/search/cta?query=vehicles&max_price=10000"
+    fixed = ensure_location(bad, "vehicles in anacortes for under 10000")
+    host, _, q = _parts(fixed)
+    assert host == "skagit.craigslist.org"
+    assert q["postal"] == "98221"
+    assert q["search_distance"] == "50"
+
+
+def test_ensure_location_fixes_bare_craigslist():
+    fixed = ensure_location("https://www.craigslist.org/search/cta?query=vehicles", "vehicles in anacortes")
+    host, _, q = _parts(fixed)
+    assert host == "skagit.craigslist.org" and q["postal"] == "98221"
+
+
+def test_ensure_location_leaves_correct_url_alone():
+    ok = "https://skagit.craigslist.org/search/cta?postal=98221&search_distance=50"
+    host, _, q = _parts(ensure_location(ok, "vehicles in anacortes"))
+    assert host == "skagit.craigslist.org" and q["postal"] == "98221"
+
+
+def test_ensure_location_no_hint_still_refines():
+    # No resolvable location in the instruction → just a plain refine, URL's own location kept.
+    url = "https://seattle.craigslist.org/search/cta?query=truck"
+    assert ensure_location(url, "just find trucks") == url
+
+
+def test_craigslist_fallback_zip_localizes():
+    from web_watcher.cl_geo import refine_craigslist_url
+    fixed = refine_craigslist_url("https://lasvegas.craigslist.org/search/cta?query=vehicles",
+                                  fallback_zip="98221")
+    host, _, q = _parts(fixed)
+    assert host == "skagit.craigslist.org" and q["postal"] == "98221"

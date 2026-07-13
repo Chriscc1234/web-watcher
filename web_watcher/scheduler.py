@@ -591,8 +591,14 @@ def _exploration_plan(sweep_index: int, watch: Watch) -> dict:
     browsing style. Kept tiny and deterministic-free so behavior differs sweep to sweep.
     """
     style_key, directive = random.choice(_EXPLORATION_STYLES)
+    raw_url = watch.urls[sweep_index % len(watch.urls)]
+    # Self-heal the URL every sweep: clean junk params AND, if it carries no location, pull
+    # one from the watch's instruction (so an existing "vehicles in anacortes" watch whose
+    # stored URL points at the wrong region gets corrected without recreating it).
+    from web_watcher.cl_geo import ensure_location
+    start_url = ensure_location(raw_url, watch.instruction)
     return {
-        "start_url": watch.urls[sweep_index % len(watch.urls)],
+        "start_url": start_url,
         "style":     style_key,
         "directive": directive,
     }
@@ -796,7 +802,10 @@ def _run_continuous_sweep(
     a site the scraper is blind to (a JS/SPA site) and auto-escalate it to the agent.
     """
     run_ts   = datetime.now(timezone.utc).isoformat()
-    base_url = watch.urls[sweep_index % len(watch.urls)]
+    # Self-heal the URL's location from the watch instruction (fixes an existing watch whose
+    # stored craigslist/eBay URL points at the wrong region), then apply the sweep variation.
+    from web_watcher.cl_geo import ensure_location
+    base_url = ensure_location(watch.urls[sweep_index % len(watch.urls)], watch.instruction)
     url      = vary_search(base_url, sweep_index, watch.continuous_search_variation)
 
     # Humanize: when stealth is on, TYPE the search into the box (real keyboard + mouse)
@@ -929,8 +938,10 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
     # the LLM and are recorded as keyword-excluded non-matches.
     kw_kept, kw_dropped = _keyword_prefilter(to_judge, watch)
     matched = kw_kept
-    if watch.judgment_prompt and kw_kept:
+    if kw_kept and (watch.judgment_prompt or (watch.instruction or "").strip()):
         # Card-level judge (no deep-read) — one LLM call for the slice; keeps priming cheap.
+        # Runs against the instruction even without an explicit judgment_prompt, so a plain
+        # watch doesn't baseline EVERYTHING as a match (the "everything is a match" bug).
         matched = _filter_listings_by_judgment(kw_kept, watch, cfg)
     matched_keys = {l.key for l in matched}
     if to_judge:
@@ -1032,10 +1043,14 @@ def _process_sweep_listings(
     if fetch_bodies and page is not None and fresh:
         _capture_listing_bodies(page, fresh[:_MAX_BODY_FETCH], stop_event)
 
-    # Rating judge: when a judgment_prompt is set, keep only listings rated >= min_rating.
-    # On any failure, fall back to alerting all fresh ones.
+    # Rating judge: rate every fresh listing against the watch's criteria (its instruction,
+    # plus any judgment_prompt) and keep those >= min_rating. This runs for EVERY watch —
+    # without it, a watch with no explicit judgment_prompt marked EVERYTHING a match, so
+    # "matches only" in Results showed the raw feed (the "everything is a match" bug). The
+    # instruction alone is enough criteria for the judge. On any failure it falls back to
+    # keeping all fresh listings, so a judge hiccup never silently drops real finds.
     matched = fresh
-    if fresh and watch.judgment_prompt:
+    if fresh and (watch.judgment_prompt or (watch.instruction or "").strip()):
         matched = _filter_listings_by_judgment(fresh, watch, cfg)
     matched_keys = {l.key for l in matched}
     # Persist keyword-dropped listings too (non-match), so they're recorded, not lost.

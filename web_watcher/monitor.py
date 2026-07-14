@@ -716,6 +716,112 @@ _SEARCH_BOX_SELECTORS = (
 _HUMAN_NAV_TIMEOUT = 30_000
 
 
+# ---------------------------------------------------------------------------
+# Closing the loop: read what the page says BACK after we type/search, so the
+# agent (and the scraper) UNDERSTAND the effect of an action instead of acting
+# blind. The weather-site failure — typing product terms into a box whose
+# autocomplete only offers cities — is exactly what this catches.
+# ---------------------------------------------------------------------------
+
+_SUGGESTION_SELECTORS = (
+    "[role='listbox'] [role='option']",
+    "[role='option']",
+    "ul[role='listbox'] li",
+    ".autocomplete-item, .ui-autocomplete li, .tt-suggestion, .typeahead li",
+    ".search-suggestions li, .suggestions li, .suggestion, .awesomplete li, .pac-item",
+    "datalist option",
+)
+
+_US_STATES = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA",
+    "ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK",
+    "OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC",
+}
+
+_NO_RESULTS_RE = re.compile(
+    r"\bno results\b|\b0 results\b|\bno (?:listings|items|matches|matching|ads|products)\b|"
+    r"nothing (?:matched|found)|we (?:couldn't|could not) find|did not match any|found 0\b|"
+    r"your search .{0,30}\b(?:did not|didn't) match", re.I,
+)
+
+
+def looks_like_location(text: str) -> bool:
+    """Heuristic: does this autocomplete suggestion look like a PLACE (city/town/region)?
+    'City, ST', a bare nationally-known town (via the gazetteer), or a name + state."""
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    m = re.match(r"^([A-Za-z .'\-]{2,}),\s*([A-Za-z]{2,})", t)
+    if m and (m.group(2).upper() in _US_STATES or len(m.group(2)) >= 4):
+        return True
+    try:
+        from web_watcher.cl_geo import place_latlon
+        head = re.split(r"[,(]", t)[0].strip().lower()
+        if 3 <= len(head) <= 30 and place_latlon(head):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def suggestions_are_locations(suggestions: list) -> bool:
+    """True when most non-empty suggestions look like places (>=60%, min 2) — the tell that
+    a 'search' box is really a location/geo picker, not a keyword search."""
+    vals = [s for s in (suggestions or []) if (s or "").strip()]
+    if len(vals) < 2:
+        return False
+    hits = sum(1 for s in vals if looks_like_location(s))
+    return hits / len(vals) >= 0.6
+
+
+def text_says_no_results(text: str) -> bool:
+    """Does this page text explicitly say the search returned nothing?"""
+    return bool(_NO_RESULTS_RE.search(text or ""))
+
+
+def read_suggestions(page, limit: int = 8) -> list:
+    """The visible autocomplete/typeahead option texts currently on screen, bounded + deduped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for sel in _SUGGESTION_SELECTORS:
+        try:
+            texts = page.eval_on_selector_all(
+                sel,
+                "els => els.filter(e => e.offsetParent !== null)"
+                ".map(e => (e.innerText || e.value || '').trim())",
+            ) or []
+        except Exception:
+            continue
+        for t in texts:
+            t = (t or "").strip()
+            if t and t not in seen and len(t) < 80:
+                seen.add(t)
+                out.append(t)
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def read_search_feedback(page, typed_term: str = "") -> dict:
+    """After typing into a search box, what is the page telling us? Returns
+    {suggestions, are_locations}. are_locations is True when the box's suggestions are
+    places AND the typed term isn't itself a place — i.e. this is a geo picker, not a
+    keyword search (the weather-site case)."""
+    sugg = read_suggestions(page)
+    are_loc = bool(sugg) and suggestions_are_locations(sugg) and not looks_like_location(typed_term)
+    return {"suggestions": sugg, "are_locations": are_loc}
+
+
+def detect_no_results(page) -> bool:
+    """True when the page shows an explicit 'no results' state, so a caller reports that
+    honestly instead of treating an empty page as 'found nothing' legitimately."""
+    try:
+        body = page.evaluate("() => document.body ? document.body.innerText.slice(0, 4000) : ''") or ""
+    except Exception:
+        return False
+    return text_says_no_results(body)
+
+
 def humanized_search(page: Page, url: str) -> bool:
     """
     Navigate like a person instead of jumping straight to a query URL: land on the
@@ -782,6 +888,15 @@ def humanized_search(page: Page, url: str) -> bool:
         try:
             if (box.input_value() or "").strip().lower() != term.strip().lower():
                 box.fill(term)
+        except Exception:
+            pass
+        # Close the loop: is this a keyword search box or a location picker? Log the tell so
+        # the Live feed explains WHY a sweep on a mis-typed site finds nothing.
+        try:
+            if read_search_feedback(page, term).get("are_locations"):
+                log.warning("Search box on %s autocompletes LOCATIONS, not keywords — typing %r "
+                            "here won't search for items; this may not be a keyword-searchable "
+                            "marketplace.", urlparse(url).netloc, term)
         except Exception:
             pass
         page.keyboard.press("Enter")

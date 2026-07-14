@@ -11,7 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.35.0-alpha] — 2026-07-13 ("Vet this listing" + eBay actually searches for vehicles)
+## [0.36.0-alpha] — 2026-07-13 (Closing the loop: the agent reads what the page says back)
+
+### Changed — the agent now understands the effect of what it types
+- Before, when it typed a search term it pressed Enter and moved on **without reading the
+  page's response.** So on a site whose search box only suggests *cities* (a weather site, a
+  store locator), it would type "diesel truck," get back a list of towns, and blindly submit —
+  producing nonsense and thinking it worked.
+- Now it **reads the autocomplete.** If the box's suggestions are places, it recognizes it as a
+  location picker, not a keyword search, tells itself so, and stops forcing product terms into
+  it (and won't auto-submit a keyword there). It also reads "no results" states honestly instead
+  of treating an empty page as "found nothing." This is the groundwork for the agent genuinely
+  observing and reacting to sites it doesn't control, rather than acting blind.
 
 ### Added — "Vet this listing": a deal + scam-risk check on demand
 - Every result now has a **🔍 Vet this listing** button. Click it and Web Watcher opens the

@@ -46,7 +46,7 @@ import httpx
 from playwright.sync_api import Page, TimeoutError as PWTimeoutError
 
 from web_watcher import fb_safety
-from web_watcher.monitor import dismiss_popups, has_blocking_overlay
+from web_watcher.monitor import dismiss_popups, has_blocking_overlay, read_search_feedback
 
 log = logging.getLogger(__name__)
 
@@ -654,13 +654,39 @@ def run_agent(
                     )
             except Exception:
                 pass
+        # ── Read what the box said BACK: is it a keyword search or a geo picker? ──
+        # The weather-site failure: typing product terms into a box whose autocomplete only
+        # offers cities. Tell the model what it's looking at instead of letting it press on.
+        _was_unchanged = action.outcome == "page unchanged"
+        _typed_location_box = False
+        if action.action == "type" and (action.text or "").strip():
+            try:
+                fb = read_search_feedback(page, action.text or "")
+                if fb.get("suggestions"):
+                    sug = " | ".join(fb["suggestions"][:6])
+                    if fb.get("are_locations"):
+                        _typed_location_box = True
+                        action.outcome = (
+                            (action.outcome or "") +
+                            f" — the box suggested LOCATIONS ({sug}). This is a place/geo picker, "
+                            "NOT a keyword search: do NOT type product keywords here. Pick the "
+                            "intended location, or find the real listings search elsewhere on the "
+                            "page — and if this site has no keyword search for items, it is the "
+                            "wrong kind of site to monitor."
+                        )
+                    else:
+                        action.outcome = (action.outcome or "") + f" — the box suggested: {sug}"
+            except Exception:
+                pass
         log.debug("Action outcome: %s", action.outcome)
 
         # ── Auto-submit: type landed in an input but page didn't move ─────────
         # The model typed into a real input but didn't press Enter.
         # Only fires when a text input is actually focused after typing —
         # prevents submitting an empty search if the type went to the wrong element.
-        if action.action == "type" and action.outcome == "page unchanged":
+        # NOT when the box is a location picker — auto-Entering a product keyword there
+        # just navigates to a nonsense geo page and the model would think it "worked".
+        if action.action == "type" and _was_unchanged and not _typed_location_box:
             try:
                 focused_tag = page.evaluate(
                     "() => document.activeElement ? document.activeElement.tagName : ''"

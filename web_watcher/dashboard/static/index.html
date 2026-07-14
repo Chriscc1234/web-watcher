@@ -497,6 +497,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       </label>
       <span class="spacer"></span>
       <button onclick="loadResults()">Search</button>
+      <button onclick="clearResults()" title="Remove the finds shown here (the watch itself is kept)"
+              style="background:none;border:1px solid var(--border);color:var(--dim)">Clear results</button>
     </div>
     <div id="results-body">
       <div class="empty-state">Loading...</div>
@@ -960,6 +962,21 @@ pollUpdate();
 _scheduleUpdatePoll();
 
 // ============================================================ RESULTS
+async function clearResults() {
+  // Respects the watch filter: a chosen watch clears just its finds; "All watches" clears all.
+  const watch = document.getElementById('res-watch').value;
+  const scope = watch ? `results for “${watch}”` : 'ALL results across every watch';
+  if (!confirm(`Clear ${scope}?\n\nThe finds shown here are removed and the next sweep re-checks `
+             + `from scratch. Your watch settings are kept.`)) return;
+  try {
+    const qs = watch ? ('?watch=' + encodeURIComponent(watch)) : '';
+    await api('/api/listings' + qs, { method: 'DELETE' });
+    await loadResults();   // repaints the (now empty) list — visible confirmation
+  } catch (e) {
+    alert('Could not clear results: ' + e.message);
+  }
+}
+
 async function loadResults() {
   const body = document.getElementById('results-body');
   // Refresh the watch dropdown EVERY load (preserving selection) so newly-added watches

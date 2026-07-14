@@ -692,6 +692,23 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             "max_mileage": max_mileage, "limit": limit,
         })
 
+    @app.delete("/api/listings")
+    def clear_results(watch: str | None = None):
+        """Clear Results. With ?watch=<name> wipes just that watch's finds (and its dedup
+        memory, so the next sweep re-discovers and RE-JUDGES with current logic); with no
+        watch, wipes ALL Results. Watch configs are never touched. This is how stale finds
+        collected under old logic get cleared without deleting the watch."""
+        from web_watcher.storage import clear_watch_results, clear_all_results
+        if watch:
+            cfg = _load_cfg()
+            w = next((w for w in cfg.watches if w.name == watch), None)
+            if w is None:
+                raise HTTPException(404, detail=f"Watch {watch!r} not found")
+            removed = clear_watch_results(watch_id=getattr(w, "id", None), watch_name=w.name)
+        else:
+            removed = clear_all_results()
+        return {"ok": True, "watch": watch, "removed": removed}
+
     # ── Learned sites ────────────────────────────────────────────────────────
     @app.get("/api/sites")
     def list_sites():

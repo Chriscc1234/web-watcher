@@ -11,6 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.34.0-alpha] — 2026-07-13 (Clear Results button)
+
+### Added — a "Clear results" button on the Results tab
+- Old finds collected under previous logic (e.g. the pre-0.33 "everything is a match"
+  behavior) can now be wiped without deleting the watch. In **Results**, pick a watch (or
+  "All watches") and click **Clear results**: it removes the finds shown there and resets that
+  watch's memory of what it has already seen, so the next sweep re-discovers and re-judges
+  everything with the current, fixed logic. Your watch settings are never touched.
+- This is the clean way to get rid of the leftover junk after updating — no need to delete
+  and recreate the watch anymore.
+
+---
+
 ## [0.33.0-alpha] — 2026-07-13 (No more junk in Results: the "dresser / toy cars" fix)
 
 Found by replaying a full gauntlet of the ways watches have gone wrong (wrong location,

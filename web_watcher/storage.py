@@ -759,6 +759,51 @@ def watch_stats(watch_id: str, watch_name: str, db_path: Path | None = None) -> 
     return out
 
 
+def clear_watch_results(watch_id: str | None = None, watch_name: str | None = None,
+                        db_path: Path | None = None) -> dict:
+    """Wipe one watch's Results: its observations (the watch↔listing links shown in Results)
+    and its seen-listing dedup memory, so the next sweep rediscovers and RE-JUDGES everything
+    with current logic. Listings no longer referenced by ANY watch are pruned too. The watch
+    config itself is untouched. Returns counts of what was removed.
+
+    Matches on watch_id (stable, preferred) OR watch_name — a rename shouldn't strand rows."""
+    path = _resolve(db_path)
+    out = {"observations": 0, "seen": 0, "listings": 0}
+    if not path.exists() or not (watch_id or watch_name):
+        return out
+    with _connect(path) as conn:
+        conds, args = [], []
+        if watch_id:   conds.append("watch_id = ?");   args.append(watch_id)
+        if watch_name: conds.append("watch_name = ?"); args.append(watch_name)
+        where = " OR ".join(conds)
+        out["observations"] = conn.execute(
+            f"DELETE FROM observations WHERE {where}", args).rowcount
+        if watch_name:
+            out["seen"] = conn.execute(
+                "DELETE FROM seen_listings WHERE watch_name = ?", (watch_name,)).rowcount
+        # Prune listings now orphaned (surfaced by no remaining observation).
+        out["listings"] = conn.execute(
+            "DELETE FROM listings WHERE listing_key NOT IN "
+            "(SELECT listing_key FROM observations)").rowcount
+        conn.commit()
+    return out
+
+
+def clear_all_results(db_path: Path | None = None) -> dict:
+    """Wipe ALL Results across every watch — a clean slate. Removes all observations,
+    seen-listing dedup memory, and listings. Watch configs are untouched."""
+    path = _resolve(db_path)
+    out = {"observations": 0, "seen": 0, "listings": 0}
+    if not path.exists():
+        return out
+    with _connect(path) as conn:
+        out["observations"] = conn.execute("DELETE FROM observations").rowcount
+        out["seen"]         = conn.execute("DELETE FROM seen_listings").rowcount
+        out["listings"]     = conn.execute("DELETE FROM listings").rowcount
+        conn.commit()
+    return out
+
+
 def get_history(
     watch_name: str | None = None,
     limit: int = 50,

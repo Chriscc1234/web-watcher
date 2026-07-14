@@ -265,3 +265,42 @@ def test_watch_stats_missing_db_is_safe(tmp_path):
     from web_watcher import storage
     st = storage.watch_stats("x", "X", db_path=tmp_path / "nope.db")
     assert st["observations"] == 0 and st["matches"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Clearing Results (per-watch + global)
+# ---------------------------------------------------------------------------
+
+def _seed_two_watches(db):
+    ts = "2026-01-01T00:00:00+00:00"
+    for k, t in [("k1", "Toyota"), ("k2", "Dresser"), ("k3", "Kayak")]:
+        upsert_listing(k, source="ebay", url="http://x/" + k, title=t, ts=ts, db_path=db)
+    record_observation("wid-A", "Vehicles", "k1", ts=ts, matched=True, db_path=db)
+    record_observation("wid-A", "Vehicles", "k2", ts=ts, matched=True, db_path=db)   # the dresser
+    record_observation("wid-B", "Kayaks",   "k3", ts=ts, matched=True, db_path=db)
+
+
+def test_clear_watch_results_only_touches_that_watch(db):
+    from web_watcher.storage import clear_watch_results, count_observations
+    _seed_two_watches(db)
+    removed = clear_watch_results(watch_id="wid-A", watch_name="Vehicles", db_path=db)
+    assert removed["observations"] == 2
+    assert count_observations("wid-A", db) == 0          # dresser watch wiped
+    assert count_observations("wid-B", db) == 1          # kayak watch untouched
+    titles = {l["title"] for l in query_listings(db_path=db)}
+    assert titles == {"Kayak"}                            # orphaned listings pruned, Kayak kept
+
+
+def test_clear_all_results_wipes_everything(db):
+    from web_watcher.storage import clear_all_results, count_observations
+    _seed_two_watches(db)
+    removed = clear_all_results(db_path=db)
+    assert removed["observations"] == 3
+    assert count_observations("wid-A", db) == 0 and count_observations("wid-B", db) == 0
+    assert query_listings(db_path=db) == []
+
+
+def test_clear_watch_results_missing_db_is_safe(tmp_path):
+    from web_watcher.storage import clear_watch_results
+    removed = clear_watch_results(watch_id="x", watch_name="y", db_path=tmp_path / "nope.db")
+    assert removed == {"observations": 0, "seen": 0, "listings": 0}

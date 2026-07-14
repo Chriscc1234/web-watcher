@@ -64,6 +64,10 @@ class ServiceManager:
         self._ollama_adopted  = False   # True when we adopted an existing instance
         # Facebook (login-profile) connect flow state, surfaced via get_statuses().
         self._fb_connect_status = "idle"  # idle | opening | waiting_for_login | done | error
+        # Deep Inspect: on-demand deal/scam evaluation of one listing. url -> {status, verdict}.
+        # status: running | done | error. Runs on a worker thread (browser + a slow big model).
+        self._inspections: dict = {}
+        self._inspect_lock = threading.Lock()
         # Auto-update state (populated by the background checker; surfaced via /api/update).
         self._window          = None    # pywebview window — set by main.py, used to restart
         self._update_available = None   # dict {version, notes} when a newer release is staged
@@ -486,6 +490,43 @@ class ServiceManager:
 
     def fb_connect_status(self) -> str:
         return self._fb_connect_status
+
+    # ------------------------------------------------------------------
+    # Deep Inspect (on-demand deal/scam evaluation of one listing)
+    # ------------------------------------------------------------------
+
+    def inspect_start(self, url: str, criteria: str = "") -> dict:
+        """Kick off a Deep Inspect of one listing on a worker thread (browser fetch + a slow
+        big model). Idempotent while one is running for the same URL. Returns the current
+        status entry immediately; poll inspect_status(url) for the verdict."""
+        if not url:
+            return {"status": "error", "error": "no url"}
+        with self._inspect_lock:
+            cur = self._inspections.get(url)
+            if cur and cur.get("status") == "running":
+                return cur
+            self._inspections[url] = {"status": "running", "url": url}
+
+        def _run() -> None:
+            from web_watcher.config import load as load_config
+            from web_watcher import inspect as _inspect
+            try:
+                cfg = load_config()
+                verdict = _inspect.deep_inspect_listing(url, criteria, cfg)
+                status = "error" if verdict.get("error") else "done"
+                with self._inspect_lock:
+                    self._inspections[url] = {"status": status, "url": url, "verdict": verdict}
+            except Exception as exc:
+                log.warning("inspect_start failed for %s: %s", url, exc)
+                with self._inspect_lock:
+                    self._inspections[url] = {"status": "error", "url": url, "error": str(exc)}
+
+        threading.Thread(target=_run, daemon=True, name="ww-inspect").start()
+        return self._inspections[url]
+
+    def inspect_status(self, url: str) -> dict:
+        with self._inspect_lock:
+            return dict(self._inspections.get(url) or {"status": "unknown", "url": url})
 
     # ------------------------------------------------------------------
     # Ollama

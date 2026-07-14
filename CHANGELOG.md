@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.35.0-alpha] — 2026-07-13 ("Vet this listing" + eBay actually searches for vehicles)
+
+### Added — "Vet this listing": a deal + scam-risk check on demand
+- Every result now has a **🔍 Vet this listing** button. Click it and Web Watcher opens the
+  actual listing, reads the *whole* posting, and a large local model gives you a verdict:
+  a **deal score (1–5)**, a **scam risk (low / medium / high)**, the **specific red flags** it
+  found (off-platform payment, "shipping only / can't meet," price far below market, urgency,
+  etc.), and a plain-English summary. It runs only when you ask, so it can take its time and
+  use a big, careful model.
+- Uses the best general reasoning model you have installed (it'll automatically use
+  `qwen2.5:72b` once that's pulled, falling back to what's available). Everything stays local.
+- Honest by design: it's labelled a **risk warning, not a guarantee** — always verify before
+  you pay. (Photo analysis and reverse-image / price-comparison checks are coming next.)
+
+### Fixed — eBay vehicle searches returned toys and parts, not cars
+- A generic "vehicles" search on eBay was a plain keyword search, which surfaces die-cast
+  models, parts, and accessories. It now routes into **eBay Motors → Cars & Trucks**, where
+  only real vehicles live. Specific model searches (e.g. "Toyota Tacoma") are left as normal
+  keyword searches, which work fine.
+
+---
+
 ## [0.34.0-alpha] — 2026-07-13 (Clear Results button)
 
 ### Added — a "Clear results" button on the Results tab

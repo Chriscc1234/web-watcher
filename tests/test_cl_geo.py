@@ -316,3 +316,21 @@ def test_refine_ebay_keeps_used_condition():
         "https://www.ebay.com/sch/i.html?_nkw=truck&LH_ItemCondition=3000")
     _, _, q = _parts(fixed)
     assert q.get("LH_ItemCondition") == "3000"
+
+
+def test_refine_ebay_routes_generic_vehicle_to_motors():
+    from web_watcher.cl_geo import refine_ebay_url
+    fixed = refine_ebay_url(
+        "https://www.ebay.com/sch/i.html?_nkw=vehicles&_sacat=0&_dcat=9356")
+    _, _, q = _parts(fixed)
+    assert q.get("_sacat") == "6001"      # eBay Motors → Cars & Trucks
+    assert "_dcat" not in q               # bogus dept category dropped
+    assert "_nkw" not in q                # generic word folded into the category
+
+
+def test_refine_ebay_keeps_specific_model_as_keyword():
+    from web_watcher.cl_geo import refine_ebay_url
+    fixed = refine_ebay_url("https://www.ebay.com/sch/i.html?_nkw=toyota+tacoma")
+    _, _, q = _parts(fixed)
+    assert q.get("_nkw") == "toyota tacoma"   # a real model keyword search works — leave it
+    assert q.get("_sacat") != "6001"

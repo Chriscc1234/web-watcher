@@ -709,6 +709,27 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             removed = clear_all_results()
         return {"ok": True, "watch": watch, "removed": removed}
 
+    # ── Deep Inspect (deal/scam evaluation of one listing) ────────────────────
+    @app.post("/api/inspect")
+    def start_inspect(body: dict):
+        """Kick off a Deep Inspect of one listing (opens it, reads the full posting, and a big
+        local model returns a deal + scam-risk verdict). Non-blocking — poll GET /api/inspect.
+        Body: {url, watch?, criteria?}. criteria defaults to the named watch's instruction."""
+        url = (body.get("url") or "").strip()
+        if not url.startswith("http"):
+            raise HTTPException(400, detail="A listing URL is required.")
+        criteria = (body.get("criteria") or "").strip()
+        if not criteria and body.get("watch"):
+            cfg = _load_cfg()
+            w = next((w for w in cfg.watches if w.name == body["watch"]), None)
+            if w:
+                criteria = w.instruction or ""
+        return manager.inspect_start(url, criteria)
+
+    @app.get("/api/inspect")
+    def get_inspect(url: str):
+        return manager.inspect_status(url)
+
     # ── Learned sites ────────────────────────────────────────────────────────
     @app.get("/api/sites")
     def list_sites():

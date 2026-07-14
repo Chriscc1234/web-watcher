@@ -430,8 +430,21 @@ def refine_ebay_url(url: str, fallback_zip: str | None = None) -> str:
             zip5 = fallback_zip
         text = re.sub(r"\s+", " ", text).strip(" ,-")
 
+        # A generic vehicle search ("vehicles", "autos", "cars and trucks") as a plain eBay
+        # keyword returns die-cast toys, parts, and accessories — never actual cars. Route it
+        # into eBay Motors → Cars & Trucks (_sacat=6001), where only real vehicles live, and
+        # fold the generic words in (the category IS the filter). Drop any bogus _dcat.
+        if _GENERIC_VEHICLE.search(text):
+            q["_sacat"] = "6001"
+            q.pop("_dcat", None)
+            text = _GENERIC_VEHICLE.sub(" ", text)
+            text = _NARROW_VEHICLE.sub(" ", text)
+            text = re.sub(r"\s+", " ", text).strip(" ,-")
+
         if text:
             q["_nkw"] = text
+        else:
+            q.pop("_nkw", None)
         if (hi or max_p) is not None and "_udhi" not in q:
             q["_udhi"] = str(hi or max_p)
         if (lo or min_p) is not None and "_udlo" not in q:

@@ -84,6 +84,10 @@ class ModelsConfig(BaseModel):
     # text_model on every tier, so the fallback is always available). Set explicitly to
     # use a stronger reasoning model on capable hardware.
     council_model: str = ""
+    # inspect_model drives Deep Inspect — the slow, thorough deal/scam evaluation of a single
+    # listing. Empty => auto-pick the biggest GENERAL model installed (see inspect.py), so a
+    # pulled qwen2.5:72b is used automatically without editing config. Not the coder tune.
+    inspect_model: str = ""
     ocr_threshold: int = 200  # chars — if DOM text is below this, fall back to vision OCR
 
     @property

@@ -1714,6 +1714,26 @@ function watchRowHtml(w, isActive) {
   // found nothing is the classic "search terms too narrow / rating too high" signal.
   const st = w.stats || {};
   let statsLine = '';
+  // A goal watch (restock) shows its live condition, not listings stats.
+  if (w.goal_kind === 'restock') {
+    const gs = w.goal_state;
+    const size = w.target_size || 'that size';
+    let state;
+    if (!gs) state = `<span style="color:var(--dim)">checking…</span>`;
+    else if (gs.available) state = `<span style="color:#34d399;font-weight:600">IN STOCK ✓</span>`;
+    else state = `<span style="color:var(--dim)">out of stock</span>`;
+    statsLine = `<br><small style="color:var(--dim)">📦 watching <strong>${size}</strong> — ${state}</small>`;
+    return `<tr>
+      <td><strong>${w.name}</strong><span class="badge" style="background:#1e2a3a;color:#8fb8e8;margin-left:6px">restock</span><br><small style="color:var(--dim)">${w.urls[0]||''}</small>${statsLine}</td>
+      <td>${statusCell}</td>
+      <td style="color:var(--dim)">${lr ? timeAgo(lr.run_timestamp) : '—'}</td>
+      <td>${foundBadge}</td>
+      <td style="color:var(--dim)">${nextCell}</td>
+      <td><div class="actions-cell">${toggleBtn}${runBtn}
+        <button class="danger" onclick="deleteWatch('${nm}')">Delete</button>
+      </div></td>
+    </tr>`;
+  }
   if (st.observations) {
     const found = st.matches || 0;
     const foundTxt = found

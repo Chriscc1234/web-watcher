@@ -529,7 +529,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     @app.get("/api/watches")
     def list_watches():
         from web_watcher.config import load
-        from web_watcher.storage import get_last_run, watch_stats
+        from web_watcher.storage import get_last_run, watch_stats, get_goal_state
 
         cfg      = load()
         job_map  = {j["watch_name"]: j for j in manager.get_job_info()}
@@ -538,7 +538,11 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             last = get_last_run(w.name)
             job  = job_map.get(w.name, {})
             stats = watch_stats(w.id or w.name, w.name)
+            goal_state = get_goal_state(w.id or w.name) if w.goal_kind else None
             result.append({
+                "goal_kind":        w.goal_kind,
+                "target_size":      w.target_size,
+                "goal_state":       goal_state,   # {available, note} for a goal watch, else None
                 "name":             w.name,
                 "enabled":          w.enabled,
                 "urls":             w.urls,
@@ -1677,7 +1681,8 @@ def _learned_sites_context() -> str:
 # Keys that mark a dict as a BARE watch object the local model emitted without the
 # {"message", "watch_suggestion"} envelope (a frequent qwen mistake).
 _WATCH_SHAPE_KEYS = {"urls", "instruction", "judgment_prompt", "mode", "autonomous",
-                     "perception", "interval_minutes", "cron_expression", "max_agent_steps"}
+                     "perception", "interval_minutes", "cron_expression", "max_agent_steps",
+                     "goal_kind", "target_size"}
 
 
 def _normalize_turn(data: dict) -> dict:
@@ -1887,6 +1892,18 @@ when no canoe watch exists → CREATE, even though a "craigslist" word appears e
 
 When unsure between create/update/none, prefer CREATE for a clearly-new thing, else "none".
 Never invent a change the user didn't ask for.
+
+RESTOCK / BACK-IN-STOCK WATCHES (a goal watch, not a listings search):
+When the user wants to know when a SPECIFIC product (usually a single product-page URL) comes
+BACK IN STOCK / becomes available again — often in a particular size or variant — create a
+watch with "goal_kind": "restock". Put the product URL in "urls" (exactly as given, keep any
+?variant=), and put the size/variant in "target_size" (e.g. "34W x 30L", "Large", "US 10").
+Do NOT turn it into a keyword search and do NOT add other sites. Example: user says "watch
+https://shop.com/products/pants?variant=123 and tell me when 34W x 30L is back in stock" →
+{"action":"create","name":"<short name>","urls":["https://shop.com/products/pants?variant=123"],
+"instruction":"Alert when 34W x 30L is back in stock","goal_kind":"restock",
+"target_size":"34W x 30L","interval_minutes":30}. (Interval watches only — restock checks run
+on a schedule, not a continuous browser.)
 
 Output STRICT JSON, no prose, no markdown:
 {

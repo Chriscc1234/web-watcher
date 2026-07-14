@@ -186,6 +186,13 @@ class Watch(BaseModel):
     # Use the persistent login browser profile (for sites that require sign-in, e.g. Facebook)
     use_login_profile: bool = False
 
+    # ── Goal watch (monitor a CONDITION, not listings) ────────────────────────
+    # goal_kind "" = a normal listings watch (everything above). "restock" = watch a specific
+    # product page (urls[0]) for a size/variant coming back IN STOCK, and alert on the flip.
+    # This is the first slice of the general goal/condition monitor — listings is one template.
+    goal_kind:   str = ""      # "" | "restock"
+    target_size: str = ""      # e.g. "34W x 30L" — the variant to watch (restock)
+
     @field_validator("perception")
     @classmethod
     def perception_must_be_valid(cls, v: str) -> str:

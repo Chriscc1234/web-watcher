@@ -1507,11 +1507,71 @@ def _execute_watch(
             log.info("Watch %r is disabled — skipping", watch_name)
             return
 
+        # Goal watches (restock, …) run a lightweight condition check, not the listings
+        # pipeline. Listings is just the default template.
+        if watch.goal_kind:
+            _run_goal_check(watch, cfg, run_ts, db_path)
+            return
+
         _run_pipeline(watch, cfg, run_ts, db_path)
 
     except Exception as exc:
         log.error("Unhandled error in watch %r: %s", watch_name, exc, exc_info=True)
         _save_error(watch_name, run_ts, str(exc), db_path)
+
+
+def _run_goal_check(
+    watch:   Watch,
+    cfg:     AppConfig,
+    run_ts:  str,
+    db_path: Optional[Path],
+) -> None:
+    """Run one goal-watch check (currently: restock) and alert on the CONDITION FLIP — e.g.
+    a size going out-of-stock → IN STOCK — using the best signal the site offers (a Shopify
+    data endpoint here). Remembers the last state so it never re-alerts on an already-true
+    condition, and records a run either way for the health line."""
+    from web_watcher import goalwatch
+    from web_watcher.storage import get_goal_state, save_goal_state
+    key = watch.id or watch.name
+    url = watch.urls[0] if watch.urls else ""
+
+    if watch.goal_kind == "restock":
+        res = goalwatch.check_restock(url, cfg, size_text=watch.target_size)
+    else:
+        log.warning("Unknown goal_kind %r for %r", watch.goal_kind, watch.name)
+        return
+
+    if not res.get("ok"):
+        # Couldn't determine the state (size not found, non-Shopify, network) — record the
+        # note, don't touch the remembered state, don't alert.
+        log.info("Goal check %r: %s", watch.name, res.get("note"))
+        save_run(RunRecord(watch.name, run_ts, found=False, summary=res.get("note", ""),
+                           link=url, confidence="low"), db_path)
+        return
+
+    now_available = bool(res["available"])
+    prev = get_goal_state(key, db_path) or {}
+    was_available = bool(prev.get("available"))
+    became_available = now_available and not was_available   # the flip (and first-check-in-stock)
+
+    save_goal_state(key, {"available": now_available, "note": res.get("note", "")}, run_ts, db_path)
+    save_run(RunRecord(watch.name, run_ts, found=became_available, summary=res.get("note", ""),
+                       link=url, confidence="high"), db_path)
+    log.info("Goal check %r: %s%s", watch.name, res.get("note", ""),
+             "  → ALERTING (back in stock!)" if became_available else "")
+
+    if became_available and (watch.notify.telegram or watch.notify.email):
+        summary = f"BACK IN STOCK: {res.get('variant_title') or watch.target_size}"
+        if res.get("price"):
+            summary += f" — {res['price']}"
+        summary += f"\n{res.get('note', '')}"
+        result = ReasoningResult(found=True, summary=summary, confidence="high", link=url)
+        payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=run_ts)
+        try:
+            send_notifications(payload, cfg.notifications,
+                               use_telegram=watch.notify.telegram, use_email=watch.notify.email)
+        except Exception as exc:
+            log.warning("Restock alert send failed for %r (%s)", watch.name, exc)
 
 
 def _run_pipeline(

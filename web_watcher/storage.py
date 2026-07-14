@@ -163,6 +163,16 @@ CREATE TABLE IF NOT EXISTS site_profiles (
 )
 """
 
+# Last-known state of a GOAL watch (e.g. a restock's availability), so the scheduler alerts
+# on the FLIP (out-of-stock → in-stock) instead of every time it re-checks.
+_CREATE_GOAL_STATE_TABLE = """
+CREATE TABLE IF NOT EXISTS goal_state (
+    watch_id   TEXT PRIMARY KEY,
+    state      TEXT,
+    updated_at TEXT
+)
+"""
+
 
 # ---------------------------------------------------------------------------
 # Record type
@@ -200,6 +210,7 @@ def init_db(db_path: Path | None = None) -> None:
         conn.execute(_CREATE_OBSERVATIONS_INDEX)
         conn.execute(_CREATE_TERM_EXPANSIONS_TABLE)
         conn.execute(_CREATE_SITE_PROFILES_TABLE)
+        conn.execute(_CREATE_GOAL_STATE_TABLE)
         # Migration: add `fingerprint` to a pre-existing listings table that lacks it.
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(listings)").fetchall()]
         if "fingerprint" not in cols:
@@ -669,6 +680,39 @@ def save_site_understanding(url_or_host: str, understanding: dict,
             "VALUES (?, ?, ?)", (domain, domain, domain.split(".")[0]))
         conn.execute("UPDATE site_profiles SET understanding=? WHERE domain=?",
                      (json.dumps(understanding), domain))
+
+
+def get_goal_state(watch_id: str, db_path: Path | None = None) -> dict | None:
+    """The last recorded state of a goal watch (e.g. {available: false}), or None."""
+    if not watch_id:
+        return None
+    path = _resolve(db_path)
+    if not path.exists():
+        return None
+    try:
+        with _connect(path) as conn:
+            row = conn.execute("SELECT state FROM goal_state WHERE watch_id=?",
+                               (watch_id,)).fetchone()
+    except Exception:
+        return None
+    if not row or not row["state"]:
+        return None
+    try:
+        return json.loads(row["state"])
+    except Exception:
+        return None
+
+
+def save_goal_state(watch_id: str, state: dict, ts: str, db_path: Path | None = None) -> None:
+    """Persist the current state of a goal watch so the next check can detect a change."""
+    if not watch_id:
+        return
+    path = _resolve(db_path)
+    with _connect(path) as conn:
+        conn.execute(
+            "INSERT INTO goal_state (watch_id, state, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(watch_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
+            (watch_id, json.dumps(state), ts))
 
 
 def get_site_understanding(url_or_host: str, db_path: Path | None = None) -> dict | None:

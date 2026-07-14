@@ -11,6 +11,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.38.0-alpha] — 2026-07-13 (Watch anything, not just listings: back-in-stock alerts)
+
+### Added — restock watches ("tell me when it's back in stock")
+- Web Watcher is no longer only a listings finder. You can now point it at a **specific product
+  page** and have it tell you the moment a size/variant comes **back in stock** — the first of
+  the general "watch this and tell me when a condition is true" watches (listings are just one
+  kind).
+- Just tell the Watcher: *"watch this page https://…/products/… and tell me when 34W x 30L is
+  back in stock."* It sets up a restock watch — the URL, the size, checked on a schedule.
+- It uses the **most reliable signal a site offers** rather than guessing from the page: on a
+  Shopify store it reads the exact `in stock / out of stock` flag for that variant straight
+  from the store's own data — so no false alarms. When the size flips from out-of-stock to
+  in-stock, you get one alert (and it won't nag you again while it stays in stock).
+- The watch card shows the live state at a glance: *"📦 watching 34W x 30L — out of stock"* →
+  *"IN STOCK ✓"*.
+- Validated against a real store (Thrive Workwear): correctly reads a sold-out size as out of
+  stock and an available size as in stock, and the "create it by talking" flow works.
+
+---
+
 ## [0.37.0-alpha] — 2026-07-13 (It understands the site now, not just reacts to it)
 
 ### Added — site comprehension: the agent figures out what a site actually IS

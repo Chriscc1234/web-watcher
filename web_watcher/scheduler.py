@@ -681,14 +681,15 @@ def _run_agent_continuous_sweep(
         u = get_site_understanding(plan.get("start_url") or (watch.urls[0] if watch.urls else ""))
         if u and not u.get("error"):
             sb = u.get("search_box") or {}
+            # Understanding SERVES the goal — it never tells the agent to give up on a site
+            # (a restock page or a data page is a valid goal, not a failure). It just helps it
+            # use the site correctly: what the site is, and what each input actually does.
             note = f"WHAT THIS SITE IS: {u.get('site_kind', 'unknown')}."
-            if not u.get("is_listings_site", True):
-                note += (" This does NOT look like a site where items are listed for sale"
-                         + (f" ({u.get('reason')})." if u.get("reason") else ".")
-                         + " If you can't find any listings, finish quickly.")
+            if u.get("how_to_find_listings"):
+                note += " " + u["how_to_find_listings"]
             if sb.get("purpose") == "location":
-                note += (" Its search box is a LOCATION picker, NOT a keyword search — do NOT "
-                         "type product keywords into it; use it only to set a place.")
+                note += (" Its search box is a LOCATION picker, NOT a keyword search — use it "
+                         "ONLY to set a place; do NOT type your goal or product keywords into it.")
             instruction = note + "\n\n" + instruction
     except Exception:
         pass

@@ -213,6 +213,11 @@ def init_db(db_path: Path | None = None) -> None:
         obs_cols = [r["name"] for r in conn.execute("PRAGMA table_info(observations)").fetchall()]
         if "rating" not in obs_cols:
             conn.execute("ALTER TABLE observations ADD COLUMN rating INTEGER")
+        # Migration: add `understanding` (JSON: what KIND of site this is, what its search box
+        # does, whether it's viable to watch) to a pre-existing site_profiles table.
+        sp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(site_profiles)").fetchall()]
+        if "understanding" not in sp_cols:
+            conn.execute("ALTER TABLE site_profiles ADD COLUMN understanding TEXT")
 
 
 def save_run(record: RunRecord, db_path: Path | None = None) -> int:
@@ -637,12 +642,56 @@ def upsert_site_profile(profile: dict, db_path: Path | None = None) -> None:
     }
     path = _resolve(db_path)
     placeholders = ", ".join("?" for _ in _SITE_PROFILE_COLS)
+    # UPSERT (not INSERT OR REPLACE) so re-learning a site's mechanics does NOT wipe the
+    # separately-maintained `understanding` column (what kind of site it is).
+    updates = ", ".join(f"{c}=excluded.{c}" for c in _SITE_PROFILE_COLS if c != "domain")
     with _connect(path) as conn:
         conn.execute(
-            f"INSERT OR REPLACE INTO site_profiles ({', '.join(_SITE_PROFILE_COLS)}) "
-            f"VALUES ({placeholders})",
+            f"INSERT INTO site_profiles ({', '.join(_SITE_PROFILE_COLS)}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT(domain) DO UPDATE SET {updates}",
             tuple(row[c] for c in _SITE_PROFILE_COLS),
         )
+
+
+def save_site_understanding(url_or_host: str, understanding: dict,
+                            db_path: Path | None = None) -> None:
+    """Persist the semantic understanding of a site (site_kind, search-box purpose, whether
+    it's viable to watch) as JSON on its profile row — creating a stub row if none exists.
+    Kept separate from the mechanical profile so each can be refreshed without the other."""
+    domain = site_key(url_or_host)
+    if not domain:
+        return
+    path = _resolve(db_path)
+    with _connect(path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO site_profiles (domain, display_name, key_prefix) "
+            "VALUES (?, ?, ?)", (domain, domain, domain.split(".")[0]))
+        conn.execute("UPDATE site_profiles SET understanding=? WHERE domain=?",
+                     (json.dumps(understanding), domain))
+
+
+def get_site_understanding(url_or_host: str, db_path: Path | None = None) -> dict | None:
+    """The stored understanding for a URL/host, or None if not yet comprehended."""
+    domain = site_key(url_or_host)
+    if not domain:
+        return None
+    path = _resolve(db_path)
+    if not path.exists():
+        return None
+    try:
+        with _connect(path) as conn:
+            row = conn.execute(
+                "SELECT understanding FROM site_profiles WHERE domain=?", (domain,)
+            ).fetchone()
+    except Exception:
+        return None
+    if not row or not row["understanding"]:
+        return None
+    try:
+        return json.loads(row["understanding"])
+    except Exception:
+        return None
 
 
 def get_site_profile(url_or_host: str, db_path: Path | None = None) -> dict | None:

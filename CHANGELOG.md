@@ -11,6 +11,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.37.0-alpha] — 2026-07-13 (It understands the site now, not just reacts to it)
+
+### Added — site comprehension: the agent figures out what a site actually IS
+- Reading the autocomplete (0.36) was a smart reflex, but it didn't *understand* the site.
+  Now, when Web Watcher meets a site it doesn't already know, it does a real comprehension
+  pass: a quick structural scan (the page's title, its nav/sections, every search box **with
+  its own label**, whether it shows a grid of priced items) is handed to the big local model,
+  which reasons about it and produces an understanding:
+  - **what kind of site** it is (marketplace / classifieds / weather / news / store / …)
+  - **what the search box is for** — a keyword item-search vs. a location picker — from the
+    box's *own label*, not a guess
+  - **whether it's even a place to monitor listings**
+- That understanding is cached and used two ways: it **guides the agent** ("this site's search
+  box is a location picker — don't type product keywords into it"), and it flags a site that
+  can't work (a weather site comes back "not a listings site" with a plain reason).
+- Validated: shown weather.gov it correctly reads the box label *"Enter your City, ST or ZIP"*
+  and concludes it's a weather site with a location search — the exact case that used to make
+  it type product terms into a box that only wanted a city.
+- Uses your local `qwen2.5:72b` (now installed) automatically; runs only for sites it doesn't
+  already know, in the background, so it never slows down a normal watch.
+
+---
+
 ## [0.36.0-alpha] — 2026-07-13 (Closing the loop: the agent reads what the page says back)
 
 ### Changed — the agent now understands the effect of what it types

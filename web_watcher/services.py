@@ -529,6 +529,41 @@ class ServiceManager:
             return dict(self._inspections.get(url) or {"status": "unknown", "url": url})
 
     # ------------------------------------------------------------------
+    # Site comprehension (understand a site: kind, search-box purpose, viability)
+    # ------------------------------------------------------------------
+
+    def comprehend_start(self, url: str, refresh: bool = False) -> dict:
+        """Comprehend a site on a worker thread (browser scan + a slow big model) and cache
+        the understanding on its profile. Idempotent while one is running for the same URL."""
+        if not url:
+            return {"status": "error", "error": "no url"}
+        with self._inspect_lock:
+            cur = self._inspections.get("comprehend:" + url)
+            if cur and cur.get("status") == "running":
+                return cur
+            self._inspections["comprehend:" + url] = {"status": "running", "url": url}
+
+        def _run() -> None:
+            from web_watcher.config import load as load_config
+            from web_watcher import comprehend as _co
+            try:
+                u = _co.understanding_for(url, load_config(), refresh=refresh)
+                status = "error" if u.get("error") else "done"
+                with self._inspect_lock:
+                    self._inspections["comprehend:" + url] = {"status": status, "url": url, "understanding": u}
+            except Exception as exc:
+                log.warning("comprehend_start failed for %s: %s", url, exc)
+                with self._inspect_lock:
+                    self._inspections["comprehend:" + url] = {"status": "error", "url": url, "error": str(exc)}
+
+        threading.Thread(target=_run, daemon=True, name="ww-comprehend").start()
+        return self._inspections["comprehend:" + url]
+
+    def comprehend_status(self, url: str) -> dict:
+        with self._inspect_lock:
+            return dict(self._inspections.get("comprehend:" + url) or {"status": "unknown", "url": url})
+
+    # ------------------------------------------------------------------
     # Ollama
     # ------------------------------------------------------------------
 

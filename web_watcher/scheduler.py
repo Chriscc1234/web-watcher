@@ -673,6 +673,26 @@ def _run_agent_continuous_sweep(
         "- Don't finish on the very first step — scroll first."
     )
 
+    # If we already UNDERSTAND this site (comprehension pass), lead with what it IS and what
+    # its search box is FOR — so the agent reasons from understanding, not blind. Cached only;
+    # never comprehends in the hot sweep path.
+    try:
+        from web_watcher.storage import get_site_understanding
+        u = get_site_understanding(plan.get("start_url") or (watch.urls[0] if watch.urls else ""))
+        if u and not u.get("error"):
+            sb = u.get("search_box") or {}
+            note = f"WHAT THIS SITE IS: {u.get('site_kind', 'unknown')}."
+            if not u.get("is_listings_site", True):
+                note += (" This does NOT look like a site where items are listed for sale"
+                         + (f" ({u.get('reason')})." if u.get("reason") else ".")
+                         + " If you can't find any listings, finish quickly.")
+            if sb.get("purpose") == "location":
+                note += (" Its search box is a LOCATION picker, NOT a keyword search — do NOT "
+                         "type product keywords into it; use it only to set a place.")
+            instruction = note + "\n\n" + instruction
+    except Exception:
+        pass
+
     # Guardrail: stop the agent the instant it leaves the start site or lands on a
     # login wall, so it never interacts with a login form or wanders off-site.
     start_site = _registrable_domain(plan["start_url"])

@@ -592,7 +592,22 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         # NOTE: exploration of an unknown site happens when the watch is STARTED (see
         # scheduler._execute_continuous_watch), not here — creating a watch shouldn't kick
         # off a browser. `needs_exploring` just lets the UI mention it up front.
-        from web_watcher.sitelearn import unknown_sites
+        from web_watcher.sitelearn import unknown_sites, site_status
+        # Comprehend any NON-builtin site we don't yet understand, in the background, so the
+        # agent reasons from what the site actually is — and a not-viable site (e.g. a weather
+        # site) can be flagged. Built-in marketplaces (craigslist/ebay/…) are skipped.
+        try:
+            from web_watcher.storage import get_site_understanding, site_key
+            seen: set[str] = set()
+            for u in (new_watch.urls or []):
+                k = site_key(u)
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                if site_status(u).get("kind") != "builtin" and not get_site_understanding(u):
+                    manager.comprehend_start(u)
+        except Exception:
+            pass
         return {"ok": True, "name": new_watch.name, "needs_exploring": unknown_sites(new_watch.urls)}
 
     @app.put("/api/watches/{watch_name}")
@@ -729,6 +744,26 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     @app.get("/api/inspect")
     def get_inspect(url: str):
         return manager.inspect_status(url)
+
+    # ── Site comprehension (what kind of site is this, is it watchable) ───────
+    @app.post("/api/comprehend")
+    def start_comprehend(body: dict):
+        """Comprehend a site: open it, scan its structure, and a big local model decides what
+        KIND of site it is, what its search box is for, and whether it's viable to monitor.
+        Non-blocking — poll GET /api/comprehend. Result is cached on the site profile."""
+        url = (body.get("url") or "").strip()
+        if not url.startswith("http"):
+            raise HTTPException(400, detail="A site URL is required.")
+        return manager.comprehend_start(url, refresh=bool(body.get("refresh")))
+
+    @app.get("/api/comprehend")
+    def get_comprehend(url: str):
+        # Serve a cached understanding immediately if we have one; else the live job status.
+        from web_watcher.storage import get_site_understanding
+        cached = get_site_understanding(url)
+        if cached:
+            return {"status": "done", "url": url, "understanding": cached}
+        return manager.comprehend_status(url)
 
     # ── Learned sites ────────────────────────────────────────────────────────
     @app.get("/api/sites")

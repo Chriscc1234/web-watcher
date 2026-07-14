@@ -11,6 +11,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.39.0-alpha] — 2026-07-14 (Stabilization: fix the agent crash + rough restock edges)
+
+### Fixed — the browsing agent was crashing on nearly every step
+- When the AI returned a scroll amount like `"50%"`, the code did `int("50%")` and the whole
+  agent action died ("invalid literal for int"). That's why it seemed to **stop typing into
+  and selecting search boxes** — it was crashing before it could act. Scroll amounts (and the
+  recovery path) now parse robustly and never crash. Regression-tested.
+
+### Fixed — creating a restock watch by chat was clumsy
+- Asking to watch a product page for a size to come back in stock used to send the Watcher into
+  "let me explore this site / do you need a login?" and then drift onto an unrelated existing
+  watch. It now recognizes a back-in-stock request immediately, proposes the restock watch on
+  the spot, and doesn't confuse it with your other watches.
+- The chat's watch card now renders a restock watch as what it is ("📦 Watch for: back in stock
+  — 34W × 30L") instead of a confusing raw-URL listings card.
+
+### Changed — the browser now reports the watch's location
+- Sites that show "your area" from your location now get the **watch's** coordinates. This helps
+  location-aware sites — but note **OfferUp ignores it** and still needs a different fix for its
+  out-of-area results (coming next); the AI judge already discards those, so they don't alert.
+
+---
+
 ## [0.38.0-alpha] — 2026-07-13 (Watch anything, not just listings: back-in-stock alerts)
 
 ### Added — restock watches ("tell me when it's back in stock")

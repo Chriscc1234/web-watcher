@@ -130,3 +130,17 @@ def test_coerce_index_variants():
     assert _coerce_index(None) is None
     assert _coerce_index(True) is None
     assert _coerce_index("no digits") is None
+
+
+def test_coerce_amount_never_crashes_on_percent():
+    # The real crash: the model returned "amount":"50%" and int("50%") killed the whole
+    # agent step ("Agent LLM call failed: invalid literal for int() with base 10: '50%'").
+    from web_watcher.agent import _coerce_amount
+    assert _coerce_amount("50%") == 50
+    assert _coerce_amount("300") == 300
+    assert _coerce_amount(300) == 300
+    assert _coerce_amount(12.9) == 12
+    assert _coerce_amount(None) == 300        # default
+    assert _coerce_amount(True) == 300        # bool is not a number here
+    assert _coerce_amount("scroll down") == 300
+    assert _coerce_amount("about 40px") == 40

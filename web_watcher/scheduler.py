@@ -507,6 +507,21 @@ def _execute_continuous_watch(
     log.info("Continuous loop ended for %r (%d sweeps)", watch_name, sweep_index)
 
 
+def _watch_geolocation(watch: Watch):
+    """(lat, lon) for this watch's location — from a zip in any of its URLs (craigslist
+    postal / eBay _stpos), else derived from its instruction — so IP/geo-based sites like
+    OfferUp show the RIGHT area instead of a default (that's what served Florida junk).
+    None when the location is unknown."""
+    try:
+        from web_watcher.cl_geo import url_zip, zip_from_text, zip_latlon
+        z = next((zz for zz in (url_zip(u) for u in (watch.urls or [])) if zz), None)
+        if not z:
+            z = zip_from_text(watch.instruction or "")
+        return zip_latlon(z) if z else None
+    except Exception:
+        return None
+
+
 def _open_continuous_browser(old: Optional["BrowserSession"], watch: Watch, cfg: AppConfig):
     """
     Open a fresh persistent browser session + page for the continuous loop, closing
@@ -520,6 +535,7 @@ def _open_continuous_browser(old: Optional["BrowserSession"], watch: Watch, cfg:
         persistent  = watch.use_login_profile,
         profile_dir = cfg.browser.profile_dir,
         show_cursor = cfg.browser.show_agent_cursor,
+        geolocation = _watch_geolocation(watch),
     )
     session.__enter__()
     page = session.new_page()
@@ -1592,6 +1608,7 @@ def _run_pipeline(
         with BrowserSession(
             headless=cfg.browser.headless,
             stealth=cfg.browser.stealth,
+            geolocation=_watch_geolocation(watch),
         ) as session:
             page_results = session.run_watch(watch, screenshot=need_screenshot)
         scratchpads = {}
@@ -1734,6 +1751,7 @@ def _run_agent_browse(
     with BrowserSession(
         headless=cfg.browser.headless,
         stealth=cfg.browser.stealth,
+        geolocation=_watch_geolocation(watch),
     ) as session:
         for url in watch.urls:
             page = session.new_page()

@@ -305,6 +305,18 @@ CREATING vs EDITING WATCHES
 You can BOTH create new watches and edit existing ones. The EXISTING WATCHES list \
 at the end of this prompt shows the user's current watches with their full config.
 
+RESTOCK / BACK-IN-STOCK REQUESTS come FIRST — check for these before anything else. \
+If the user gives a SPECIFIC PRODUCT PAGE URL (usually a single item, often with \
+?variant=) and asks to be told when it is BACK IN STOCK or when a size/variant is \
+AVAILABLE again, that is a RESTOCK watch. Just CONFIRM and set it up — it is a \
+brand-NEW watch (never fold it into an existing vehicle/listings watch). Do NOT ask \
+whether the site needs a login, and do NOT offer to "explore" or "learn" the site \
+first: a product page needs neither — the app reads the item's stock directly. Reply \
+briefly ("I'll watch that page and let you know the moment 34W x 30L is back in \
+stock.") and let the watch card be created. This request has NOTHING to do with any \
+existing vehicle or listings watch — do not mention Anacortes, Craigslist, OfferUp, \
+or any other watch.
+
 - To CREATE a new watch: set "action": "create" and use a NEW name.
 - To EDIT an existing watch: set "action": "update" and use the EXACT existing \
   name. Include the FULL config you want it to have (every field, not just the \

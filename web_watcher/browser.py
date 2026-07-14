@@ -299,8 +299,13 @@ class BrowserSession:
         persistent: bool = False,
         profile_dir: str | Path | None = None,
         show_cursor: bool = False,
+        geolocation: tuple[float, float] | None = None,
     ) -> None:
         self._headless = headless
+        # (lat, lon) to report via the Geolocation API — so sites that show "your area"
+        # from location (OfferUp, store locators) show the WATCH's area, not a default
+        # (a fresh automated browser has no location → OfferUp was serving Florida junk).
+        self._geolocation = geolocation
         # NOTE: `stealth` is deliberately unused. The fingerprint patches (webdriver/UA/cores/
         # memory/screen) are applied to EVERY session — turning them off has no user benefit and
         # a bare Playwright fingerprint gets instantly flagged. What the Settings "stealth" flag
@@ -352,6 +357,12 @@ class BrowserSession:
             ctx_kwargs["viewport"] = {"width": w, "height": h}
         else:
             ctx_kwargs["no_viewport"] = True
+        # Report the watch's location so IP/geo-based sites (OfferUp, store locators) show
+        # the right area instead of a default. Grant the permission so the API doesn't prompt.
+        if self._geolocation:
+            lat, lon = self._geolocation
+            ctx_kwargs["geolocation"]  = {"latitude": float(lat), "longitude": float(lon)}
+            ctx_kwargs["permissions"]  = ["geolocation"]
         return ctx_kwargs
 
     def _session_fingerprint_js(self) -> str:

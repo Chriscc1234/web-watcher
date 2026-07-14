@@ -845,7 +845,7 @@ def _convene_council(
             text          = data.get("text"),
             key           = data.get("key"),
             direction     = data.get("direction", "down"),
-            amount        = int(data.get("amount") or 300),
+            amount        = _coerce_amount(data.get("amount")),
             summary       = data.get("summary"),
         )
         log.info("Get-unstuck: %s (el=%s) — %s | %s",
@@ -1646,11 +1646,23 @@ def _query_llm(
         text          = data.get("text"),
         key           = data.get("key"),
         direction     = data.get("direction", "down"),
-        amount        = int(data.get("amount") or 300),
+        amount        = _coerce_amount(data.get("amount")),
         summary       = data.get("summary"),
         memory_key    = data.get("memory_key"),
         memory_value  = str(data.get("memory_value", "")) if data.get("memory_value") is not None else None,
     )
+
+
+def _coerce_amount(v, default: int = 300) -> int:
+    """Best-effort scroll amount → int. The model sometimes returns a percentage ('50%'),
+    a float, or junk — pull the digits, default when there are none. NEVER raises (a bad
+    value here used to crash the whole agent step with int('50%'))."""
+    if isinstance(v, bool) or v is None:
+        return default
+    if isinstance(v, (int, float)):
+        return int(v)
+    m = re.search(r"\d+", str(v))
+    return int(m.group()) if m else default
 
 
 def _coerce_index(v) -> Optional[int]:

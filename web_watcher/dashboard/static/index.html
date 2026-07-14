@@ -2106,6 +2106,26 @@ function appendWatchCard(suggestion, boxId = 'dock-convo') {
   if (suggestion.use_login_profile) extras.push('logged-in (Facebook)');
   if (suggestion.judgment_prompt) extras.push('judgment filter');
   const verb = isUpdate ? 'Update' : 'Create';
+  // A goal watch (restock) is NOT a listings search — render it as what it is, or the card
+  // shows a confusing raw-URL "Searches" line with no mention of the size being watched.
+  if (suggestion.goal_kind === 'restock') {
+    let host = ''; try { host = new URL((suggestion.urls||[])[0]||'').hostname.replace(/^www\./,''); } catch(e){}
+    card.innerHTML = `
+      <div class="watch-card">
+        <h4>📦 ${isUpdate ? 'Edit: ' : ''}${esc(suggestion.name || 'Restock watch')}</h4>
+        <div class="kv"><span class="k">Watch for</span><span>back in stock${suggestion.target_size ? `: <strong>${esc(suggestion.target_size)}</strong>` : ''}</span></div>
+        <div class="kv"><span class="k">Product</span><span>${esc(host || (suggestion.urls||[])[0] || '')}</span></div>
+        <div class="kv"><span class="k">Checks</span><span>${scheduleText || 'every 30 min'}</span></div>
+        <div class="actions">
+          <button class="success" onclick="createWatchFromSuggestion(window._suggestionRegistry['${sugId}'], this, '${boxId}')">${verb} this watch</button>
+          <button onclick="editSuggestionInModal(window._suggestionRegistry['${sugId}'])">Edit before ${isUpdate ? 'saving' : 'creating'}</button>
+        </div>
+        <div style="color:var(--dim);font-size:.85em;margin-top:6px">A draft — nothing changes until you apply it.</div>
+      </div>`;
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+    return;
+  }
   // Show the search TERMS (decoded from the query params), not a wall of 8 long URLs —
   // that wall was what squished the card. Falls back to the raw URLs if we can't decode.
   const urls = suggestion.urls || [];

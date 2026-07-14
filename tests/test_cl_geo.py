@@ -279,3 +279,40 @@ def test_craigslist_fallback_zip_localizes():
                                   fallback_zip="98221")
     host, _, q = _parts(fixed)
     assert host == "skagit.craigslist.org" and q["postal"] == "98221"
+
+
+# ── 0.33: trailing-period town extraction + wrong-zip heal + eBay condition strip ──
+
+def test_zip_from_text_handles_trailing_period():
+    # Instructions almost always end in a period; the period must not defeat the lookup.
+    from web_watcher.cl_geo import zip_from_text
+    assert zip_from_text("Search for any vehicles under $10,000 in Anacortes.") == "98221"
+    assert zip_from_text("vehicles in Anacortes") == "98221"
+
+
+def test_ensure_location_fixes_wrong_present_zip_and_region():
+    # The user's real watch: seattle subdomain + a bogus/wrong postal (98210). The instruction
+    # names Anacortes, so it must heal to skagit + 98221 (region AND the invalid postal).
+    from web_watcher.cl_geo import ensure_location
+    bad = "https://seattle.craigslist.org/search/cta?max_price=10000&postal=98210&search_distance=50"
+    host, _, q = _parts(ensure_location(bad, "Search for any vehicles under $10,000 in Anacortes."))
+    assert host == "skagit.craigslist.org"
+    assert q["postal"] == "98221"
+
+
+def test_refine_ebay_strips_new_only_condition():
+    # A new-only condition filter excludes used cars and lets brand-new toys/parts flood in.
+    from web_watcher.cl_geo import refine_ebay_url
+    fixed = refine_ebay_url(
+        "https://www.ebay.com/sch/i.html?_nkw=vehicles&_sacat=0&LH_ItemCondition=1000|1500")
+    _, _, q = _parts(fixed)
+    assert "LH_ItemCondition" not in q
+
+
+def test_refine_ebay_keeps_used_condition():
+    # A used-condition filter (3000) is exactly right — don't strip it.
+    from web_watcher.cl_geo import refine_ebay_url
+    fixed = refine_ebay_url(
+        "https://www.ebay.com/sch/i.html?_nkw=truck&LH_ItemCondition=3000")
+    _, _, q = _parts(fixed)
+    assert q.get("LH_ItemCondition") == "3000"

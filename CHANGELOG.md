@@ -11,6 +11,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.33.0-alpha] — 2026-07-13 (No more junk in Results: the "dresser / toy cars" fix)
+
+Found by replaying a full gauntlet of the ways watches have gone wrong (wrong location,
+toys/parts flooding a vehicle watch, "everything is a match"). Three real bugs, all fixed.
+
+### Fixed — a watch pointed at the wrong place never corrected itself
+- The location self-heal added in 0.31 was silently defeated by a **period**. A watch's
+  instruction almost always ends in one ("...vehicles in Anacortes."), and the town-matching
+  code was trapping that period into the name ("anacortes.") so the lookup failed — meaning
+  the self-heal almost never fired. Fixed. An Anacortes watch that was searching Seattle now
+  corrects to the right region (Skagit) and ZIP (98221), both on its next sweep AND on the
+  card the moment you create it.
+- It also now fixes a **wrong ZIP that's already in the URL** (not just a missing one) — the
+  earlier fix only handled URLs with no location at all.
+
+### Fixed — a "vehicles" search returned Hot Wheels, antifreeze, and GPS trackers
+- eBay searches were carrying a **"new items only" condition filter**, which excludes the
+  used cars you actually want and lets brand-new toys, parts, and accessories flood in. That
+  filter is now dropped for these used-goods searches.
+
+### Fixed — off-topic junk (toys, parts, a dresser) was marked as a match
+- The rating judge had a loophole: any listing the AI **skipped** in its response was given a
+  free pass and shown as a match. On a busy sweep the AI skips a lot, so toys/parts/unrelated
+  furniture sailed through — that's the "dresser in Results." Now skipped listings are
+  re-judged once (so a real match is never lost), and anything still unrated is treated as a
+  non-match. The rubric was also sharpened so a toy/model/part/accessory version of the item —
+  or an unrelated category like furniture — is always a 1.
+
+### Note — clearing out old junk
+- These fixes apply going forward. Results collected **before** updating (under the old
+  everything-matches behavior) stay until cleared. The clean way to reset a bad watch is to
+  delete it and ask the Watcher to recreate it — new watches now get the right location and
+  filters immediately.
+
+---
+
 ## [0.32.0-alpha] — 2026-07-13 (The update banner actually shows up fast now)
 
 ### Fixed — update banner still took too long to appear after launch

@@ -223,7 +223,11 @@ def _extract_in_place(text: str, anchor: tuple[float, float] | None = None,
         return text, None
     words = re.findall(r"[a-z.'\-]+", m.group(1).lower())
     for n in range(min(3, len(words)), 0, -1):
-        cand = " ".join(words[:n])
+        # Strip sentence punctuation off the ends — an instruction almost always ends in a
+        # period ("...in Anacortes.") and a trapped trailing '.' fails the gazetteer lookup.
+        cand = " ".join(words[:n]).strip(" .'-")
+        if not cand:
+            continue
         ll = place_latlon(cand, anchor)
         if ll:
             text = re.sub(r"\b(?:in|near|around)\s+" + re.escape(cand),
@@ -289,7 +293,9 @@ def refine_craigslist_url(url: str, fallback_zip: str | None = None) -> str:
             # whose stored URL points at the wrong region with no postal.
             loc = zip_latlon(fallback_zip)
         if loc:
-            if not q.get("postal"):
+            # Fill a missing postal — or REPLACE one that doesn't resolve (a model-hallucinated
+            # zip like 98210-for-Anacortes), so search_distance has a real anchor.
+            if not q.get("postal") or not zip_latlon(q["postal"]):
                 z = nearest_zip(*loc)
                 if z:
                     q["postal"] = z
@@ -435,6 +441,16 @@ def refine_ebay_url(url: str, fallback_zip: str | None = None) -> str:
         if q.get("_stpos") and not q.get("_sadis"):
             q["_sadis"] = "50"
 
+        # This app monitors USED marketplace goods. An eBay "new-only" condition filter
+        # (LH_ItemCondition new-family codes < 3000: New / New-other / refurbished) excludes
+        # exactly the used items we want AND lets brand-new toys/parts/accessories flood the
+        # feed — that's how a "vehicles" search returned Hot Wheels + antifreeze. Drop it.
+        cond = q.get("LH_ItemCondition")
+        if cond:
+            codes = [c.strip() for c in re.split(r"[|,]", cond) if c.strip()]
+            if codes and all(c.isdigit() and int(c) < 3000 for c in codes):
+                q.pop("LH_ItemCondition", None)
+
         path = p.path if p.path.startswith("/sch/") else "/sch/i.html"
         return urlunparse(p._replace(netloc="www.ebay.com", path=path, query=urlencode(q)))
     except Exception as exc:
@@ -509,6 +525,7 @@ def zip_from_text(text: str) -> str | None:
         # (place_latlon returns None for ambiguous names without an anchor), so we never
         # guess the wrong Springfield.
         for w in re.findall(r"[a-z][a-z.'\-]{3,}", (text or "").lower()):
+            w = w.strip(" .'-")            # drop a trapped sentence-ending period ("anacortes.")
             ll = place_latlon(w)
             if ll:
                 loc = ll

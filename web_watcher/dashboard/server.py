@@ -574,7 +574,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     def create_watch(body: dict, bg: BackgroundTasks):
         from web_watcher.config import Watch, load, save
         if isinstance(body.get("urls"), list):
-            body["urls"], _ = _normalize_marketplace_urls(body["urls"])
+            body["urls"], _ = _normalize_marketplace_urls(
+                body["urls"], body.get("instruction") or body.get("name") or "")
         body = _backfill_schedule(body)
         try:
             new_watch = Watch.model_validate(body)
@@ -598,7 +599,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     def update_watch(watch_name: str, body: dict, bg: BackgroundTasks):
         from web_watcher.config import Watch, load, save
         if isinstance(body.get("urls"), list):
-            body["urls"], _ = _normalize_marketplace_urls(body["urls"])
+            body["urls"], _ = _normalize_marketplace_urls(
+                body["urls"], body.get("instruction") or body.get("name") or watch_name or "")
 
         cfg = load()
         watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
@@ -1255,12 +1257,18 @@ def _merge_watch_update(existing, body: dict, watch_name: str):
     return Watch.model_validate(merged)
 
 
-def _normalize_marketplace_urls(urls) -> tuple[list, list]:
+def _normalize_marketplace_urls(urls, hint_text: str = "") -> tuple[list, list]:
     """Rewrite obviously-wrong hosts (a city/geo subdomain on a flat site → the bare
-    domain). Returns (normalized_urls, changes) where changes is a list of (before, after)."""
+    domain). Returns (normalized_urls, changes) where changes is a list of (before, after).
+
+    hint_text (the watch's instruction) lets a URL be localized from what the user ASKED —
+    "vehicles in Anacortes" fixes a card whose URL points at the wrong region / a bogus zip,
+    so the card shows the right location immediately instead of only self-healing on the
+    first sweep."""
     from urllib.parse import urlparse, urlunparse
-    from web_watcher.cl_geo import refine_search_url, url_zip
+    from web_watcher.cl_geo import refine_search_url, url_zip, zip_from_text
     from web_watcher.storage import site_key
+    hint_zip = zip_from_text(hint_text or "")
     out, changes = [], []
     for u in urls or []:
         try:
@@ -1272,18 +1280,20 @@ def _normalize_marketplace_urls(urls) -> tuple[list, list]:
             else:
                 u2 = u
             # Per-site refine: junk query text → real params, wrong/invented locations
-            # corrected (craigslist region, OfferUp canonical /search, eBay _stpos…).
-            nu = refine_search_url(u2)
+            # corrected (craigslist region, OfferUp canonical /search, eBay _stpos…). When
+            # the URL carries no valid location of its own, seed it from the instruction.
+            nu = refine_search_url(u2, fallback_zip=hint_zip) if hint_zip and url_zip(u2) is None \
+                else refine_search_url(u2)
             if nu != u:
                 changes.append((u, nu))
             out.append(nu)
         except Exception:
             out.append(u)
     # Watch-level location propagation: if ANY url in this watch is localized to a zip
-    # (craigslist postal, eBay _stpos), give that zip to the eBay urls that lack one —
-    # "vehicles in anacortes on craigslist and ebay" localizes BOTH searches.
+    # (craigslist postal, eBay _stpos) — or the instruction named one — give that zip to the
+    # urls that lack one. "vehicles in anacortes on craigslist and ebay" localizes BOTH.
     try:
-        watch_zip = next((z for z in (url_zip(u) for u in out) if z), None)
+        watch_zip = next((z for z in (url_zip(u) for u in out) if z), None) or hint_zip
         if watch_zip:
             for i, u in enumerate(out):
                 nu = refine_search_url(u, fallback_zip=watch_zip)
@@ -1646,7 +1656,8 @@ def _normalize_turn(data: dict) -> dict:
         # silently rewritten at create time.
         for s in suggestions:
             if isinstance(s.get("urls"), list):
-                s["urls"], _ = _normalize_marketplace_urls(s["urls"])
+                hint = s.get("instruction") or s.get("listing_query") or s.get("name") or ""
+                s["urls"], _ = _normalize_marketplace_urls(s["urls"], hint)
         out["watch_suggestion"]  = suggestions[0]
         out["watch_suggestions"] = suggestions
 

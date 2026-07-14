@@ -1170,11 +1170,18 @@ def _cross_watch_match(
 # when its rating >= the watch's min_rating (default 3).
 _RATING_RUBRIC = (
     "Rate how well each listing matches the user's criteria on a 1-5 scale:\n"
-    "  1 = No match: wrong item/category/brand, or looks like spam/a scam.\n"
-    "  2 = Weak: missing essential info (condition, model, key spec) or barely relevant.\n"
+    "  1 = No match: the WRONG KIND OF THING. This includes toys/models/diecast/replicas of "
+    "the item, spare PARTS or ACCESSORIES for it, and listings from an unrelated category "
+    "(e.g. furniture when the user wants a vehicle). A $15 'Hot Wheels Silverado', a GPS "
+    "tracker, a bottle of antifreeze, or a dresser are all a 1 for a used-vehicle search. "
+    "Also 1 for obvious spam/scams.\n"
+    "  2 = Weak: right kind of thing but missing essential info (condition, model, key spec) "
+    "or barely relevant.\n"
     "  3 = Acceptable: matches the basics but with some mismatch or missing detail.\n"
     "  4 = Good match: clearly meets the criteria with relevant details.\n"
-    "  5 = Great deal: fully matches with excellent condition and/or price."
+    "  5 = Great deal: fully matches with excellent condition and/or price.\n"
+    "The actual real item the user wants — not a toy/part/accessory version of it — is the "
+    "ONLY thing that should score 3 or higher."
 )
 
 
@@ -1228,7 +1235,6 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             line += f"\n   AD DETAILS: {l.details[:600]}"
         return line
 
-    numbered = "\n".join(_entry(i, l) for i, l in enumerate(new_listings))
     system_prompt = (
         "You rate marketplace listings against a user's criteria. Each entry has a "
         "title/price and, when available, an 'AD DETAILS' line with the listing's "
@@ -1238,13 +1244,15 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
         '{"ratings": [{"i": <index>, "r": <1-5>, "why": "<≤10 words>"}, ...]}. '
         "Include EVERY listing exactly once. No other text."
     )
-    user_msg = (
-        f"Criteria: {watch.instruction}\n"
-        f"{watch.judgment_prompt or ''}\n\n"
-        f"Listings:\n{numbered}\n\n"
-        "Rate every listing."
-    )
-    try:
+
+    def _rate(subset: list) -> dict:
+        """Rate a subset — a list of (orig_index, listing) — in one LLM call. Returns
+        {orig_index: (rating, why)}. Prompt is numbered by LOCAL position, mapped back."""
+        numbered = "\n".join(_entry(k, l) for k, (_oi, l) in enumerate(subset))
+        user_msg = (
+            f"Criteria: {watch.instruction}\n{watch.judgment_prompt or ''}\n\n"
+            f"Listings:\n{numbered}\n\nRate every listing."
+        )
         payload = {
             "model": cfg.models.effective_council_model,
             "messages": [
@@ -1258,19 +1266,36 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             r.raise_for_status()
         data = json.loads(r.json()["message"]["content"])
-        by_idx: dict[int, tuple[int, str]] = {}
+        out: dict[int, tuple[int, str]] = {}
         for item in (data.get("ratings") or []):
             try:
-                n = int(item.get("i"))
+                k = int(item.get("i"))
                 r_ = max(1, min(5, int(item.get("r"))))
             except (TypeError, ValueError):
                 continue
-            if 0 <= n < len(new_listings):
-                by_idx[n] = (r_, str(item.get("why", "")).strip())
+            if 0 <= k < len(subset):
+                out[subset[k][0]] = (r_, str(item.get("why", "")).strip())
+        return out
+
+    try:
+        by_idx = _rate(list(enumerate(new_listings)))
+        # Small models silently skip entries when the batch is long or an item reads as
+        # 'obviously' off-topic. Re-judge the omitted ones once so a genuine match is never
+        # dropped merely because it went unrated on the first pass.
+        missing = [(i, l) for i, l in enumerate(new_listings) if i not in by_idx]
+        if missing:
+            log.info("Rating judge: %d/%d unrated on first pass for %r — re-judging",
+                     len(missing), len(new_listings), watch.name)
+            try:
+                by_idx.update(_rate(missing))
+            except Exception as exc:
+                log.debug("re-judge of unrated items failed for %r: %s", watch.name, exc)
 
         keep = []
         for i, l in enumerate(new_listings):
-            rating, why = by_idx.get(i, (threshold, ""))   # unrated → assume it clears (never drop silently)
+            # STILL unrated after a retry → treat as a NON-MATCH, not a free pass. Defaulting
+            # unrated→keep is exactly how toys/parts/a dresser flooded Results.
+            rating, why = by_idx.get(i, (2, "not rated by judge — treated as non-match"))
             l.rating = rating
             l.judge_reason = why or getattr(l, "judge_reason", "")
             if rating >= threshold:

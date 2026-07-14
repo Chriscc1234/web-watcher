@@ -736,15 +736,53 @@ def test_rating_threshold_lowered_lets_more_through(monkeypatch):
     assert {l.key for l in kept} == {"k:0", "k:1"}     # 2 and 3 pass, 1 drops
 
 
-def test_unrated_listing_is_not_silently_dropped(monkeypatch):
-    import web_watcher.scheduler as sch
+def _rating_reply_seq(responses):
+    """Mock Ollama returning a DIFFERENT ratings array per successive call (first pass,
+    then the retry of unrated items). Runs out → empty ratings."""
+    import json as _json
+    calls = {"n": 0}
+
+    class _R:
+        def __init__(self, ratings): self._p = {"message": {"content": _json.dumps({"ratings": ratings})}}
+        def raise_for_status(self): pass
+        def json(self): return self._p
+    class _C:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, *a, **k):
+            i = calls["n"]; calls["n"] += 1
+            return _R(responses[i] if i < len(responses) else [])
+    return _C
+
+
+def test_unrated_item_is_re_judged_then_kept(monkeypatch):
+    # An item the model skips on the first pass is re-judged; a passing retry rating keeps it.
     cfg = AppConfig.model_validate({})
     w = _cont_watch(judgment_prompt="x", min_rating=3)
     listings = [_kw_listing(i, f"item {i}") for i in range(3)]
-    # Model only rated index 0 — the other two must default to passing (threshold), never dropped blind.
-    monkeypatch.setattr("httpx.Client", _rating_reply([{"i": 0, "r": 5, "why": "top"}]))
+    # Pass 1 rates only local#0 (=k:0). Retry gets [k:1,k:2] as local #0,#1 → both good.
+    monkeypatch.setattr("httpx.Client", _rating_reply_seq([
+        [{"i": 0, "r": 5, "why": "top"}],
+        [{"i": 0, "r": 4, "why": "ok"}, {"i": 1, "r": 4, "why": "ok"}],
+    ]))
     kept = _filter_listings_by_judgment(listings, w, cfg)
     assert {l.key for l in kept} == {"k:0", "k:1", "k:2"}
+
+
+def test_still_unrated_after_retry_is_treated_as_non_match(monkeypatch):
+    # The dresser fix: an item unrated even after the retry is DROPPED, not given a free pass.
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="x", min_rating=3)
+    listings = [_kw_listing(i, f"item {i}") for i in range(3)]
+    # Pass 1 rates only k:0; the retry also returns nothing for the rest.
+    monkeypatch.setattr("httpx.Client", _rating_reply_seq([
+        [{"i": 0, "r": 5, "why": "top"}],
+        [],
+    ]))
+    kept = _filter_listings_by_judgment(listings, w, cfg)
+    assert {l.key for l in kept} == {"k:0"}
+    assert listings[1].rating < 3 and listings[2].rating < 3   # recorded as non-match, not vanished
 
 
 def test_min_rating_clamped_to_1_5():

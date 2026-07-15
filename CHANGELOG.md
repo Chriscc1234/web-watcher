@@ -11,6 +11,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.42.0-alpha] — 2026-07-14 (OfferUp shows YOUR area — and only local listings)
+
+### Fixed — OfferUp finally shows the right location
+- OfferUp was showing the wrong area (someone else's city, e.g. Florida) because it *remembers*
+  a stored location and ignores the address in the search link. The Watcher now **sets your
+  location through OfferUp's own picker** — opens the location control, enters your ZIP, and hits
+  Apply — so the feed is pinned to your actual area. Verified it moves a feed from a stored
+  Florida location to a Washington one.
+- **And it drops far-away listings.** OfferUp has no way to limit search distance (its radius is
+  stuck on "Maximum" / nationwide), so even with the right anchor you'd still see trucks from the
+  other side of the country. The Watcher now **filters out listings that are clearly too far**
+  (a different, non-neighboring state, or more than ~200 miles away) before it even evaluates
+  them — so you only hear about local finds. It's careful: if it can't tell where a listing is,
+  it keeps it.
+
+### Note on VPNs
+- If you use a VPN, OfferUp reads *its* exit location, not yours — but because OfferUp also
+  remembers a stored location, the reliable fix is the Watcher setting your ZIP directly (above),
+  which now works regardless of VPN or IP.
+
+### Notes
+- Code-only update — no re-install needed. Craigslist is unchanged; OfferUp joins it on the
+  human-style browsing. eBay and Facebook still use the classic path for now.
+
+---
+
 ## [0.41.0-alpha] — 2026-07-14 (Chat fixes: no more surprise edit cards, and it saves what you say)
 
 ### Fixed — The Watcher stops proposing changes you didn't ask for

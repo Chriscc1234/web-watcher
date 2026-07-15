@@ -1122,9 +1122,31 @@ def _process_sweep_listings(
         log.info("Continuous watch %r: %d listing(s) are reposts of already-seen items "
                  "(linked + noted, not re-alerted)", watch.name, len(reposts))
 
-    # Cheap keyword prefilter FIRST (free; before any deep-read or LLM): drop listings
-    # with an antikeyword / missing a required keyword. Dropped ones are still recorded
-    # (as non-matches, with the reason) so they show in the log/Results, just not alerted.
+    # Deterministic OUT-OF-AREA drop (free; before any deep-read or LLM judge): some feeds are
+    # anchored to the watch's area but NOT radius-limited — OfferUp's distance is "Maximum"
+    # (nationwide) and isn't settable by URL or in its location dialog, so a Burbank-CA truck
+    # surfaces on an Anacortes-WA watch even after we set the anchor. Drop listings we can
+    # CONFIDENTLY place far from the watch; anything we can't locate is kept (conservative — this
+    # never eats a listing whose city we can't read). Craigslist/eBay are already URL-localized
+    # and rarely carry a "City, ST" in the title, so this is effectively an OfferUp/marketplace net.
+    geo_dropped = []
+    if fresh:
+        anchor = _watch_geolocation(watch)
+        if anchor:
+            from web_watcher.cl_geo import out_of_area, state_for_latlon
+            watch_state = state_for_latlon(*anchor)
+            near = []
+            for l in fresh:
+                text = f"{getattr(l, 'title', '') or ''} {getattr(l, 'location', '') or ''}"
+                (geo_dropped if out_of_area(text, anchor, watch_state) else near).append(l)
+            if geo_dropped:
+                log.info("Continuous watch %r: dropped %d out-of-area listing(s) (too far from "
+                         "the watch's location)", watch.name, len(geo_dropped))
+            fresh = near
+
+    # Cheap keyword prefilter (free; before any deep-read or LLM): drop listings with an
+    # antikeyword / missing a required keyword. Dropped ones are still recorded (as non-matches,
+    # with the reason) so they show in the log/Results, just not alerted.
     kw_dropped = []
     if fresh:
         fresh, kw_dropped = _keyword_prefilter(fresh, watch)
@@ -1145,8 +1167,8 @@ def _process_sweep_listings(
     if fresh and (watch.judgment_prompt or (watch.instruction or "").strip()):
         matched = _filter_listings_by_judgment(fresh, watch, cfg)
     matched_keys = {l.key for l in matched}
-    # Persist keyword-dropped listings too (non-match), so they're recorded, not lost.
-    fresh = fresh + kw_dropped
+    # Persist keyword- and out-of-area-dropped listings too (non-match), so they're recorded, not lost.
+    fresh = fresh + kw_dropped + geo_dropped
 
     # Persist fresh (with verdict + attributes).
     _persist_listings(watch, fresh, matched_keys, run_ts, db_path)

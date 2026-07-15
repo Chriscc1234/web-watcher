@@ -116,7 +116,7 @@ def hints_for(url: str) -> dict:
 # rollout incremental + safe: a half-mapped or flaky site (OfferUp's location dialog, which
 # failed live + triggered an IP block) is NEVER driven in production before it's proven. Grows
 # one site per verified release.
-HUMAN_FIRST_SITES: set[str] = {"craigslist"}
+HUMAN_FIRST_SITES: set[str] = {"craigslist", "offerup"}
 
 
 def is_human_first_enabled(site_or_url: str) -> bool:
@@ -576,14 +576,20 @@ def apply_search_request(page, req: "SearchRequest", hint: dict | None = None) -
     if req.terms:
         applied["searched"] = type_search(page, req.terms, hint)
 
-    has_inline = any(k in hint for k in ("postal", "price_min", "price_max"))
-    if has_inline:
-        if _apply_inline_filters(page, req, hint):
-            applied["located"] = bool(req.zip)
-            applied["filtered"] = req.price_min is not None or req.price_max is not None
-    elif req.zip and hint.get("location"):
-        # Dialog-based location (OfferUp): open control → enter zip → confirm → verify.
+    # Location and price are INDEPENDENT — a site may drive one via a dialog and the other inline
+    # (OfferUp: location = a dialog, price = inline min/max), so they must not be an either/or.
+    # Location: a dialog control (OfferUp) when present, else the inline postal field (craigslist,
+    # handled below by _apply_inline_filters). Do the dialog FIRST so the feed reloads to the
+    # right area before we price-filter it.
+    if req.zip and hint.get("location"):
         applied["located"] = set_location(page, req.zip, req.radius, hint)
+
+    # Inline sidebar filters: craigslist (postal+distance+price) or OfferUp (price min/max only).
+    if any(k in hint for k in ("postal", "distance", "price_min", "price_max")):
+        if _apply_inline_filters(page, req, hint):
+            if hint.get("postal") and req.zip:      # craigslist localizes via the inline zip
+                applied["located"] = True
+            applied["filtered"] = req.price_min is not None or req.price_max is not None
 
     log.info("apply_search_request: %s → %s", req.describe(), applied)
     return applied

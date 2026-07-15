@@ -523,6 +523,112 @@ def refine_search_url(url: str, fallback_zip: str | None = None) -> str:
     return url
 
 
+_US_STATES = frozenset({
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA",
+    "ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK",
+    "OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC",
+})
+# "…in Burbank, CA", "$5,000 Visalia, CA", "West Covina, CA · 3d" — a City, ST anywhere in text.
+_CITY_STATE_RE = re.compile(r"([A-Za-z][A-Za-z .'\-]{1,34}),\s*([A-Z]{2})\b")
+
+
+def parse_city_state(text: str) -> tuple[str, str] | None:
+    """Pull the LAST 'City, ST' out of free text (OfferUp bakes the seller's city into the card
+    text, e.g. '2007 BMW 328i $5,000 118k miles Burbank, CA'). Returns (city, ST) or None. Takes
+    the last match since the location trails the title/price."""
+    last = None
+    for m in _CITY_STATE_RE.finditer(text or ""):
+        if m.group(2).upper() in _US_STATES:
+            last = (m.group(1).strip(" .'-"), m.group(2).upper())
+    return last
+
+
+def miles_between(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Approx great-circle miles between two (lat, lon) points (equirectangular — plenty accurate
+    for a same-region 'is this listing near the watch' test)."""
+    coslat = math.cos(math.radians((a[0] + b[0]) / 2))
+    return math.hypot(a[0] - b[0], (a[1] - b[1]) * coslat) * 69.0
+
+
+# Shared-border US state adjacency (public domain). Used as the UNAMBIGUOUS fallback when a
+# listing's city name is ambiguous (many "Burbank"s) but its state is not — a CA truck on a WA
+# watch is out of area; an OR one (adjacent) is kept for cross-border metros.
+_STATE_ADJACENCY = {
+    "AL": {"FL","GA","MS","TN"}, "AK": set(), "AZ": {"CA","CO","NM","NV","UT"},
+    "AR": {"LA","MO","MS","OK","TN","TX"}, "CA": {"AZ","NV","OR"},
+    "CO": {"AZ","KS","NE","NM","OK","UT","WY"}, "CT": {"MA","NY","RI"},
+    "DE": {"MD","NJ","PA"}, "FL": {"AL","GA"}, "GA": {"AL","FL","NC","SC","TN"}, "HI": set(),
+    "ID": {"MT","NV","OR","UT","WA","WY"}, "IL": {"IA","IN","KY","MO","WI"},
+    "IN": {"IL","KY","MI","OH"}, "IA": {"IL","MN","MO","NE","SD","WI"},
+    "KS": {"CO","MO","NE","OK"}, "KY": {"IL","IN","MO","OH","TN","VA","WV"},
+    "LA": {"AR","MS","TX"}, "ME": {"NH"}, "MD": {"DE","PA","VA","WV","DC"},
+    "MA": {"CT","NH","NY","RI","VT"}, "MI": {"IN","OH","WI"}, "MN": {"IA","ND","SD","WI"},
+    "MS": {"AL","AR","LA","TN"}, "MO": {"AR","IA","IL","KS","KY","NE","OK","TN"},
+    "MT": {"ID","ND","SD","WY"}, "NE": {"CO","IA","KS","MO","SD","WY"},
+    "NV": {"AZ","CA","ID","OR","UT"}, "NH": {"MA","ME","VT"}, "NJ": {"DE","NY","PA"},
+    "NM": {"AZ","CO","OK","TX","UT"}, "NY": {"CT","MA","NJ","PA","VT"},
+    "NC": {"GA","SC","TN","VA"}, "ND": {"MN","MT","SD"}, "OH": {"IN","KY","MI","PA","WV"},
+    "OK": {"AR","CO","KS","MO","NM","TX"}, "OR": {"CA","ID","NV","WA"},
+    "PA": {"DE","MD","NJ","NY","OH","WV"}, "RI": {"CT","MA"}, "SC": {"GA","NC"},
+    "SD": {"IA","MN","MT","ND","NE","WY"}, "TN": {"AL","AR","GA","KY","MO","MS","NC","VA"},
+    "TX": {"AR","LA","NM","OK"}, "UT": {"AZ","CO","ID","NM","NV","WY"},
+    "VT": {"MA","NH","NY"}, "VA": {"KY","MD","NC","TN","WV","DC"}, "WA": {"ID","OR"},
+    "WV": {"KY","MD","OH","PA","VA"}, "WI": {"IA","IL","MI","MN"},
+    "WY": {"CO","ID","MT","NE","SD","UT"}, "DC": {"MD","VA"},
+}
+
+
+def states_adjacent(a: str, b: str) -> bool:
+    """True if a == b or the two US states share a border (so cross-border metros stay in area)."""
+    a, b = (a or "").upper(), (b or "").upper()
+    return a == b or b in _STATE_ADJACENCY.get(a, set())
+
+
+@lru_cache(maxsize=4096)
+def state_for_latlon(lat: float, lon: float) -> str | None:
+    """The US state whose nearest gazetteer place is closest to (lat, lon) — used to name the
+    watch's own state from its anchor. Scans the places table once (cached per point)."""
+    best, best_d = None, float("inf")
+    coslat = math.cos(math.radians(lat))
+    for cands in _place_table().values():
+        for st, la, lo in cands:
+            d = math.hypot(la - lat, (lo - lon) * coslat)
+            if d < best_d:
+                best, best_d = st, d
+    return best
+
+
+def out_of_area(text: str, anchor: tuple[float, float] | None,
+                watch_state: str | None = None, max_miles: float = 200.0) -> bool:
+    """True when this listing is CONFIDENTLY far from the watch. Conservative: no anchor or no
+    parseable 'City, ST' → False (keep). This is the OfferUp fix — its feed is anchored right but
+    nationwide ('Maximum' radius, not URL/UI-settable), so a Burbank-CA truck on an Anacortes-WA
+    watch is dropped here instead of wasting a judge call. Two signals: (1) if the city resolves,
+    use straight-line miles > max_miles; (2) if the city is ambiguous/unknown but the STATE is
+    known (states are unambiguous in 'City, ST'), drop when that state isn't the watch's state or
+    adjacent to it."""
+    if not anchor:
+        return False
+    cs = parse_city_state(text)
+    if not cs:
+        return False
+    city, st = cs
+    # City can carry leading junk ("118k miles Burbank" — price/mileage runs into it). Try the
+    # LAST n words down to 1, longest first ("West Covina" beats "Covina"); anchor disambiguates.
+    words = re.findall(r"[A-Za-z][A-Za-z.'\-]*", city)
+    ll = None
+    for n in range(min(3, len(words)), 0, -1):
+        ll = place_latlon(" ".join(words[-n:]), anchor)
+        if ll:
+            break
+    if ll is not None:
+        return miles_between(anchor, ll) > max_miles
+    # City ambiguous/unknown → fall back to the unambiguous STATE.
+    if watch_state and st:
+        return not states_adjacent(watch_state, st)
+    return False
+
+
 def zip_from_text(text: str) -> str | None:
     """A US zip resolved from free text (a watch's instruction): a literal 5-digit zip, an
     'in/near <town>' phrase, or a bare known town name. Lets a watch be localized from what

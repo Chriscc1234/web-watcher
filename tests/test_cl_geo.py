@@ -334,3 +334,43 @@ def test_refine_ebay_keeps_specific_model_as_keyword():
     _, _, q = _parts(fixed)
     assert q.get("_nkw") == "toyota tacoma"   # a real model keyword search works — leave it
     assert q.get("_sacat") != "6001"
+
+
+# ── Out-of-area filter (the OfferUp nationwide-feed fix) ──────────────────────
+
+def test_parse_city_state():
+    from web_watcher.cl_geo import parse_city_state
+    assert parse_city_state("2012 Ford F-150 $5,500 Visalia, CA") == ("Visalia", "CA")
+    # The city can carry leading words (out_of_area word-trims them); the STATE is exact.
+    c = parse_city_state("truck in West Covina, CA")
+    assert c and c[1] == "CA" and c[0].endswith("West Covina")
+    assert parse_city_state("no location here $7000") is None
+    assert parse_city_state("weird, XX not a state") is None   # XX isn't a real state
+
+
+def test_states_adjacent():
+    from web_watcher.cl_geo import states_adjacent
+    assert states_adjacent("WA", "WA") is True
+    assert states_adjacent("WA", "OR") is True     # shared border
+    assert states_adjacent("WA", "CA") is False
+    assert states_adjacent("WA", "FL") is False
+
+
+def test_out_of_area_drops_far_keeps_local():
+    from web_watcher.cl_geo import out_of_area, zip_latlon, state_for_latlon
+    anchor = zip_latlon("98221")           # Anacortes, WA
+    ws = state_for_latlon(*anchor)
+    assert ws == "WA"
+    # Far (other states) → dropped.
+    assert out_of_area("2007 BMW 328i $5,000 118k miles Burbank, CA", anchor, ws) is True
+    assert out_of_area("Truck in Miami, FL $8000", anchor, ws) is True
+    # Local / adjacent / unlocatable → kept.
+    assert out_of_area("2010 Toyota Tacoma $9,000 Mount Vernon, WA", anchor, ws) is False
+    assert out_of_area("Nice truck in Portland, OR $6500", anchor, ws) is False   # adjacent
+    assert out_of_area("2008 Chevy Silverado clean title $7000", anchor, ws) is False  # no city
+
+
+def test_out_of_area_conservative_without_anchor():
+    from web_watcher.cl_geo import out_of_area
+    # No anchor → never drop (we can't judge distance).
+    assert out_of_area("Truck in Miami, FL", None, None) is False

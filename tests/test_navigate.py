@@ -133,16 +133,18 @@ def test_can_fully_drive_false_on_empty_request():
 
 # ── HUMAN_FIRST_SITES: only live-verified sites are actually driven ────────────
 
-def test_only_craigslist_is_human_first_enabled_today():
+def test_human_first_enabled_sites():
+    # Craigslist + OfferUp are live-verified and driven; eBay/Facebook are NOT yet.
     assert N.is_human_first_enabled("https://skagit.craigslist.org/search/cta?query=x") is True
     assert N.is_human_first_enabled("craigslist") is True
-    # OfferUp has mapped hints (incl. a location dialog) but is UNPROVEN → must NOT be enabled.
-    assert N.is_human_first_enabled("https://offerup.com/search?q=truck") is False
+    assert N.is_human_first_enabled("https://offerup.com/search?q=truck") is True
     assert N.is_human_first_enabled("https://www.ebay.com/sch/i.html?_nkw=x") is False
     assert N.is_human_first_enabled("https://www.facebook.com/marketplace") is False
 
 
-def test_offerup_has_hints_but_is_not_enabled():
-    # Guards the exact over-reach we fixed: having a location hint must not mean we drive it.
-    assert N.hints_for("https://offerup.com/search")  # hints exist
-    assert N.is_human_first_enabled("https://offerup.com/search") is False
+def test_offerup_is_fully_drivable():
+    # OfferUp has a location dialog + inline price hints → a zip+price request is fully drivable.
+    req = N.build_search_request("https://offerup.com/search?q=truck&price_max=10000&radius=50",
+                                 instruction="trucks in anacortes under 10k")
+    assert req.zip                                   # localized from the instruction
+    assert N.can_fully_drive(req, N.hints_for("https://offerup.com/search")) is True

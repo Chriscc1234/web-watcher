@@ -2067,6 +2067,17 @@ _CHANGE_SIGNAL_RE = re.compile(
 # "both/all/every watch(es)" — an explicit request to change more than one at once (rare, but real).
 _ALL_WATCHES_RE = re.compile(r"\b(both|all|every|each)\b[\w\s]{0,24}\bwatch", re.IGNORECASE)
 
+# A start/stop/enable/disable/DELETE action card only appears when the user's own message uses
+# that action's verb. Without this, the eager extractor can surface an unasked-for action card —
+# a spurious "Delete <watch>?" is the same bug class as the spurious edit cards, and scarier.
+_ACTION_VERB_RE = {
+    "delete":  re.compile(r"\b(delete|remove|get rid of|trash|discard|drop)\b", re.I),
+    "stop":    re.compile(r"\b(stop|pause|halt|turn off|shut (?:it |them )?off)\b", re.I),
+    "start":   re.compile(r"\b(start|run|resume|begin|kick off|fire up|turn on)\b", re.I),
+    "enable":  re.compile(r"\b(enable|re-?enable|activate|turn on|switch on)\b", re.I),
+    "disable": re.compile(r"\b(disable|deactivate|turn off|switch off)\b", re.I),
+}
+
 
 def _latest_user_text(messages: list) -> str:
     """The most recent USER message's text (the turn that triggered this action)."""
@@ -2311,13 +2322,22 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
             listings = _run_listing_query(lq)
 
         _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop"}
+        latest_user = _latest_user_text(messages)
         watch_actions = []
         for a in (data.get("watch_actions") or []):
-            if not (isinstance(a, dict) and a.get("action") in _VALID_ACTIONS):
+            act = a.get("action") if isinstance(a, dict) else None
+            if act not in _VALID_ACTIONS:
+                continue
+            # Grounding: the user's OWN message must use this action's verb — otherwise the eager
+            # extractor can surface an action (worst case a DELETE) card the user never asked for.
+            verb = _ACTION_VERB_RE.get(act)
+            if verb and not verb.search(latest_user):
+                log.info("chat: dropped ungrounded '%s' action for %r — user didn't ask for it",
+                         act, a.get("name"))
                 continue
             real = _resolve_watch_name(a.get("name", ""), cfg)   # tolerate model name drift
             if real:
-                watch_actions.append({"action": a.get("action"), "name": real})
+                watch_actions.append({"action": act, "name": real})
         watch_actions = watch_actions or None
 
         message = data["message"]   # _normalize_turn guarantees a message (never raw JSON)

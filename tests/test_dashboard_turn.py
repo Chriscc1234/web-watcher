@@ -333,6 +333,35 @@ def test_pronoun_edit_with_focus_from_history_ships(monkeypatch):
     assert out["watch_suggestion"]["action"] == "update"
 
 
+def test_spurious_delete_action_is_dropped(monkeypatch):
+    """Same bug class as the edit cards, scarier: the extractor must not surface a 'delete'
+    action card when the user never asked to delete anything."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[types.SimpleNamespace(name="Trucks (Craigslist)")])
+    _mock_two_phase(monkeypatch,
+                    "Your trucks watch is running well!",
+                    {"intent": "actions",
+                     "watch_actions": [{"action": "delete", "name": "Trucks (Craigslist)"}]})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "how's the trucks watch going?"}], cfg, "m")
+    assert not out["watch_actions"]                   # no unasked-for delete card
+
+
+def test_real_delete_action_survives(monkeypatch):
+    """A genuine delete request (the user says 'delete') still produces the action card."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[types.SimpleNamespace(name="Trucks (Craigslist)")])
+    _mock_two_phase(monkeypatch,
+                    "Okay, deleting the trucks watch.",
+                    {"intent": "actions",
+                     "watch_actions": [{"action": "delete", "name": "Trucks (Craigslist)"}]})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "delete the trucks watch"}], cfg, "m")
+    assert out["watch_actions"] == [{"action": "delete", "name": "Trucks (Craigslist)"}]
+
+
 def test_focused_watch_name_tracks_last_mentioned():
     import types
     from web_watcher.dashboard.server import _focused_watch_name

@@ -890,17 +890,31 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         )
         result = _complete_assistant_turn(system, messages, cfg, model)
 
-        if messages and "raw" in result:
+        # Persist the exchange on EVERY turn that had a user message — including degraded/error
+        # turns — so a transient model hiccup can't punch a permanent hole in the saved chat.
+        # (The old gate only saved when the turn fully succeeded and carried a private "raw", so
+        # any errored turn silently dropped BOTH the user's message and the reply — the "chat
+        # stopped logging" report.) Use "raw" (clean prose) when present, else the shown message.
+        last = messages[-1] if messages else None
+        if isinstance(last, dict) and last.get("role") == "user":
             import time as _t
             now = _t.time()
-            history = _load_watcher_history()
-            # Stamp both turns so the UI can show "when" dividers on scroll-back. Keep the
-            # client's own ts if it sent one (the user typed slightly earlier than we replied).
-            user_msg = dict(messages[-1])
-            user_msg.setdefault("ts", now)
-            history.append(user_msg)
-            history.append({"role": "assistant", "content": result["raw"], "ts": now})
-            _save_watcher_history(history[-200:])
+            reply_text = result.get("raw") or result.get("message") or ""
+            n_sugg = len(result.get("watch_suggestions") or
+                         ([result["watch_suggestion"]] if result.get("watch_suggestion") else []))
+            log.info("Watcher chat turn: user=%r → reply %d char(s), %d suggestion(s)",
+                     str(last.get("content", ""))[:80], len(reply_text), n_sugg)
+            try:
+                history = _load_watcher_history()
+                # Stamp both turns so the UI can show "when" dividers on scroll-back. Keep the
+                # client's own ts if it sent one (the user typed slightly before we replied).
+                user_msg = dict(last)
+                user_msg.setdefault("ts", now)
+                history.append(user_msg)
+                history.append({"role": "assistant", "content": reply_text, "ts": now})
+                _save_watcher_history(history[-200:])
+            except Exception as exc:
+                log.warning("Watcher chat: could not persist turn: %s", exc)
         result.pop("raw", None)
         return result
 

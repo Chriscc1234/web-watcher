@@ -35,6 +35,48 @@ def _cleanup(client, name):
     client.delete(f"/api/watches/{name}")
 
 
+def _chat_client(monkeypatch, tmp_path, turn_result):
+    """A TestClient wired for the Watcher chat endpoint: history isolated to a temp file, the
+    model turn + preamble stubbed to return `turn_result`."""
+    from web_watcher.dashboard import server as S
+    from web_watcher.config import AppConfig
+    monkeypatch.setattr(S, "_WATCHER_HISTORY_PATH", tmp_path / "watcher_history.json")
+    monkeypatch.setattr(S, "_load_cfg", lambda: AppConfig())
+    monkeypatch.setattr(S, "_build_watches_context", lambda cfg, manager: "(watches)")
+    monkeypatch.setattr(S, "_complete_assistant_turn", lambda *a, **k: dict(turn_result))
+    manager = MagicMock()
+    manager.oversight_snapshot.return_value = {"entries": []}
+    return TestClient(create_app(manager)), S
+
+
+def test_chat_turn_is_persisted(monkeypatch, tmp_path):
+    """A normal Watcher chat turn saves BOTH the user message and the reply to history."""
+    client, S = _chat_client(monkeypatch, tmp_path,
+                             {"message": "Sure, on it.", "raw": "Sure, on it."})
+    r = client.post("/api/oversight/chat",
+                    json={"messages": [{"role": "user", "content": "watch trucks"}]})
+    assert r.status_code == 200
+    saved = S._load_watcher_history()
+    assert [m["role"] for m in saved] == ["user", "assistant"]
+    assert saved[0]["content"] == "watch trucks"
+    assert saved[1]["content"] == "Sure, on it."
+
+
+def test_degraded_turn_still_logs_history(monkeypatch, tmp_path):
+    """Regression (the 'chat stopped logging' report): a turn that errored/degraded returns NO
+    private 'raw' key. The old gate saved only when 'raw' was present, so such turns silently
+    dropped both the user's message AND the reply. Now the exchange is persisted regardless."""
+    client, S = _chat_client(monkeypatch, tmp_path,
+                             {"message": "Assistant error: Ollama timed out"})  # no 'raw'
+    r = client.post("/api/oversight/chat",
+                    json={"messages": [{"role": "user", "content": "hello?"}]})
+    assert r.status_code == 200
+    saved = S._load_watcher_history()
+    assert [m["role"] for m in saved] == ["user", "assistant"]      # NOT dropped
+    assert saved[0]["content"] == "hello?"
+    assert "Ollama timed out" in saved[1]["content"]               # the error reply is recorded
+
+
 def test_create_without_schedule_defaults_to_30_min(client):
     """A suggestion-shaped body (no interval, no cron) must create, not 500."""
     r = client.post("/api/watches", json={

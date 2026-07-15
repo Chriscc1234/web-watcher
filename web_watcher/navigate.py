@@ -71,10 +71,13 @@ CONTROL_HINTS: dict[str, dict] = {
         "price_min":  "input[name='min']",
         "price_max":  "input[name='max']",
         "location": {
+            # Flow mapped live: open → the dialog first shows the STORED location as a button
+            # (OfferUp persists a zip, e.g. "Hollywood, FL 33020" — which is why a VPN exit change
+            # does NOT move it); click that to REVEAL the zip input; type; click "Apply".
             "open":    "button[aria-label*='Set my location' i]",
             "dialog":  "[role=dialog], [class*='MuiDialog']",
-            "input":   "[role=dialog] input[type='text'], [class*='MuiDialog'] input:not([type='hidden'])",
-            "confirm": "See listings",
+            "input":   "input[name='zipCode'], [role=dialog] input[type='text']",
+            "confirm": "Apply",
         },
     },
     # eBay's header search box has carried this id for years (#gh-ac). Location on eBay is a
@@ -366,6 +369,40 @@ def _click_button_by_label(scope, label: str) -> bool:
     return False
 
 
+_REVEAL_SKIP = ("apply", "see listings", "get my location", "done", "save", "update",
+                "search", "cancel", "close", "back")
+
+
+def _reveal_location_editor(page, loc_hint: dict) -> None:
+    """Some location dialogs (OfferUp) first show the CURRENT location and hide the ZIP editor
+    until you click it. Click that reveal affordance so the input appears. An explicit hint wins;
+    otherwise click the dialog button that shows the current location (has a digit/comma, e.g.
+    'Hollywood, FL 33020') or says change/edit — never an action button. Best-effort."""
+    if loc_hint.get("reveal") and _click_selector(page, loc_hint["reveal"]):
+        _pause(0.3, 0.6)
+        return
+    try:
+        btns = page.locator("[role=dialog] button, [class*='MuiDialog'] button")
+        for i in range(min(btns.count(), 12)):
+            b = btns.nth(i)
+            try:
+                t = (b.inner_text() or "").strip()
+            except Exception:
+                continue
+            low = t.lower()
+            if not t or any(s in low for s in _REVEAL_SKIP):
+                continue
+            if re.search(r"\d", t) or "," in t or re.search(r"\b(change|edit|location|zip)\b", low):
+                try:
+                    b.click(timeout=2000)
+                    _pause(0.3, 0.6)
+                    return
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+
 def set_location(page, place: str, radius: int | None = None, hint: dict | None = None) -> bool:
     """Set the site's location THROUGH ITS OWN control (the human way), so location-aware sites
     (OfferUp) show the right area instead of a default. Pattern: open the location control →
@@ -393,24 +430,30 @@ def set_location(page, place: str, radius: int | None = None, hint: dict | None 
         except Exception:
             return False
 
+    def _find_input():
+        return (_first_visible(page, loc_hint.get("input", "")) if loc_hint.get("input") else None) \
+            or _first_visible(
+                page, "input[name='zipCode'], [role=dialog] input[type='text'], "
+                      "[class*='MuiDialog'] input:not([type='hidden']), "
+                      "input[placeholder*='zip' i], input[placeholder*='city' i], "
+                      "input[aria-label*='location' i]")
+
     # A marker of the location BEFORE, to confirm a real change afterward.
     before = _location_marker(page)
 
     if not _open():
         return False
-    # The picker input (inside a dialog when there's a hint, else a heuristic location input).
-    inp = _first_visible(page, loc_hint.get("input", "")) if loc_hint.get("input") else None
+    inp = _find_input()
     if inp is None:
-        inp = _first_visible(
-            page, "[role=dialog] input[type='text'], [class*='MuiDialog'] input:not([type='hidden']), "
-                  "input[placeholder*='zip' i], input[placeholder*='city' i], "
-                  "input[aria-label*='location' i]")
+        # Some dialogs (OfferUp) show the CURRENT location and hide the editor until you click it.
+        _reveal_location_editor(page, loc_hint)
+        inp = _find_input()
     if inp is None:
         # retry the open once (a flaky menu may have closed) before giving up
         _pause(0.3, 0.6)
         if _open():
-            inp = _first_visible(page, loc_hint.get("input", "")) or _first_visible(
-                page, "[role=dialog] input[type='text'], input[placeholder*='zip' i]")
+            _reveal_location_editor(page, loc_hint)
+            inp = _find_input()
     if inp is None:
         log.debug("set_location: couldn't find the location input")
         return False

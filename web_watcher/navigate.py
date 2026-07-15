@@ -59,10 +59,17 @@ CONTROL_HINTS: dict[str, dict] = {
         "price_max": "input[type='text'][placeholder='max' i]",
         "apply":     "button.cl-exec-search, button[type='submit'].cl-exec-search",
     },
-    # OfferUp location = a Material-UI dialog opened from the top-left button (mapped live):
-    #   click "Set my location" → dialog with a ZIP input + Distance + "See listings".
+    # OfferUp location = a Material-UI dialog opened from the top-left button (opener aria-label
+    # confirmed live: "Set my location currently set to …"). Price is INLINE on the search page
+    # (input[name='min']/[name='max'], like craigslist). ⚠ NOT human-first-enabled yet (absent
+    # from HUMAN_FIRST_SITES): a live session showed set_location did NOT change the feed (stayed
+    # 'Hollywood, FL') AND OfferUp then IP-blocked automated access (ERR_EMPTY_RESPONSE) — the
+    # exact bot-detection this rewrite guards against. The dialog flow is UNPROVEN; do not drive
+    # OfferUp until it's verified live (likely needs the user's real IP / a logged-in profile).
     "offerup.com": {
         "search_box": "input[name='search'], input[type='search']",
+        "price_min":  "input[name='min']",
+        "price_max":  "input[name='max']",
         "location": {
             "open":    "button[aria-label*='Set my location' i]",
             "dialog":  "[role=dialog], [class*='MuiDialog']",
@@ -98,6 +105,22 @@ def hints_for(url: str) -> dict:
         if key in host:
             return h
     return {}
+
+
+# Sites whose human-first control-driving is LIVE-VERIFIED end-to-end and therefore safe to use
+# in the real sweep. A site graduates here ONLY after its full flow (search + location + price)
+# is proven live — mapping its controls in CONTROL_HINTS is NOT enough. This is what makes the
+# rollout incremental + safe: a half-mapped or flaky site (OfferUp's location dialog, which
+# failed live + triggered an IP block) is NEVER driven in production before it's proven. Grows
+# one site per verified release.
+HUMAN_FIRST_SITES: set[str] = {"craigslist"}
+
+
+def is_human_first_enabled(site_or_url: str) -> bool:
+    """True if this site's human-first driving is verified + enabled (see HUMAN_FIRST_SITES).
+    Accepts a short site key ('craigslist') or a full URL."""
+    s = (site_or_url or "").lower()
+    return any(site in s for site in HUMAN_FIRST_SITES)
 
 
 # ---------------------------------------------------------------------------

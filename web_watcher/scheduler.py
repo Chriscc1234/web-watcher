@@ -833,6 +833,11 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     hint = N.hints_for(url)
     if not hint:
         return False
+    # Only DRIVE sites whose full flow is live-verified (Craigslist today). A site with mapped
+    # hints but an unproven/flaky driver (OfferUp's location dialog) must NOT be driven in the
+    # real sweep — it stays on the URL fallback until it graduates into HUMAN_FIRST_SITES.
+    if not N.is_human_first_enabled(url):
+        return False
     req = N.build_search_request(url, watch.instruction)
     # Need a keyword to type; the generic-category case (empty terms = 'browse this category')
     # isn't a drivable search yet — let the URL path land on the right category.

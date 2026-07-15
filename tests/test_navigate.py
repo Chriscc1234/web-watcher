@@ -129,3 +129,20 @@ def test_can_fully_drive_allows_terms_only_anywhere():
 
 def test_can_fully_drive_false_on_empty_request():
     assert N.can_fully_drive(N.SearchRequest(), {"search_box": "input"}) is False
+
+
+# ── HUMAN_FIRST_SITES: only live-verified sites are actually driven ────────────
+
+def test_only_craigslist_is_human_first_enabled_today():
+    assert N.is_human_first_enabled("https://skagit.craigslist.org/search/cta?query=x") is True
+    assert N.is_human_first_enabled("craigslist") is True
+    # OfferUp has mapped hints (incl. a location dialog) but is UNPROVEN → must NOT be enabled.
+    assert N.is_human_first_enabled("https://offerup.com/search?q=truck") is False
+    assert N.is_human_first_enabled("https://www.ebay.com/sch/i.html?_nkw=x") is False
+    assert N.is_human_first_enabled("https://www.facebook.com/marketplace") is False
+
+
+def test_offerup_has_hints_but_is_not_enabled():
+    # Guards the exact over-reach we fixed: having a location hint must not mean we drive it.
+    assert N.hints_for("https://offerup.com/search")  # hints exist
+    assert N.is_human_first_enabled("https://offerup.com/search") is False

@@ -14,6 +14,8 @@ Design rules:
     reasons with, not a rigid script — the heuristic fallback runs when there's no hint.
 
 KEY LOCATIONS
+  SearchRequest        the structured intent (terms/zip/radius/price/sort) a human APPLIES
+  build_search_request parse that intent from a watch's URL + instruction (reuses cl_geo)
   type_search     type the query into the search box (verify it landed) + submit
   set_location    open the location control → enter place/zip → confirm → verify it changed
   CONTROL_HINTS   per-site control map (seeded from live investigation; extend as we learn)
@@ -25,6 +27,8 @@ import logging
 import random
 import re
 import time
+from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlparse
 
 from web_watcher.monitor import (
     _SEARCH_BOX_SELECTORS,
@@ -55,19 +59,158 @@ CONTROL_HINTS: dict[str, dict] = {
             "confirm": "See listings",
         },
     },
+    # eBay's header search box has carried this id for years (#gh-ac). Location on eBay is a
+    # results-sidebar / URL concern, not a picker dialog, so no location hint here — eBay is a
+    # lower human-navigation priority than the local-marketplace sites.
+    "ebay.com": {
+        "search_box": "input#gh-ac, input[name='_nkw'], input[type='text'][aria-label*='Search' i]",
+    },
+    # Facebook is DELIBERATELY not seeded here. It's the highest-stakes site (a ban ends the
+    # buddy's use case) and its Marketplace controls must be mapped LIVE under fb_safety in
+    # Phase 4 — encoding guessed selectors now would be exactly the "guess presented as fact"
+    # we avoid. Add it when we probe it for real.
 }
+
+
+def _host(url: str) -> str:
+    """The lowercased registrable host of a URL ('' on failure)."""
+    try:
+        return re.sub(r"^https?://(www\.)?", "", url or "").split("/")[0].lower()
+    except Exception:
+        return ""
 
 
 def hints_for(url: str) -> dict:
     """The control hints for a URL's site, or {} if none known."""
-    try:
-        host = re.sub(r"^https?://(www\.)?", "", url or "").split("/")[0].lower()
-    except Exception:
-        return {}
+    host = _host(url)
     for key, h in CONTROL_HINTS.items():
         if key in host:
             return h
     return {}
+
+
+# ---------------------------------------------------------------------------
+# SearchRequest — the structured intent a human APPLIES through a site's controls
+# ---------------------------------------------------------------------------
+#
+# Today a watch's intent lives baked into a parametric results URL
+# (skagit.craigslist.org/search/cta?postal=98221&max_price=10000&query=toyota+tacoma&sort=date).
+# To browse like a human we need that intent as DATA the agent can enter into the page's own
+# controls — type the terms, set the location, pick a price/sort — instead of goto-ing the URL.
+# build_search_request pulls it back out of the URL (and the watch's free-text instruction as a
+# fallback) by REUSING the cl_geo parsers that already understand every site's params + phrasing.
+
+_TERMS_KEYS  = ("query", "q", "_nkw")
+_RADIUS_KEYS = ("search_distance", "_sadis", "radius")
+_SORT_KEYS   = ("sort",)
+
+
+@dataclass
+class SearchRequest:
+    """What a person would enter to run this search. All fields optional — an empty `terms`
+    with a `category` is a valid 'browse this category with these filters' request (e.g. a
+    generic craigslist cars+trucks watch). `site` is the short site key for hint lookup."""
+    terms: str = ""
+    zip: str | None = None
+    radius: int | None = None
+    price_min: int | None = None
+    price_max: int | None = None
+    purveyor: str | None = None      # craigslist: "owner" | "dealer"
+    sort: str | None = None          # e.g. "date"
+    category: str | None = None      # craigslist 3-letter category from /search/<cat>
+    site: str = ""
+
+    def describe(self) -> str:
+        """A short one-line summary for logs (mirrors what a human would say they searched)."""
+        bits = []
+        if self.terms:            bits.append(repr(self.terms))
+        if self.category:         bits.append(f"cat={self.category}")
+        if self.zip:              bits.append(f"near {self.zip}")
+        if self.radius:           bits.append(f"{self.radius}mi")
+        if self.price_min is not None: bits.append(f">=${self.price_min}")
+        if self.price_max is not None: bits.append(f"<=${self.price_max}")
+        if self.purveyor:         bits.append(self.purveyor)
+        if self.sort:             bits.append(f"sort={self.sort}")
+        return ", ".join(bits) or "(empty)"
+
+
+def _site_key(host: str) -> str:
+    for s in ("craigslist", "offerup", "ebay", "facebook"):
+        if s in host:
+            return s
+    return host
+
+
+def build_search_request(url: str, instruction: str = "") -> SearchRequest:
+    """Reconstruct the human-enterable SearchRequest from a watch's search URL, falling back to
+    its free-text `instruction` for anything the URL doesn't carry (e.g. a watch whose stored URL
+    lost its location). Reuses cl_geo's param aliases + text parsers so it understands every
+    site's naming. Failure-tolerant: a malformed URL yields a best-effort request, never raises."""
+    from web_watcher import cl_geo
+
+    host = _host(url)
+    site = _site_key(host)
+    try:
+        p = urlparse(url)
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+    except Exception:
+        p, q = None, {}
+
+    def _get(keys) -> str | None:
+        for k in list(q):
+            if k.lower() in keys and q[k] not in (None, ""):
+                return q[k]
+        return None
+
+    terms = _get(_TERMS_KEYS) or ""
+    sort = _get(_SORT_KEYS)
+    purveyor = _get(("purveyor",))
+    radius_raw = _get(_RADIUS_KEYS)
+
+    # Prices: reuse the alias-aware puller (max_price/_udhi/maxPrice/price_max/…) on a copy.
+    price_min, price_max = cl_geo._pull_price_aliases(dict(q))
+    zip5 = cl_geo.url_zip(url)
+
+    # craigslist category lives in the path (/search/cta), not a param.
+    category = None
+    if p and "craigslist" in host:
+        m = re.search(r"/search/([a-z]{3})\b", p.path or "")
+        category = m.group(1) if m else None
+
+    # Mine the query TEXT for params the model left inline ("tacoma under 5k 98221"), so the
+    # terms we type are clean keywords and the stragglers fill any empty structured field.
+    text, tmin, tmax = cl_geo._extract_price(terms)
+    text, tzip = cl_geo._extract_zip(text)
+    text, tloc = cl_geo._extract_in_place(text)
+    text, tpurv = cl_geo._extract_purveyor(text)
+    terms_clean = re.sub(r"\s+", " ", text).strip(" ,-")
+
+    if price_min is None: price_min = tmin
+    if price_max is None: price_max = tmax
+    if not zip5: zip5 = tzip
+    if not zip5 and tloc: zip5 = cl_geo.nearest_zip(*tloc)
+    if purveyor is None: purveyor = tpurv
+
+    # Last resort: mine the watch's instruction for anything still missing.
+    if instruction:
+        _itext, imin, imax = cl_geo._extract_price(instruction)
+        if price_min is None: price_min = imin
+        if price_max is None: price_max = imax
+        if not zip5: zip5 = cl_geo.zip_from_text(instruction)
+        if purveyor is None:
+            _it, ipurv = cl_geo._extract_purveyor(instruction)
+            purveyor = ipurv
+
+    try:
+        radius = int(radius_raw) if radius_raw else None
+    except (TypeError, ValueError):
+        radius = None
+
+    return SearchRequest(
+        terms=terms_clean, zip=zip5, radius=radius,
+        price_min=price_min, price_max=price_max,
+        purveyor=purveyor, sort=sort, category=category, site=site,
+    )
 
 
 def _pause(lo: float = 0.25, hi: float = 0.7) -> None:

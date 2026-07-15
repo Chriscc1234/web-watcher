@@ -2039,6 +2039,66 @@ def _focused_watch_name(messages: list, cfg) -> str | None:
     return None
 
 
+# An UPDATE (edit an existing watch) is only real when the user's OWN latest message asks for a
+# CHANGE. The small extract model otherwise proposes 'update' actions for watches the user never
+# mentioned — the reported "2 edit cards I wasn't asking for" bug. These words signal a real change
+# request; a greeting / statement / question about a watch has none.
+_CHANGE_SIGNAL_RE = re.compile(
+    r"\b(also|add|adding|includ\w*|chang\w*|edit\w*|updat\w*|modif\w*|adjust\w*|tweak\w*|"
+    r"set\b|make it|rename|remov\w*|delete|drop|exclud\w*|switch\w*|instead|widen\w*|"
+    r"expand\w*|broaden\w*|narrow\w*|raise|lower|increase|decrease|bump|cap\b|limit\b|"
+    r"only\b|no longer|as well|max\b|min\b|price|budget|under|over|less than|more than|"
+    r"radius|distance|sites?|keyword|antikeyword)\b", re.IGNORECASE)
+
+# "both/all/every watch(es)" — an explicit request to change more than one at once (rare, but real).
+_ALL_WATCHES_RE = re.compile(r"\b(both|all|every|each)\b[\w\s]{0,24}\bwatch", re.IGNORECASE)
+
+
+def _latest_user_text(messages: list) -> str:
+    """The most recent USER message's text (the turn that triggered this action)."""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            return m["content"]
+    return ""
+
+
+def _watch_referenced_in(text: str, name: str) -> bool:
+    """True if `text` actually names this watch — enough distinctive tokens overlap (all of them
+    for a one-word name, ≥2 otherwise). Reuses _watch_focus_tokens so the site suffix is ignored."""
+    toks = _watch_focus_tokens(name)
+    if not toks:
+        return False
+    low = set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+    hits = sum(1 for t in toks
+               if t in low or (t.endswith("s") and t[:-1] in low) or (t + "s") in low)
+    return hits >= min(2, len(toks))
+
+
+def _ground_update_suggestions(suggestions: list, messages: list, focus: str | None) -> list:
+    """Deterministic guard against SPURIOUS edit cards. The small extract model sometimes proposes
+    'update' actions for existing watches the user never mentioned (the reported "2 cards to edit
+    even though I wasn't talking about them"). An update survives ONLY when the user's own latest
+    message (a) asks for a change AND (b) points at that watch — by naming it, by 'it'/'that one'
+    (the focus watch), or by 'both/all watches'. Creates and everything else pass through untouched;
+    this is a last-line net that a prompt alone can't guarantee on a 14b model."""
+    latest = _latest_user_text(messages)
+    asked_change = bool(_CHANGE_SIGNAL_RE.search(latest))
+    all_watches = bool(_ALL_WATCHES_RE.search(latest))
+    kept = []
+    for s in suggestions:
+        if not isinstance(s, dict) or (s.get("action") or "create") != "update":
+            kept.append(s)
+            continue
+        name = s.get("name", "")
+        grounded = all_watches or (bool(name) and name == focus) or _watch_referenced_in(latest, name)
+        if asked_change and grounded:
+            kept.append(s)
+        else:
+            log.info("chat: dropped ungrounded edit card for %r (asked_change=%s grounded=%s) — "
+                     "the user didn't ask to edit it", name, asked_change, grounded)
+    return kept
+
+
 def _resolve_watch_name(name: str, cfg) -> str | None:
     """Map a possibly-imperfect watch name (as the model wrote it) to the EXACT stored name.
     The local model often drops the site suffix — 'Diesel Vehicles' for 'Diesel Vehicles
@@ -2258,6 +2318,11 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
                 isinstance(u, str) and u.strip().lower().startswith(("http://", "https://"))
                 for u in (s.get("urls") or []))
         suggestions = [s for s in suggestions if _has_real_url(s)]
+        # Deterministic guard: drop 'update' cards the user didn't actually ask for. The small
+        # extract model sometimes proposes edits to existing watches that were never mentioned
+        # (the "2 edit cards I wasn't talking about" bug); an edit survives only when the user's
+        # own latest message asks for a change AND points at that watch. Creates are untouched.
+        suggestions = _ground_update_suggestions(suggestions, messages, focus)
         # Confirm-before-creating: if the assistant is ASKING the user to clarify (and NOT also
         # committing to the watch), hold any 'create' suggestion until they answer — so a truly
         # half-formed request ("guitars?") gets clarified first instead of instantly spawning a

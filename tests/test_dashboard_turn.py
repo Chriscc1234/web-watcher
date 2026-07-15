@@ -259,6 +259,80 @@ def test_intent_none_produces_no_card(monkeypatch):
     assert "watch" in out["message"].lower()
 
 
+def test_spurious_edit_cards_are_dropped(monkeypatch):
+    """The reported bug: a plain, non-editing message makes the small extract model propose
+    'update' actions for existing watches the user never mentioned → unwanted edit cards. The
+    deterministic grounding guard drops them (the user's message asked for no change)."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Anacortes Vehicles (Craigslist)",
+                              urls=["https://skagit.craigslist.org/search/cta?query=truck"]),
+        types.SimpleNamespace(name="Flame Resistant Pants Restock",
+                              urls=["https://thriveworkwear.com/products/pants"]),
+    ])
+    # Phase 1 just chats; phase 2 (over-eagerly) proposes edits to BOTH watches.
+    _mock_two_phase(monkeypatch,
+                    "Both watches are running and looking good!",
+                    {"intent": "update", "watches": [
+                        {"action": "update", "name": "Anacortes Vehicles (Craigslist)",
+                         "urls": ["https://skagit.craigslist.org/search/cta?query=truck"],
+                         "instruction": "trucks"},
+                        {"action": "update", "name": "Flame Resistant Pants Restock",
+                         "urls": ["https://thriveworkwear.com/products/pants"],
+                         "instruction": "pants"}]})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "how are my watches doing?"}], cfg, "m")
+    assert out["watch_suggestion"] is None            # neither spurious edit card survives
+    assert not out["watch_suggestions"]
+
+
+def test_named_edit_request_still_produces_a_card(monkeypatch):
+    """A REAL edit — the user names the watch and asks for a change — must still ship its card."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Trucks (Craigslist)",
+                              urls=["https://seattle.craigslist.org/search/cta?query=truck"]),
+    ])
+    _mock_two_phase(monkeypatch,
+                    "Sure — adding OfferUp to your trucks watch.",
+                    {"intent": "update", "watch": {
+                        "action": "update", "name": "Trucks (Craigslist)",
+                        "urls": ["https://seattle.craigslist.org/search/cta?query=truck",
+                                 "https://offerup.com/search?q=truck"],
+                        "instruction": "trucks"}})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "also add offerup to the trucks watch"}], cfg, "m")
+    assert out["watch_suggestion"] is not None
+    assert out["watch_suggestion"]["action"] == "update"
+    assert out["watch_suggestion"]["name"] == "Trucks (Craigslist)"
+
+
+def test_pronoun_edit_with_focus_from_history_ships(monkeypatch):
+    """'cap it at 5k' is a real edit when earlier turns established which watch 'it' is."""
+    import types
+    from web_watcher.dashboard import server as S
+    cfg = types.SimpleNamespace(watches=[
+        types.SimpleNamespace(name="Trucks (Craigslist)",
+                              urls=["https://seattle.craigslist.org/search/cta?query=truck"]),
+    ])
+    _mock_two_phase(monkeypatch,
+                    "Done — capping that watch at $5,000.",
+                    {"intent": "update", "watch": {
+                        "action": "update", "name": "Trucks (Craigslist)",
+                        "urls": ["https://seattle.craigslist.org/search/cta?query=truck&max_price=5000"],
+                        "instruction": "trucks under 5k"}})
+    msgs = [
+        {"role": "user", "content": "how's the trucks watch doing?"},
+        {"role": "assistant", "content": "It's found a few."},
+        {"role": "user", "content": "cap it at 5k"},
+    ]
+    out = S._complete_assistant_turn("sys", msgs, cfg, "m")
+    assert out["watch_suggestion"] is not None
+    assert out["watch_suggestion"]["action"] == "update"
+
+
 def test_focused_watch_name_tracks_last_mentioned():
     import types
     from web_watcher.dashboard.server import _focused_watch_name
@@ -380,7 +454,10 @@ def test_watch_config_in_wrong_slot_is_adopted(monkeypatch):
                                        "judgment_prompt": "j", "max_agent_steps": 15}})
     monkeypatch.setattr(S, "_resolve_watch_name", lambda name, cfg: "Existing Watch")
     monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
-    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "hi"}], cfg, "m")
+    # A REAL edit request that names the watch (so the grounding guard keeps it) — the point of
+    # this test is the wrong-slot repair, not the grounding.
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "change the existing watch instruction"}], cfg, "m")
     sug = out["watch_suggestion"]
     assert sug and sug["action"] == "update" and sug["name"] == "Existing Watch"
     # urls omitted by the model = "unchanged" -> backfilled from the stored watch, so the

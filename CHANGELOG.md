@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.41.0-alpha] — 2026-07-14 (Chat fixes: no more surprise edit cards, and it saves what you say)
+
+### Fixed — The Watcher stops proposing changes you didn't ask for
+- It would sometimes pop up **edit cards for watches you weren't even talking about** (e.g. two
+  "edit this watch" cards after a plain question). The chat's action-reader is a small model and
+  was too eager. Now an **edit card only appears when your message actually asks for a change AND
+  points at that watch** (by name, or "it"/"that one"). Genuine edits — "also add OfferUp to the
+  trucks watch", "cap it at 5k" — still work exactly as before.
+- Same fix applied to **start / stop / delete**: The Watcher won't offer to delete or stop a watch
+  unless you actually said so. (A surprise "Delete this watch?" card is no longer possible.)
+
+### Fixed — your conversation is saved reliably now
+- Chat history could silently **stop saving** if a message hit a hiccup (a slow or unavailable
+  model): both your message and the reply were dropped with no trace. Now **every turn is saved**,
+  even a degraded one, so the conversation survives restarts. Each chat turn is also written to the
+  app log now, so if something does go wrong it's actually diagnosable.
+
+### Notes
+- Code-only update — no re-install needed; it applies itself.
+
+---
+
 ## [0.40.0-alpha] — 2026-07-14 (Human-first browsing: The Watcher searches Craigslist like a person)
 
 ### Changed — Craigslist searches now DRIVE the page instead of jumping to a link

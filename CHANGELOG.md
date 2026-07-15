@@ -11,6 +11,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.40.0-alpha] — 2026-07-14 (Human-first browsing: The Watcher searches Craigslist like a person)
+
+### Changed — Craigslist searches now DRIVE the page instead of jumping to a link
+- The Watcher now searches Craigslist the way a real person does: it lands on the site, **types
+  your search into the search box**, and sets the **location and price using the page's own
+  filter controls** — instead of teleporting straight to a pre-built results link. Jumping to a
+  deep link is one of the clearest "this is a bot" tells; browsing the controls looks like a
+  human, which matters a lot for staying un-flagged (the whole point ahead of Facebook).
+- This also makes the location more reliable: it fills in the ZIP + distance on the page and
+  clicks **apply**, so results are pinned to your area (verified: an Anacortes/98221 truck search
+  lands on the right area with the price cap applied, not a random region).
+- **Nothing else changes for you.** Only Craigslist uses this new style for now. Every other site
+  (eBay, OfferUp, Facebook, learned sites) keeps working exactly as before, and will switch to the
+  human style **one at a time, only after each is verified live** — so a half-tested site is never
+  driven by accident. If the human path can't fully drive a search, it quietly falls back to the
+  old reliable way, so a location or price is never silently dropped.
+
+### Notes for the curious
+- Under the hood this is a new `navigate` layer (search/location/price primitives + a structured
+  "search request") with a safety gate that only drives a site once its full flow is proven. Code
+  only — no new dependencies, no re-install needed; the update applies itself.
+
+---
+
 ## [0.39.0-alpha] — 2026-07-14 (Stabilization: fix the agent crash + rough restock edges)
 
 ### Fixed — the browsing agent was crashing on nearly every step

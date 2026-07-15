@@ -816,6 +816,45 @@ def _run_agent_continuous_sweep(
                             stop_event=stop_event)
 
 
+def _human_first_navigate(page, url: str, watch: Watch) -> bool:
+    """Run this watch's search by DRIVING the site's own controls like a person — land on the
+    site's shallow entry (the region/site homepage), then type the search + set the sidebar
+    zip/distance/price via navigate.apply_search_request — instead of goto-ing a deep parametric
+    results URL (our biggest bot tell; see memory feedback_human_first_navigation).
+
+    Gated by navigate.can_fully_drive: only runs when the site's hints can apply EVERY part of
+    the request (search + location + price), so we NEVER silently drop a location or price a
+    site can't yet drive. Otherwise returns False and the caller falls back to the URL path.
+    This makes the human-first rollout automatic + safe: a site becomes driven exactly when its
+    control hints are complete, not before. Returns True only if the search was really driven."""
+    from urllib.parse import urlparse
+    from web_watcher import navigate as N
+
+    hint = N.hints_for(url)
+    if not hint:
+        return False
+    req = N.build_search_request(url, watch.instruction)
+    # Need a keyword to type; the generic-category case (empty terms = 'browse this category')
+    # isn't a drivable search yet — let the URL path land on the right category.
+    if not req.terms or not N.can_fully_drive(req, hint):
+        return False
+
+    p = urlparse(url)
+    home = f"{p.scheme}://{p.netloc}/"
+    try:
+        page.goto(home, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+    except Exception as exc:
+        log.debug("human-first landing nav failed: %s", exc)
+        return False
+    dismiss_popups(page, settle_ms=0)
+
+    applied = N.apply_search_request(page, req, hint)
+    if applied.get("searched"):
+        log.info("Human-first nav on %s: drove %s (applied %s)", p.netloc, req.describe(), applied)
+        return True
+    return False
+
+
 def _run_continuous_sweep(
     watch:   Watch,
     cfg:     AppConfig,
@@ -845,16 +884,27 @@ def _run_continuous_sweep(
     base_url = ensure_location(watch.urls[sweep_index % len(watch.urls)], watch.instruction)
     url      = vary_search(base_url, sweep_index, watch.continuous_search_variation)
 
-    # Humanize: when stealth is on, TYPE the search into the box (real keyboard + mouse)
-    # rather than jumping straight to the query URL — looks like a person, no LLM. Falls
-    # back to a direct navigation when there's no search term or no box (or stealth off).
-    typed = False
+    # Human-first navigation (preferred): for sites whose controls we can FULLY drive, run the
+    # search by operating the page's OWN controls — land on the shallow entry, type the search,
+    # set the sidebar zip/distance/price — instead of jumping to a deep parametric URL (our
+    # biggest bot tell). Gated by can_fully_drive so a location/price is never silently dropped.
+    drove = False
     if cfg.browser.stealth:
+        try:
+            drove = _human_first_navigate(page, url, watch)
+        except Exception as exc:
+            log.debug("human-first navigation errored, falling back: %s", exc)
+
+    # Fallback 1: TYPE the search term into the box but land via the (still parametric) URL —
+    # humanizes the keyword only. Fallback 2: a direct goto. Both keep working for sites/cases
+    # human-first can't fully drive yet (no hints, generic-category, non-search filters).
+    typed = False
+    if not drove and cfg.browser.stealth:
         try:
             typed = humanized_search(page, url)
         except Exception as exc:
             log.debug("humanized_search errored, will goto directly: %s", exc)
-    if not typed:
+    if not drove and not typed:
         try:
             page.goto(url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
         except Exception as exc:

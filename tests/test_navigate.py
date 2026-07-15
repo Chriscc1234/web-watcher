@@ -96,3 +96,36 @@ def test_build_generic_vehicle_category_has_empty_terms():
 def test_build_tolerates_garbage_url():
     r = N.build_search_request("not a url", instruction="")
     assert isinstance(r, N.SearchRequest)   # best-effort, never raises
+
+
+# ── can_fully_drive: the gate that stops us silently dropping a location/price ─
+
+def test_can_fully_drive_craigslist_with_full_hints():
+    # Craigslist hints include postal + price controls → a zip+price request is fully drivable.
+    req = N.build_search_request(
+        "https://skagit.craigslist.org/search/cta?postal=98221&search_distance=50&max_price=10000&query=tacoma")
+    assert N.can_fully_drive(req, N.hints_for("https://skagit.craigslist.org")) is True
+
+
+def test_can_fully_drive_refuses_when_location_cannot_be_driven():
+    # eBay's hint is search-box only. A request WITH a zip must NOT be human-driven there (we'd
+    # type the terms but drop the location) — the gate returns False so the URL path is used.
+    req = N.build_search_request(
+        "https://www.ebay.com/sch/i.html?_nkw=tacoma&_stpos=98221&_sadis=50")
+    assert req.zip == "98221"
+    assert N.can_fully_drive(req, N.hints_for("https://www.ebay.com/sch/i.html")) is False
+
+
+def test_can_fully_drive_refuses_when_price_cannot_be_driven():
+    req = N.SearchRequest(terms="tacoma", price_max=10000)
+    assert N.can_fully_drive(req, {"search_box": "input"}) is False   # no price control in hint
+
+
+def test_can_fully_drive_allows_terms_only_anywhere():
+    # A pure keyword search (no location/price to lose) is drivable with just a search box.
+    req = N.SearchRequest(terms="tacoma")
+    assert N.can_fully_drive(req, {"search_box": "input"}) is True
+
+
+def test_can_fully_drive_false_on_empty_request():
+    assert N.can_fully_drive(N.SearchRequest(), {"search_box": "input"}) is False

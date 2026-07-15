@@ -16,6 +16,8 @@ Design rules:
 KEY LOCATIONS
   SearchRequest        the structured intent (terms/zip/radius/price/sort) a human APPLIES
   build_search_request parse that intent from a watch's URL + instruction (reuses cl_geo)
+  apply_search_request drive the page's controls to realize a SearchRequest (search+filters)
+  can_fully_drive      True only if the hints can apply EVERY part (so we never drop location)
   type_search     type the query into the search box (verify it landed) + submit
   set_location    open the location control → enter place/zip → confirm → verify it changed
   CONTROL_HINTS   per-site control map (seeded from live investigation; extend as we learn)
@@ -44,9 +46,18 @@ log = logging.getLogger(__name__)
 # host substring.
 CONTROL_HINTS: dict[str, dict] = {
     "craigslist.org": {
-        # The HOMEPAGE box has no name/id/type — only this placeholder. (The results-page box
-        # is input[name='query'].) type_search also falls back to the default selectors.
-        "search_box": "input[placeholder*='search craigslist' i], input[name='query'], #query",
+        # Search box: the HOMEPAGE box has no name/id/type — only placeholder 'search
+        # craigslist'; the RESULTS box's placeholder is 'search for sale'. 'search' covers both;
+        # type_search also falls back to the default selectors.
+        "search_box": "input[placeholder*='search' i], input[name='query'], #query",
+        # Location + price live in the RESULTS-PAGE sidebar (mapped live), applied by one
+        # 'apply' button. Price min/max are type=text (the auto miles/year fields are type=tel,
+        # so type=text uniquely targets PRICE); distance is the tel box labelled 'miles'.
+        "postal":    "input[name='postal']",
+        "distance":  "input[type='tel'][placeholder*='mile' i]",
+        "price_min": "input[type='text'][placeholder='min' i]",
+        "price_max": "input[type='text'][placeholder='max' i]",
+        "apply":     "button.cl-exec-search, button[type='submit'].cl-exec-search",
     },
     # OfferUp location = a Material-UI dialog opened from the top-left button (mapped live):
     #   click "Set my location" → dialog with a ZIP input + Distance + "See listings".
@@ -416,3 +427,97 @@ def _location_marker(page) -> str:
         return (t or "").strip()[:60]
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Applying a whole SearchRequest through a site's controls (the Phase-3 driver)
+# ---------------------------------------------------------------------------
+
+def _click_selector(page, selector: str) -> bool:
+    """Click the first visible element matching a comma-selector. Returns True if clicked."""
+    loc = _first_visible(page, selector or "")
+    if loc is None:
+        return False
+    try:
+        loc.click(timeout=3000)
+        return True
+    except Exception:
+        return False
+
+
+def _apply_inline_filters(page, req: "SearchRequest", hint: dict) -> bool:
+    """Fill the results-page sidebar filters that live INLINE on the page (craigslist-style:
+    zip, distance, min/max price) and click the site's own 'apply' button — the human way to
+    localize + price-limit, instead of URL params. Returns True if it filled at least one field
+    and submitted. Best-effort; never raises."""
+    filled = False
+
+    def _fill(sel_key: str, value) -> None:
+        nonlocal filled
+        if value in (None, ""):
+            return
+        loc = _first_visible(page, hint.get(sel_key, ""))
+        if loc is not None and _human_fill(loc, str(value)):
+            filled = True
+
+    _fill("postal", req.zip)
+    if req.zip:
+        _fill("distance", req.radius or 50)   # a zip with no radius filters nothing useful
+    _fill("price_min", req.price_min)
+    _fill("price_max", req.price_max)
+    if not filled:
+        return False
+    # Submit via the page's OWN apply/search button (falls back to Enter in the last field).
+    _pause(0.2, 0.5)
+    if not _click_selector(page, hint.get("apply", "")):
+        try:
+            page.keyboard.press("Enter")
+        except Exception:
+            pass
+    try:
+        page.wait_for_timeout(1800)
+    except Exception:
+        pass
+    return True
+
+
+def can_fully_drive(req: "SearchRequest", hint: dict) -> bool:
+    """True only if these hints can apply EVERY part of the request the URL would have — so
+    the caller never human-drives a site where it would silently DROP the location or price
+    (e.g. typing the terms on eBay but losing the zip because eBay has no inline zip control).
+    This is what makes the rollout safe + automatic: a site becomes human-driven exactly when
+    its hints are complete enough, not before."""
+    hint = hint or {}
+    if req.zip and not (hint.get("postal") or hint.get("location")):
+        return False
+    if (req.price_min is not None or req.price_max is not None) and not (
+            hint.get("price_min") or hint.get("price_max")):
+        return False
+    # Something must be drivable at all (terms to type, or a location to set).
+    return bool(req.terms or req.zip or req.price_min is not None or req.price_max is not None)
+
+
+def apply_search_request(page, req: "SearchRequest", hint: dict | None = None) -> dict:
+    """Realize a SearchRequest by DRIVING the page's own controls like a human: type the terms
+    into the search box, then set location/price via the site's controls (inline sidebar for
+    craigslist; a location dialog for OfferUp-style sites). Returns what was applied,
+    {searched, located, filtered}, so the caller can decide whether to fall back to the URL.
+    Best-effort: each step is independent and logged; never raises."""
+    if hint is None:
+        hint = hints_for(getattr(page, "url", "") or "")
+    applied = {"searched": False, "located": False, "filtered": False}
+
+    if req.terms:
+        applied["searched"] = type_search(page, req.terms, hint)
+
+    has_inline = any(k in hint for k in ("postal", "price_min", "price_max"))
+    if has_inline:
+        if _apply_inline_filters(page, req, hint):
+            applied["located"] = bool(req.zip)
+            applied["filtered"] = req.price_min is not None or req.price_max is not None
+    elif req.zip and hint.get("location"):
+        # Dialog-based location (OfferUp): open control → enter zip → confirm → verify.
+        applied["located"] = set_location(page, req.zip, req.radius, hint)
+
+    log.info("apply_search_request: %s → %s", req.describe(), applied)
+    return applied

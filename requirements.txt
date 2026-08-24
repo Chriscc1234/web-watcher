@@ -21,7 +21,7 @@ pywebview>=5.0
 # Cloud LLM (OPTIONAL) — only used when a role is routed to Anthropic in config
 # (models.cloud). The app runs fully locally without it; if it's missing, any cloud-routed
 # role falls back to the local model. See web_watcher/llm.py.
-anthropic>=0.40
+anthropic>=1.0
 
 # Anti-bot / stealth
 playwright-stealth>=2.0  # patches browser fingerprint to avoid bot detection

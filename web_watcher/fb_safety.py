@@ -3,8 +3,8 @@ Facebook safety harness — the guardrails that keep an automated browser from g
 user's (or their buddy's) Facebook account restricted or banned.
 
 The buddy's throwaway account is one he actually USES, so the rules here are strict and
-conservative. This module is pure, side-effect-free logic (easy to unit-test); the agent
-loop and the continuous scheduler enforce it at the two points that matter:
+conservative. The agent loop and the continuous scheduler enforce it at the points that
+matter:
 
   1. READ-ONLY, ALWAYS. On Facebook the agent may ONLY read/scroll/search/filter. It must
      NEVER take a social or transactional action — message a seller, make an offer, buy,
@@ -18,21 +18,38 @@ loop and the continuous scheduler enforce it at the two points that matter:
      escalates a soft flag into a ban). `is_checkpoint(page)` detects it; the sweep bails
      and records a cooldown so we don't hammer a flagged account.
 
+  3. THE HALT (emergency brake). A checkpoint doesn't just pause ONE watch for a few hours —
+     it stops ALL Facebook activity, app-wide, and stays stopped until a HUMAN clears it.
+     An auto-expiring per-watch cooldown was too weak for an account we can't afford to
+     lose: it resumed on its own, left other FB watches poking the same flagged account,
+     and forgot everything on restart. The halt is persisted to disk so an app restart
+     cannot silently resume. `engage_halt` / `halt_state` / `clear_halt`.
+
 Pacing (a per-session action cap + longer idles for Facebook watches) is applied by the
 caller using `SESSION_ACTION_CAP` / `is_facebook`.
+
+Everything here is pure logic EXCEPT the halt section, which reads/writes one small JSON
+file under the user's data dir (that persistence is the entire point of it).
 
 ── KEY LOCATIONS ─────────────────────────────────────────────────────────────
   is_facebook            host check
   is_blocked_action      visible-label → is this a social/transactional action to block?
   is_checkpoint          page → is this a security checkpoint / block we must STOP on?
   SESSION_ACTION_CAP     max agent actions per Facebook sweep (pacing)
+  engage_halt/halt_state/clear_halt ~L140  The global, human-cleared emergency brake
 ──────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+import time
+from pathlib import Path
 from urllib.parse import urlparse
+
+log = logging.getLogger(__name__)
 
 # A Facebook sweep is capped to this many agent actions, then it wraps up — far fewer than
 # a human session, but enough to scroll/sort/filter a feed. Low ceilings look less botlike
@@ -132,3 +149,75 @@ def checkpoint_reason(page) -> str:
         body = ""
     m = _CHECKPOINT_TEXT_RE.search(body or "")
     return (m.group(0).strip().capitalize() if m else "Facebook security checkpoint")
+
+
+# ---------------------------------------------------------------------------
+# The halt — a global, persistent, human-cleared emergency brake
+# ---------------------------------------------------------------------------
+#
+# When Facebook shows a security checkpoint we stop ALL Facebook activity, not just the
+# watch that tripped it: the flag is on the ACCOUNT, so letting a second watch keep browsing
+# is exactly how a soft flag becomes a ban. It persists to disk so restarting the app cannot
+# silently resume, and only a person can clear it — deliberately, after checking the account.
+
+_HALT_FILENAME = "fb_halt.json"
+
+
+def _halt_path(data_dir: Path | None = None) -> Path:
+    if data_dir is not None:
+        return Path(data_dir) / _HALT_FILENAME
+    from web_watcher import paths
+    return paths.data_dir() / _HALT_FILENAME
+
+
+def engage_halt(reason: str, watch_name: str = "", data_dir: Path | None = None) -> dict:
+    """Stop all Facebook activity until a human clears it. Idempotent: re-tripping keeps the
+    ORIGINAL reason/time (the first checkpoint is the informative one) and counts the hits."""
+    path = _halt_path(data_dir)
+    state = halt_state(data_dir) or {}
+    if state:
+        state["hits"] = int(state.get("hits", 1)) + 1
+        state["last_at"] = time.time()
+    else:
+        state = {"reason": reason or "Facebook security checkpoint",
+                 "watch": watch_name, "at": time.time(), "last_at": time.time(), "hits": 1}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        log.warning("FACEBOOK HALTED (%s) — all Facebook activity stopped until cleared by hand",
+                    state["reason"])
+    except Exception as exc:
+        # Even if we can't persist, the caller still stops this sweep.
+        log.error("could not persist the Facebook halt: %s", exc)
+    return state
+
+
+def halt_state(data_dir: Path | None = None) -> dict | None:
+    """The active halt, or None. Never raises — an unreadable file is treated as NOT halted
+    so a corrupt file can't permanently wedge the app."""
+    try:
+        path = _halt_path(data_dir)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("reason") else None
+    except Exception:
+        return None
+
+
+def is_halted(data_dir: Path | None = None) -> bool:
+    return halt_state(data_dir) is not None
+
+
+def clear_halt(data_dir: Path | None = None) -> bool:
+    """Human says the account is healthy again. Returns True if a halt was actually cleared."""
+    try:
+        path = _halt_path(data_dir)
+        if not path.exists():
+            return False
+        path.unlink()
+        log.info("Facebook halt cleared by the user — Facebook watches may run again")
+        return True
+    except Exception as exc:
+        log.error("could not clear the Facebook halt: %s", exc)
+        return False

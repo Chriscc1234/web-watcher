@@ -90,3 +90,50 @@ def test_checkpoint_reason_is_human_readable():
 
 def test_session_cap_is_conservative():
     assert 1 <= SESSION_ACTION_CAP <= 20
+
+
+# ── the halt: a global, persistent, human-cleared emergency brake ───────────────
+
+def test_halt_is_absent_by_default(tmp_path):
+    from web_watcher import fb_safety as F
+    assert F.halt_state(tmp_path) is None
+    assert F.is_halted(tmp_path) is False
+
+
+def test_engage_then_clear(tmp_path):
+    from web_watcher import fb_safety as F
+    st = F.engage_halt("Confirm your identity", "Trucks", tmp_path)
+    assert st["reason"] == "Confirm your identity" and st["watch"] == "Trucks"
+    assert F.is_halted(tmp_path) is True
+    assert F.clear_halt(tmp_path) is True
+    assert F.is_halted(tmp_path) is False
+    assert F.clear_halt(tmp_path) is False          # nothing left to clear
+
+
+def test_halt_survives_a_restart(tmp_path):
+    """THE point of the brake: a new process must still see the halt. An in-memory cooldown
+    forgot everything on restart, which silently resumed poking a flagged account."""
+    from web_watcher import fb_safety as F
+    F.engage_halt("Unusual activity", "Trucks", tmp_path)
+    import importlib
+    fresh = importlib.reload(F)                      # stands in for a fresh process
+    assert fresh.is_halted(tmp_path) is True
+    assert fresh.halt_state(tmp_path)["reason"] == "Unusual activity"
+
+
+def test_retripping_keeps_the_first_reason_and_counts_hits(tmp_path):
+    from web_watcher import fb_safety as F
+    F.engage_halt("Confirm your identity", "A", tmp_path)
+    st = F.engage_halt("Security check", "B", tmp_path)
+    assert st["reason"] == "Confirm your identity"   # the first one is the informative one
+    assert st["watch"] == "A"
+    assert st["hits"] == 2
+
+
+def test_corrupt_halt_file_does_not_wedge_the_app(tmp_path):
+    """An unreadable file must read as NOT halted — otherwise a corrupt byte permanently
+    disables Facebook with no way back through the UI."""
+    from web_watcher import fb_safety as F
+    (tmp_path / "fb_halt.json").write_text("{not json", encoding="utf-8")
+    assert F.halt_state(tmp_path) is None
+    assert F.is_halted(tmp_path) is False

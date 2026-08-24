@@ -1039,6 +1039,28 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "show_agent_cursor": cfg.browser.show_agent_cursor}
 
     # ------------------------------------------------------------------
+    # Facebook halt — the emergency brake (global, persistent, human-cleared)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/facebook/halt")
+    def get_fb_halt():
+        """Is Facebook watching halted after a security check, and why? The UI shows a banner
+        with a Resume button; nothing auto-clears it."""
+        from web_watcher import fb_safety
+        state = fb_safety.halt_state()
+        return {"halted": bool(state), "state": state}
+
+    @app.delete("/api/facebook/halt")
+    def clear_fb_halt():
+        """The human says the account is healthy again — let Facebook watches run. This is the
+        ONLY way a halt is lifted (deliberately: no timer, no restart, no silent resume)."""
+        from web_watcher import fb_safety
+        cleared = fb_safety.clear_halt()
+        if cleared:
+            log.info("Facebook halt cleared from the dashboard")
+        return {"ok": True, "cleared": cleared}
+
+    # ------------------------------------------------------------------
     # Credentials (Settings → Notifications & Keys): Telegram, Anthropic key, email
     # ------------------------------------------------------------------
 

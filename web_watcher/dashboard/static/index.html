@@ -281,6 +281,25 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 
 <!-- ================================================================ SERVICES -->
 <div id="tab-services" class="tab-panel">
+  <!-- Facebook emergency brake. Hidden unless a security check actually halted things; when
+       shown it is the first thing on the page, because nothing else matters until it's dealt
+       with. Only this button clears it — no timer, no auto-resume. -->
+  <section id="fb-halt-banner" style="display:none;margin-bottom:20px">
+    <div class="service-card" style="display:block;padding:16px 20px;max-width:600px;border:1px solid #f87171;background:rgba(248,113,113,0.08)">
+      <div style="font-weight:700;color:#f87171;margin-bottom:6px">⛔ Facebook watching is stopped</div>
+      <div id="fb-halt-reason" style="font-size:13px;margin-bottom:8px"></div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+        Facebook showed a security check, so Web Watcher stopped <b>all</b> Facebook activity and
+        did <b>not</b> try to solve it — that's what protects the account. This stays stopped even
+        if you restart the app. Open Facebook yourself (Connect Facebook below), clear the check
+        and make sure the account looks healthy, then resume.
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <button class="success" onclick="resumeFacebook(this)" style="white-space:nowrap">Resume Facebook</button>
+        <span id="fb-halt-status" style="font-size:12px;color:var(--dim)"></span>
+      </div>
+    </div>
+  </section>
   <section>
     <h2>Services &amp; Status</h2>
     <div class="service-grid" id="services-grid"></div>
@@ -2927,8 +2946,44 @@ loadWatches();          // Watches is home — load it + The Watcher's ambient f
 loadOversight();        // (the dock's conversation loads lazily the first time it's opened)
 loadOrchestrator();     // reflect whether The Watcher is currently driving
 loadCredentials();      // Settings → Notifications & Keys (Telegram / Claude / email)
+loadFbHalt();           // show the Facebook emergency brake if a security check tripped it
+setInterval(loadFbHalt, 30000);   // a halt can trip while the app is open — surface it promptly
 _initDockResize();      // top grip resizes the whole chat window (auto-grows with content otherwise)
 _initDockResizeX();     // left grip resizes the width (auto-grows to fit wide content otherwise)
+
+// ── Facebook emergency brake ───────────────────────────────────────────────────
+async function loadFbHalt() {
+  const banner = document.getElementById('fb-halt-banner');
+  if (!banner) return;
+  try {
+    const s = await api('/api/facebook/halt');
+    if (s.halted && s.state) {
+      const when = s.state.at ? new Date(s.state.at * 1000).toLocaleString() : '';
+      const hits = s.state.hits > 1 ? ` · seen ${s.state.hits}×` : '';
+      document.getElementById('fb-halt-reason').textContent =
+        `"${s.state.reason}"${s.state.watch ? ` — while running "${s.state.watch}"` : ''}`
+        + (when ? ` · ${when}${hits}` : '');
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch(_) {}
+}
+
+async function resumeFacebook(btn) {
+  const status = document.getElementById('fb-halt-status');
+  if (!confirm("Only resume if you've opened Facebook yourself and the account looks healthy "
+             + "— no security check, no warning.\n\nResume Facebook watching?")) return;
+  if (btn) btn.disabled = true;
+  if (status) { status.textContent = 'Resuming…'; status.style.color = 'var(--dim)'; }
+  try {
+    await api('/api/facebook/halt', { method: 'DELETE' });
+    if (status) { status.textContent = 'Resumed ✓'; status.style.color = 'var(--green)'; }
+    loadFbHalt();
+  } catch(e) {
+    if (status) { status.textContent = 'Failed — ' + (e.message || e); status.style.color = 'var(--red,#e66)'; }
+  } finally { if (btn) btn.disabled = false; }
+}
 
 // ── Settings → Notifications & Keys (Telegram / Claude / email) ────────────────
 function _applyJudgeToggle(on) {

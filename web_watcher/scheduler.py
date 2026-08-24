@@ -641,12 +641,20 @@ def _run_agent_continuous_sweep(
     plan   = _exploration_plan(sweep_index, watch)
     model  = watch.model_override or cfg.models.text_model
 
-    # Facebook cooldown: after a checkpoint we back off this watch's FB sweeps for hours
-    # instead of poking a flagged account every idle cycle.
-    if fb_safety.is_facebook(plan["start_url"]) and _fb_on_cooldown(watch.name):
-        log.info("Continuous agent sweep %d for %r: Facebook on cooldown — skipping",
-                 sweep_index, watch.name)
-        return
+    # Facebook HALT: a checkpoint stops ALL Facebook activity until a human clears it. The
+    # flag is on the ACCOUNT, so this is global — another watch quietly browsing the same
+    # flagged account is how a soft flag becomes a ban. Checked before every FB sweep.
+    if fb_safety.is_facebook(plan["start_url"]):
+        halt = fb_safety.halt_state()
+        if halt:
+            log.warning("Continuous agent sweep %d for %r: FACEBOOK HALTED (%s) — skipping. "
+                        "Clear it in Settings once the account is healthy.",
+                        sweep_index, watch.name, halt.get("reason"))
+            return
+        if _fb_on_cooldown(watch.name):
+            log.info("Continuous agent sweep %d for %r: Facebook on cooldown — skipping",
+                     sweep_index, watch.name)
+            return
 
     # Accumulate listings across every page the agent visits, keeping the richest
     # title per stable key. Dedup vs seen-state happens later in the shared pipeline.
@@ -1535,13 +1543,18 @@ def _fb_on_cooldown(watch_name: str) -> bool:
 
 def _handle_fb_checkpoint(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Optional[Path],
                           reason: str) -> None:
-    """Facebook threw a security checkpoint / block / CAPTCHA. STOP (never solve it), alert
-    the user ONCE, and put this watch's Facebook sweeps on a cooldown so we back off instead
-    of hammering a flagged account — the behavior that turns a soft flag into a real ban."""
+    """Facebook threw a security checkpoint / block / CAPTCHA. STOP (never solve it), HALT all
+    Facebook activity app-wide until a human clears it, and alert the user once.
+
+    The halt (not the old auto-expiring per-watch cooldown) is the real protection: the flag is
+    on the ACCOUNT, so pausing one watch while another keeps browsing is how a soft flag becomes
+    a ban — and a timer that resumes on its own resumes without anyone having checked. The
+    cooldown is kept as a secondary belt for the case where the halt file can't be written."""
     from datetime import datetime as _dt
+    fb_safety.engage_halt(reason, watch.name)
     _FB_COOLDOWN[watch.name] = time.time() + _FB_COOLDOWN_SECONDS
-    log.warning("Facebook checkpoint on %r (%s) — backing off for %d h",
-                watch.name, reason, _FB_COOLDOWN_SECONDS // 3600)
+    log.warning("Facebook checkpoint on %r (%s) — ALL Facebook activity halted until cleared",
+                watch.name, reason)
 
     last = get_last_run(watch.name, db_path)
     already = bool(last and last.get("error") and "checkpoint" in (last["error"] or "").lower())
@@ -1549,10 +1562,13 @@ def _handle_fb_checkpoint(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Op
                 perception_mode="continuous-agent")
 
     if not already and (watch.notify.telegram or watch.notify.email):
-        msg = (f"'{watch.name}' stopped: Facebook showed a security check ({reason}). "
-               "I did NOT try to solve it — that protects the account. I'll leave Facebook "
-               "alone for a few hours. If it keeps happening, open Facebook yourself, clear "
-               "the check, and make sure the login is healthy before restarting the watch.")
+        msg = (f"⛔ Facebook STOPPED — '{watch.name}' hit a security check ({reason}).\n\n"
+               "I did NOT try to solve it; that's what protects the account. ALL Facebook "
+               "watching is now paused and will stay paused until you say so — it will not "
+               "resume on its own, even if the app restarts.\n\n"
+               "What to do: open Facebook yourself (Settings → Connect Facebook), clear the "
+               "check, make sure the account looks healthy, then press "
+               "\"Resume Facebook\" in Settings.")
         result = ReasoningResult(found=True, summary=msg, confidence="high", link=watch.urls[0])
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=_dt.fromisoformat(run_ts))
         try:

@@ -99,8 +99,12 @@ class CloudConfig(BaseModel):
     anthropic_api_key: str = ""
     # role name → route. Recognized roles: "judge" (per-sweep listing rating), "chat"
     # (the Watcher assistant), "inspect" (Deep Inspect), "terms", "reason". Unlisted roles
-    # or provider="local" stay on the local model. Only "judge" is wired so far.
+    # or provider="local" stay on the local model.
     roles: dict[str, ProviderRoute] = Field(default_factory=dict)
+    # Hard monthly spend ceiling in USD (estimated from token usage). 0 = no cap. When this
+    # month's estimated spend reaches it, cloud calls stop and fall back to the LOCAL models
+    # for the rest of the month — so the bill can't run past what you set. See web_watcher/llm.py.
+    monthly_budget_usd: float = 0.0
 
 
 class ModelsConfig(BaseModel):

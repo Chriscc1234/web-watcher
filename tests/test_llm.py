@@ -122,3 +122,42 @@ def test_usage_snapshot_shape():
     snap = llm.usage_snapshot()
     for k in ("calls", "input", "output", "cache_read", "cost_usd"):
         assert k in snap
+
+
+# ── monthly spend cap ────────────────────────────────────────────────────────────
+
+def _budget_cfg(cap):
+    from web_watcher.config import AppConfig, CloudConfig, ModelsConfig, ProviderRoute
+    return AppConfig(models=ModelsConfig(cloud=CloudConfig(
+        anthropic_api_key="sk", monthly_budget_usd=cap,
+        roles={"chat": ProviderRoute(provider="anthropic", model="claude-haiku-4-5")})),
+        watches=[])
+
+
+def test_month_spend_persists_and_accumulates(tmp_path):
+    assert llm.month_spend(tmp_path) == 0.0
+    llm._add_month_spend(1.25, tmp_path)
+    llm._add_month_spend(0.75, tmp_path)
+    assert round(llm.month_spend(tmp_path), 2) == 2.00
+
+
+def test_budget_state_reports_remaining(tmp_path):
+    llm._add_month_spend(12.0, tmp_path)
+    st = llm.budget_state(_budget_cfg(40.0), tmp_path)
+    assert st["spent"] == 12.0 and st["cap"] == 40.0 and st["remaining"] == 28.0 and st["over"] is False
+
+
+def test_over_budget_trips_at_the_cap(tmp_path):
+    llm._add_month_spend(40.0, tmp_path)
+    assert llm.over_budget(_budget_cfg(40.0), tmp_path) is True
+    assert llm.over_budget(_budget_cfg(0.0), tmp_path) is False    # 0 = no cap, never over
+
+
+def test_chat_falls_back_to_local_when_over_budget(monkeypatch):
+    cfg = _budget_cfg(40.0)
+    monkeypatch.setattr(llm, "over_budget", lambda c, *a, **k: True)   # pretend the cap is hit
+    monkeypatch.setattr(llm, "_anthropic_chat", lambda *a, **k: pytest.fail("must not spend over cap"))
+    monkeypatch.setattr(llm, "_ollama_chat", lambda *a, **k: "LOCAL")
+    out = llm.chat([{"role": "user", "content": "hi"}], role="chat",
+                   local_model="qwen2.5:14b", cfg=cfg)
+    assert out == "LOCAL"

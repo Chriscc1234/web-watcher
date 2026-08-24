@@ -147,6 +147,13 @@ def chat(
     if cfg is not None:
         provider, model, key = resolve_route(cfg, role)
 
+    # Hard monthly cap: once the estimate hits the ceiling, stop spending — run local for the
+    # rest of the month. Logged once per month so it doesn't flood.
+    if provider == "anthropic" and cfg is not None and over_budget(cfg):
+        _warn_once(f"budget:{_current_month()}",
+                   "Monthly cloud spend cap reached — using the local model until next month.")
+        provider = "local"
+
     if provider == "anthropic" and not images:
         try:
             system_text, user_messages = _split_system(messages)
@@ -268,9 +275,87 @@ def _record_usage(model: str, usage) -> None:
         _USAGE["cache_read"] += cr
         _USAGE["cache_write"] += cw
         _USAGE["cost_usd"] += cost
+    _add_month_spend(cost)
 
 
 def usage_snapshot() -> dict:
     """A copy of the running cloud-usage tally since process start (tokens + estimated USD)."""
     with _usage_lock:
         return dict(_USAGE)
+
+
+# ---------------------------------------------------------------------------
+# Monthly spend ledger + hard cap
+# ---------------------------------------------------------------------------
+#
+# The in-memory tally above resets on restart, so it can't enforce a MONTHLY ceiling. This
+# ledger persists estimated spend per calendar month to a small JSON file, survives restarts,
+# and rolls over on the 1st. chat() checks it before every cloud call: once the month's spend
+# reaches the configured cap, cloud is skipped and the local model runs — the bill cannot pass
+# the number the user set. The cap is on OUR estimate, not a live Anthropic account balance
+# (the API exposes no balance), so treat it as a safety ceiling, not accounting truth.
+
+_spend_lock = threading.Lock()
+
+
+def _current_month() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m")
+
+
+def _spend_path(data_dir=None):
+    from pathlib import Path
+    if data_dir is not None:
+        return Path(data_dir) / "llm_spend.json"
+    from web_watcher import paths
+    return paths.data_dir() / "llm_spend.json"
+
+
+def _read_ledger(data_dir=None) -> dict:
+    try:
+        p = _spend_path(data_dir)
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def _add_month_spend(cost: float, data_dir=None) -> None:
+    if cost <= 0:
+        return
+    month = _current_month()
+    with _spend_lock:
+        led = _read_ledger(data_dir)
+        led[month] = round(float(led.get(month, 0.0)) + float(cost), 6)
+        try:
+            p = _spend_path(data_dir)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(led), encoding="utf-8")
+        except Exception as exc:
+            log.debug("could not persist spend ledger: %s", exc)
+
+
+def month_spend(data_dir=None) -> float:
+    """Estimated cloud spend so far THIS calendar month (USD)."""
+    return float(_read_ledger(data_dir).get(_current_month(), 0.0))
+
+
+def budget_state(cfg, data_dir=None) -> dict:
+    """Spend/cap summary for the UI and for the bot to read back: {spent, cap, remaining,
+    over, month}. cap 0 / remaining None means no cap set."""
+    try:
+        cap = float(getattr(cfg.models.cloud, "monthly_budget_usd", 0.0) or 0.0)
+    except Exception:
+        cap = 0.0
+    spent = month_spend(data_dir)
+    remaining = round(cap - spent, 4) if cap > 0 else None
+    return {"month": _current_month(), "spent": round(spent, 4), "cap": cap,
+            "remaining": remaining, "over": bool(cap > 0 and spent >= cap)}
+
+
+def over_budget(cfg, data_dir=None) -> bool:
+    """True when this month's estimated spend has reached the configured cap (cap 0 = never)."""
+    return budget_state(cfg, data_dir)["over"]

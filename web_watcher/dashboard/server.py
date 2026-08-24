@@ -890,6 +890,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         system = (
             _WATCHER_SYSTEM + "\n\n" + _CHAT_SYSTEM_BASE + "\n\n"
             + _build_watches_context(cfg, manager, owner=owner) + "\n\n" + observed_ctx
+            + "\n\n" + _cloud_spend_context(cfg)
         )
         result = _complete_assistant_turn(system, messages, cfg, model, owner=owner)
 
@@ -1087,9 +1088,14 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         judge = (cloud.roles or {}).get("judge")
         judge_on = bool(judge and (judge.provider or "").lower() == "anthropic")
         spend = llm.usage_snapshot()
+        budget = llm.budget_state(cfg)
+        chat_route = (cloud.roles or {}).get("chat")
+        chat_on = bool(chat_route and (chat_route.provider or "").lower() == "anthropic")
         return {
             "spend": {"cost_usd": round(spend.get("cost_usd", 0.0), 4),
-                      "calls": spend.get("calls", 0)},
+                      "calls": spend.get("calls", 0),
+                      "month_spent": budget["spent"], "cap": budget["cap"],
+                      "remaining": budget["remaining"]},
             "telegram": {"chat_id": tg.chat_id, "token_set": bool(tg.bot_token),
                          "token_hint": _mask(tg.bot_token),
                          "two_way": bool(getattr(tg, "two_way", False)),
@@ -1103,6 +1109,9 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "key_from_env": (not cloud.anthropic_api_key) and bool(os.environ.get("ANTHROPIC_API_KEY")),
                 "judge_enabled": judge_on,
                 "judge_model": (judge.model if judge else "") or "claude-haiku-4-5",
+                "chat_enabled": chat_on,
+                "chat_model": (chat_route.model if chat_route else "") or "claude-haiku-4-5",
+                "monthly_budget_usd": budget["cap"],
             },
         }
 
@@ -1144,14 +1153,25 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         an = body.get("anthropic") or {}
         if (an.get("api_key") or "").strip():
             cfg.models.cloud.anthropic_api_key = an["api_key"].strip()
+        roles = dict(cfg.models.cloud.roles or {})
         if "judge_enabled" in an:
-            roles = dict(cfg.models.cloud.roles or {})
             if an.get("judge_enabled"):
-                model = str(an.get("judge_model") or "").strip()
-                roles["judge"] = ProviderRoute(provider="anthropic", model=model)
+                roles["judge"] = ProviderRoute(provider="anthropic",
+                                               model=str(an.get("judge_model") or "").strip())
             else:
                 roles.pop("judge", None)
-            cfg.models.cloud.roles = roles
+        if "chat_enabled" in an:
+            if an.get("chat_enabled"):
+                roles["chat"] = ProviderRoute(provider="anthropic",
+                                              model=str(an.get("chat_model") or "").strip())
+            else:
+                roles.pop("chat", None)
+        cfg.models.cloud.roles = roles
+        if "monthly_budget_usd" in an:
+            try:
+                cfg.models.cloud.monthly_budget_usd = max(0.0, float(an["monthly_budget_usd"] or 0))
+            except (TypeError, ValueError):
+                pass
 
         save(cfg)
         # Apply a two-way-chat change immediately — the user shouldn't have to restart the app
@@ -1796,6 +1816,31 @@ def _watch_search_terms(w) -> list[str]:
         except Exception:
             continue
     return terms
+
+
+def _cloud_spend_context(cfg) -> str:
+    """A one-line spend/budget summary in the chat prompt so the user can just ASK the bot
+    'how much have I spent this month / how much is left' and it answers from real numbers.
+    When no cloud is in use, says so plainly (nothing is being spent)."""
+    try:
+        from web_watcher import llm
+        b = llm.budget_state(cfg)
+    except Exception:
+        return "CLOUD SPEND: unavailable."
+    any_cloud = False
+    try:
+        any_cloud = any((r.provider or "").lower() == "anthropic"
+                        for r in (cfg.models.cloud.roles or {}).values())
+    except Exception:
+        pass
+    if not any_cloud and b["spent"] <= 0:
+        return ("CLOUD SPEND: The Watcher is running fully on local models right now — $0 of "
+                "cloud (Claude) tokens are being spent. Tell the user that if they ask about cost.")
+    cap = (f"a ${b['cap']:.2f}/month cap (about ${b['remaining']:.2f} left this month)"
+           if b["cap"] > 0 else "no monthly cap set")
+    return (f"CLOUD SPEND (Claude): about ${b['spent']:.2f} spent so far this month ({b['month']}), "
+            f"with {cap}. This is an estimate from token usage, not a live account balance. "
+            "Answer cost questions from these numbers.")
 
 
 def _watches_for_owner(cfg, owner: str | None):

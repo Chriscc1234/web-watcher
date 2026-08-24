@@ -398,6 +398,39 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
           <span id="cred-an-judge-label" style="font-size:13px;color:var(--dim)">Off</span>
         </label>
       </div>
+      <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:12px 14px;margin-top:12px;background:var(--bg)">
+        <div style="flex:1">
+          <div style="font-weight:600;margin-bottom:4px">Use Claude for chat</div>
+          <div style="font-size:12px;color:var(--dim)">Faster replies and longer memory when you talk to The Watcher (here and on Telegram). Off = your local model answers.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+          <div class="toggle-wrap">
+            <input type="checkbox" id="cred-an-chat-chk" style="display:none" onchange="_applyChatToggle(this.checked)">
+            <div class="toggle-track" id="cred-an-chat-track"><div class="toggle-thumb"></div></div>
+          </div>
+          <span id="cred-an-chat-label" style="font-size:13px;color:var(--dim)">Off</span>
+        </label>
+      </div>
+      <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:160px">
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Chat model</label>
+          <select id="cred-an-chat-model" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+            <option value="claude-haiku-4-5">Haiku — cheapest, fast</option>
+            <option value="claude-sonnet-5">Sonnet — nicer replies, a bit more</option>
+            <option value="claude-opus-5">Opus — best, priciest</option>
+          </select>
+        </div>
+        <div style="flex:1;min-width:160px">
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Monthly spending cap (USD)</label>
+          <input id="cred-an-budget" type="number" min="0" step="1" placeholder="e.g. 40 (0 = no cap)"
+                 style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-top:6px">
+        When the month's estimated Claude spend hits your cap, Web Watcher automatically switches
+        back to the local models for the rest of the month — so the bill can't run past it. You can
+        also just ask The Watcher "how much have I spent this month?"
+      </div>
       <div id="cred-an-spend" style="font-size:12px;color:var(--dim);margin-top:10px"></div>
     </div>
 
@@ -3020,6 +3053,13 @@ function _applyTwoWayToggle(on) {
   if (label) { label.textContent = on ? 'On' : 'Off'; label.style.color = on ? 'var(--green)' : 'var(--dim)'; }
 }
 
+function _applyChatToggle(on) {
+  const track = document.getElementById('cred-an-chat-track');
+  const label = document.getElementById('cred-an-chat-label');
+  if (track) { on ? track.classList.add('on') : track.classList.remove('on'); }
+  if (label) { label.textContent = on ? 'On' : 'Off'; label.style.color = on ? 'var(--green)' : 'var(--dim)'; }
+}
+
 async function loadCredentials() {
   let s;
   try { s = await api('/api/credentials'); } catch(e) { return; }   // Settings not in DOM yet, etc.
@@ -3039,8 +3079,21 @@ async function loadCredentials() {
   if (allowed) allowed.value = (tg.allowed_chat_ids || []).join(', ');
   const twchk = document.getElementById('cred-tg-twoway-chk');
   if (twchk) { twchk.checked = !!tg.two_way; _applyTwoWayToggle(!!tg.two_way); }
+  const cchk = document.getElementById('cred-an-chat-chk');
+  if (cchk) { cchk.checked = !!an.chat_enabled; _applyChatToggle(!!an.chat_enabled); }
+  const cm = document.getElementById('cred-an-chat-model');
+  if (cm && an.chat_model) cm.value = an.chat_model;
+  const bud = document.getElementById('cred-an-budget');
+  if (bud) bud.value = (an.monthly_budget_usd && an.monthly_budget_usd > 0) ? an.monthly_budget_usd : '';
   const spend = document.getElementById('cred-an-spend');
-  if (spend) spend.textContent = (sp.calls ? `Claude usage so far: $${(sp.cost_usd||0).toFixed(2)} over ${sp.calls} call(s).` : '');
+  if (spend) {
+    if (sp.cap && sp.cap > 0)
+      spend.textContent = `This month: $${(sp.month_spent||0).toFixed(2)} of $${sp.cap.toFixed(2)} `
+                        + `(~$${(sp.remaining||0).toFixed(2)} left).`;
+    else if (sp.month_spent > 0)
+      spend.textContent = `This month: ~$${(sp.month_spent||0).toFixed(2)} on Claude (no cap set).`;
+    else spend.textContent = '';
+  }
   const setV = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; };
   setV('cred-em-server', em.smtp_server); setV('cred-em-port', em.smtp_port);
   setV('cred-em-from', em.from_address); setV('cred-em-to', em.to_address);
@@ -3056,7 +3109,10 @@ async function saveCredentials(btn) {
                 two_way: document.getElementById('cred-tg-twoway-chk').checked,
                 allowed_chat_ids: document.getElementById('cred-tg-allowed').value },
     anthropic: { api_key: document.getElementById('cred-an-key').value.trim(),
-                 judge_enabled: document.getElementById('cred-an-judge-chk').checked },
+                 judge_enabled: document.getElementById('cred-an-judge-chk').checked,
+                 chat_enabled: document.getElementById('cred-an-chat-chk').checked,
+                 chat_model: document.getElementById('cred-an-chat-model').value,
+                 monthly_budget_usd: document.getElementById('cred-an-budget').value.trim() || 0 },
     email: { smtp_server: document.getElementById('cred-em-server').value.trim(),
              smtp_port: document.getElementById('cred-em-port').value.trim(),
              from_address: document.getElementById('cred-em-from').value.trim(),

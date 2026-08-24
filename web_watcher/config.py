@@ -57,6 +57,10 @@ class ClickStep(BaseModel):
 class TelegramConfig(BaseModel):
     bot_token: str = ""
     chat_id: str = ""
+    # Two-way chat: when on (and token+chat_id are set), the app polls Telegram for messages
+    # you send the bot and answers with the SAME assistant as the in-app dock, so your phone
+    # becomes one conversation with The Watcher. Off = alerts only. See telegram_bot.py.
+    two_way: bool = False
 
 
 class EmailConfig(BaseModel):

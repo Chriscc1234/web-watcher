@@ -59,6 +59,7 @@ class ServiceManager:
         self._server_thread:  Optional[threading.Thread] = None
         self._scheduler       = None
         self._oversight       = None   # OversightAgent — the visible narrator over all watches
+        self._telegram        = None   # TelegramBridge — inbound phone chat (opt-in)
         self._orchestrator    = None   # Orchestrator — the single driver (opt-in)
         self._ollama_proc:    Optional[subprocess.Popen] = None
         self._ollama_adopted  = False   # True when we adopted an existing instance
@@ -90,12 +91,48 @@ class ServiceManager:
         self._start_server()
         self._start_scheduler()
         self._start_update_checker()
+        self._start_telegram()  # last: the bridge talks to the server we just started
 
     def stop_all(self) -> None:
         self._update_stop.set()
+        self._stop_telegram()
         self._stop_scheduler()
         self._stop_server()
         self._stop_ollama()     # last: don't kill Ollama while scheduler is live
+
+    # ------------------------------------------------------------------
+    # Two-way Telegram (opt-in) — text the bot, talk to The Watcher
+    # ------------------------------------------------------------------
+
+    def _start_telegram(self) -> None:
+        """Start the inbound Telegram bridge when the user has enabled two-way chat. Failure to
+        start is never fatal — alerts and watches work regardless."""
+        try:
+            from web_watcher.config import load as load_config
+            from web_watcher.telegram_bot import TelegramBridge
+            tg = load_config().notifications.telegram
+            if not getattr(tg, "two_way", False):
+                return
+            bridge = TelegramBridge(tg.bot_token, tg.chat_id, f"http://127.0.0.1:{self.PORT}")
+            if bridge.start():
+                self._telegram = bridge
+        except Exception as exc:
+            log.warning("Telegram two-way chat could not start: %s", exc)
+
+    def _stop_telegram(self) -> None:
+        bridge, self._telegram = getattr(self, "_telegram", None), None
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception as exc:
+                log.debug("Telegram bridge stop failed: %s", exc)
+
+    def restart_telegram(self) -> bool:
+        """Re-read config and restart the bridge — called after the credentials page saves, so
+        turning two-way chat on takes effect without restarting the app."""
+        self._stop_telegram()
+        self._start_telegram()
+        return getattr(self, "_telegram", None) is not None
 
     # ------------------------------------------------------------------
     # Auto-update (checks GitHub Releases; stages in the background; the UI

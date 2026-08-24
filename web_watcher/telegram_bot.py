@@ -1,0 +1,260 @@
+r"""
+Two-way Telegram — talk to The Watcher from your phone like you'd text a person.
+
+Until now Telegram was OUTBOUND only (alerts). This adds the inbound half: a background
+thread long-polls Telegram for messages you send the bot, runs each one through THE SAME
+assistant that powers the in-app "Ask The Watcher" dock, and texts the reply back. Because
+alerts already go out over this channel, your phone becomes ONE continuous conversation:
+
+    🚨 "found a diesel Tacoma, $9,500"   ← alert
+    "is it 4x4?"                          ← you
+    "Yes — 4WD, 118k miles, manual."      ← The Watcher
+
+Design notes
+  • THIN CLIENT, NOT A SECOND BRAIN. We POST to the app's own /api/oversight/chat on
+    127.0.0.1, so the phone shares the dashboard's history, watch context and behaviour.
+    There is exactly one assistant; Telegram is just another front door to it.
+  • LONG POLLING, NOT A WEBHOOK. The app runs on a home PC with no public URL for Telegram
+    to call back to, so we poll getUpdates with a held-open request (cheap + instant).
+  • ⚠ SENDER ALLOWLIST. A bot token is effectively public — anyone who learns the bot's
+    name can message it. We ONLY answer the configured chat_id and ignore everything else,
+    so a stranger can never drive the app. See _authorized().
+
+── KEY LOCATIONS ─────────────────────────────────────────────────────────────
+  TelegramBridge.start/stop  ~L70   Thread lifecycle (daemon; owned by ServiceManager)
+  _loop                      ~L110  Long-poll getUpdates → dispatch → reply
+  _authorized                ~L165  The sender allowlist (security boundary)
+  _handle_message            ~L180  One inbound message → assistant turn → reply
+  _ask_watcher               ~L215  Calls the app's own chat API (shared history + brain)
+  _send / _typing            ~L265  Outbound helpers (4096-char chunking)
+──────────────────────────────────────────────────────────────────────────────
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+TELEGRAM_API = "https://api.telegram.org"
+
+_POLL_TIMEOUT   = 30      # seconds Telegram holds the getUpdates request open
+_HTTP_TIMEOUT   = 45.0    # must exceed _POLL_TIMEOUT so the long poll isn't cut short
+_MSG_LIMIT      = 4096    # Telegram's hard per-message character cap
+_ERROR_BACKOFF  = 15.0    # pause after a transport error so we don't hammer the API
+_CHAT_TIMEOUT   = 180.0   # a local model turn can be slow; be patient before apologising
+
+
+class TelegramBridge:
+    """Background poller that answers Telegram messages using the app's own assistant.
+
+    Owned by ServiceManager: start() on app start, stop() on shutdown. Never raises out of
+    the thread — a Telegram or model failure is logged and the loop continues, because this
+    must never be able to take down a running watch.
+    """
+
+    def __init__(self, bot_token: str, chat_id: str, dashboard_url: str) -> None:
+        self.bot_token     = (bot_token or "").strip()
+        self.chat_id       = str(chat_id or "").strip()
+        self.dashboard_url = dashboard_url.rstrip("/")
+        self._stop         = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._offset: int | None = None      # next update_id to fetch
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+    def start(self) -> bool:
+        """Start the poller. Returns False (and does nothing) when not configured."""
+        if not self.configured:
+            log.info("Telegram two-way chat not started — bot token / chat ID not set")
+            return False
+        if self._thread and self._thread.is_alive():
+            return True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="telegram-bridge", daemon=True)
+        self._thread.start()
+        log.info("Telegram two-way chat started — text your bot to talk to The Watcher")
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        t = self._thread
+        if t and t.is_alive():
+            # Don't block shutdown on the in-flight long poll; the daemon thread dies with us.
+            t.join(timeout=2.0)
+        self._thread = None
+
+    # ------------------------------------------------------------------
+    # Poll loop
+    # ------------------------------------------------------------------
+
+    def _loop(self) -> None:
+        # Skip whatever piled up while the app was closed: on first poll, jump to the newest
+        # update. Otherwise every message sent while offline would be answered at once.
+        try:
+            self._offset = self._latest_offset()
+        except Exception as exc:
+            log.debug("Telegram: could not prime offset (%s) — starting from the backlog", exc)
+
+        while not self._stop.is_set():
+            try:
+                for update in self._get_updates():
+                    if self._stop.is_set():
+                        break
+                    try:
+                        self._dispatch(update)
+                    except Exception as exc:               # one bad message must not kill the loop
+                        log.warning("Telegram: failed handling update: %s", exc)
+            except Exception as exc:
+                log.warning("Telegram poll failed (%s) — retrying in %.0fs", exc, _ERROR_BACKOFF)
+                self._stop.wait(_ERROR_BACKOFF)
+
+    def _latest_offset(self) -> int | None:
+        """The offset just past the newest pending update, so we ignore the offline backlog."""
+        r = httpx.get(f"{TELEGRAM_API}/bot{self.bot_token}/getUpdates",
+                      params={"timeout": 0}, timeout=15.0)
+        result = (r.json() or {}).get("result") or []
+        return (result[-1]["update_id"] + 1) if result else None
+
+    def _get_updates(self) -> list[dict]:
+        params: dict = {"timeout": _POLL_TIMEOUT}
+        if self._offset is not None:
+            params["offset"] = self._offset
+        r = httpx.get(f"{TELEGRAM_API}/bot{self.bot_token}/getUpdates",
+                      params=params, timeout=_HTTP_TIMEOUT)
+        data = r.json() or {}
+        if not data.get("ok"):
+            raise RuntimeError(data.get("description", "getUpdates rejected"))
+        updates = data.get("result") or []
+        if updates:
+            self._offset = updates[-1]["update_id"] + 1      # ack: never re-deliver these
+        return updates
+
+    def _dispatch(self, update: dict) -> None:
+        msg  = update.get("message") or update.get("edited_message") or {}
+        text = (msg.get("text") or "").strip()
+        chat = (msg.get("chat") or {}).get("id")
+        if not text:
+            return                                            # photo/sticker/etc — nothing to answer
+        if not self._authorized(chat):
+            log.warning("Telegram: ignoring message from unauthorized chat %s", chat)
+            return
+        self._handle_message(text)
+
+    def _authorized(self, chat_id) -> bool:
+        """Security boundary: only the configured chat may drive the app. A bot token is
+        effectively public, so without this anyone who finds the bot could create watches."""
+        return str(chat_id) == self.chat_id
+
+    # ------------------------------------------------------------------
+    # One message → assistant turn → reply
+    # ------------------------------------------------------------------
+
+    def _handle_message(self, text: str) -> None:
+        log.info("Telegram message received: %r", text[:80])
+        self._typing()
+        try:
+            result = self._ask_watcher(text)
+        except Exception as exc:
+            log.warning("Telegram: assistant turn failed: %s", exc)
+            self._send("Sorry — I couldn't think that through just now. Try again in a moment.")
+            return
+
+        reply = (result.get("message") or "").strip()
+        extra = _describe_suggestions(result)
+        if extra:
+            reply = (reply + "\n\n" + extra).strip()
+        self._send(reply or "(no reply)")
+
+    def _ask_watcher(self, text: str) -> dict:
+        """Run the message through the app's OWN chat endpoint, so Telegram and the in-app dock
+        share one brain and one history. Sends prior history for continuity; the endpoint
+        persists both sides of the turn itself."""
+        history: list[dict] = []
+        try:
+            r = httpx.get(f"{self.dashboard_url}/api/oversight/chat/history", timeout=15.0)
+            if r.status_code == 200:
+                loaded = r.json()
+                if isinstance(loaded, list):
+                    # Only the fields the endpoint needs; trim so the prompt stays bounded.
+                    history = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))}
+                               for m in loaded[-20:]
+                               if isinstance(m, dict) and m.get("content")]
+        except Exception as exc:
+            log.debug("Telegram: could not load chat history (%s) — starting fresh", exc)
+
+        messages = history + [{"role": "user", "content": text}]
+        r = httpx.post(f"{self.dashboard_url}/api/oversight/chat",
+                       json={"messages": messages}, timeout=_CHAT_TIMEOUT)
+        r.raise_for_status()
+        return r.json() or {}
+
+    # ------------------------------------------------------------------
+    # Outbound helpers
+    # ------------------------------------------------------------------
+
+    def _typing(self) -> None:
+        """Show Telegram's '…is typing' while the model thinks — a local turn isn't instant and
+        silence reads as broken."""
+        try:
+            httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendChatAction",
+                       json={"chat_id": self.chat_id, "action": "typing"}, timeout=10.0)
+        except Exception:
+            pass
+
+    def _send(self, text: str) -> None:
+        for chunk in _chunk(text, _MSG_LIMIT):
+            try:
+                httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendMessage",
+                           json={"chat_id": self.chat_id, "text": chunk,
+                                 "disable_web_page_preview": True}, timeout=20.0)
+            except Exception as exc:
+                log.warning("Telegram: reply send failed: %s", exc)
+                return
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (unit-tested)
+# ---------------------------------------------------------------------------
+
+def _chunk(text: str, limit: int) -> list[str]:
+    """Split a reply into Telegram-sized pieces, preferring a line break near the edge so a
+    message isn't cut mid-sentence."""
+    t = text or ""
+    if len(t) <= limit:
+        return [t]
+    out: list[str] = []
+    while len(t) > limit:
+        cut = t.rfind("\n", 0, limit)
+        if cut < limit // 2:                 # no sensible break — hard split
+            cut = limit
+        out.append(t[:cut])
+        t = t[cut:].lstrip("\n")
+    if t:
+        out.append(t)
+    return out
+
+
+def _describe_suggestions(result: dict) -> str:
+    """The dashboard renders watch proposals as click-to-confirm cards; Telegram can't, so
+    say in words what it wants to do and point at the app to confirm."""
+    sugg = result.get("watch_suggestions") or []
+    if not sugg and result.get("watch_suggestion"):
+        sugg = [result["watch_suggestion"]]
+    names = [str((s or {}).get("name") or "a new watch") for s in sugg if isinstance(s, dict)]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"📋 I've drafted a watch — “{names[0]}”. Open Web Watcher to confirm it."
+    return ("📋 I've drafted " + str(len(names)) + " watches — "
+            + ", ".join(f"“{n}”" for n in names) + ". Open Web Watcher to confirm them.")

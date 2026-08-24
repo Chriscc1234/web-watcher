@@ -7,7 +7,9 @@ tests of the classifier + the element rendering (no browser needed)."""
 
 from __future__ import annotations
 
-from web_watcher.agent import _elements_text, _is_location_input, _SYSTEM
+from web_watcher.agent import (
+    _elements_text, _is_location_input, _is_topic_plus_place, _place_tail, _SYSTEM,
+)
 from web_watcher.monitor import label_is_location_box
 
 
@@ -70,6 +72,25 @@ def test_system_prompt_teaches_the_location_rule():
 
 
 # ── the shared helper both paths use (agent rendering + humanized_search) ───────
+
+def test_topic_plus_place_catches_the_real_failure():
+    # The exact live failure from a screenshot: typed into weather.gov's city box, which
+    # answered "No results found". Tagging the box wasn't enough — this is what BLOCKS it.
+    assert _is_topic_plus_place("weather warning Saipan") is True
+    assert _place_tail("weather warning Saipan") == "Saipan"
+    assert _is_topic_plus_place("severe weather Seattle") is True
+
+
+def test_bare_places_are_never_blocked():
+    # Must not fire on a correct retry, or the agent would loop forever. Note looks_like_location
+    # says False for "Saipan" and a bare ZIP, so the word-count floor is what protects them.
+    for ok in ("Saipan", "Seattle", "Anacortes, WA", "98221"):
+        assert _is_topic_plus_place(ok) is False, ok
+
+
+def test_place_tail_keeps_city_state_pairs():
+    assert _place_tail("show me trucks in Anacortes, WA") == "Anacortes, WA"
+
 
 def test_shared_label_helper_agrees():
     # Same helper backs the agent's _is_location_input and humanized_search's guard.

@@ -839,9 +839,11 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     if not N.is_human_first_enabled(url):
         return False
     req = N.build_search_request(url, watch.instruction)
-    # Need a keyword to type; the generic-category case (empty terms = 'browse this category')
-    # isn't a drivable search yet — let the URL path land on the right category.
-    if not req.terms or not N.can_fully_drive(req, hint):
+    # Drivable when there's a keyword to type OR a category to click (the "browse cars+trucks"
+    # watch with no keyword — the shape most of the real watches actually have). can_fully_drive
+    # still refuses a category we have no link hint for, so we never land on the front page and
+    # quietly browse the wrong thing.
+    if not (req.terms or req.category) or not N.can_fully_drive(req, hint):
         return False
 
     p = urlparse(url)
@@ -854,10 +856,21 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     dismiss_popups(page, settle_ms=0)
 
     applied = N.apply_search_request(page, req, hint)
-    if applied.get("searched"):
-        log.info("Human-first nav on %s: drove %s (applied %s)", p.netloc, req.describe(), applied)
-        return True
-    return False
+    if not (applied.get("searched") or applied.get("categorized")):
+        return False
+    # Landing on the right page but DROPPING the zip/price would quietly widen the watch to the
+    # whole region at any price — worse than the URL we were avoiding. If the request asked for
+    # a location or a price and the controls didn't take, fall back rather than sweep wrong.
+    if req.zip and not applied.get("located"):
+        log.info("Human-first nav on %s: location was not applied — falling back to the URL",
+                 p.netloc)
+        return False
+    if (req.price_min is not None or req.price_max is not None) and not applied.get("filtered"):
+        log.info("Human-first nav on %s: price filter was not applied — falling back to the URL",
+                 p.netloc)
+        return False
+    log.info("Human-first nav on %s: drove %s (applied %s)", p.netloc, req.describe(), applied)
+    return True
 
 
 def _run_continuous_sweep(

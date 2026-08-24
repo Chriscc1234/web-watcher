@@ -142,6 +142,37 @@ def test_human_first_enabled_sites():
     assert N.is_human_first_enabled("https://www.facebook.com/marketplace") is False
 
 
+def test_category_browse_is_drivable_on_craigslist():
+    # The shape the REAL watches have: a category browse with NO keyword ("cars+trucks in
+    # Anacortes under $10k"). This used to be refused (the gate required terms), so every such
+    # watch fell back to goto-ing the deep parametric URL — the exact bot tell we avoid.
+    req = N.build_search_request(
+        "https://seattle.craigslist.org/search/cta"
+        "?min_price=0&max_price=10000&postal=98210&search_distance=50",
+        instruction="Search for any vehicles under $10,000 in Anacortes.")
+    assert req.terms == "" and req.category == "cta"
+    assert N.can_fully_drive(req, N.hints_for("https://seattle.craigslist.org")) is True
+
+
+def test_category_hint_is_templated_per_code():
+    # The link a person clicks carries the category code (mapped live: 'cars + trucks' -> cat=cta).
+    tmpl = N.hints_for("https://seattle.craigslist.org")["category_link"]
+    assert "{cat}" in tmpl
+    assert "cat=cta" in tmpl.replace("{cat}", "cta")
+
+
+def test_category_without_a_link_hint_is_refused():
+    # A category we have no way to CLICK must fall back to the URL rather than land on the
+    # homepage and quietly browse the wrong thing.
+    req = N.SearchRequest(category="cta")
+    assert N.can_fully_drive(req, {"search_box": "input"}) is False
+
+
+def test_click_category_needs_a_template_and_code():
+    assert N.click_category(object(), "cta", {}) is False          # no hint
+    assert N.click_category(object(), "", {"category_link": "a"}) is False   # no category
+
+
 def test_offerup_is_fully_drivable():
     # OfferUp has a location dialog + inline price hints → a zip+price request is fully drivable.
     req = N.build_search_request("https://offerup.com/search?q=truck&price_max=10000&radius=50",

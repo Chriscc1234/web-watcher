@@ -1065,7 +1065,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             "spend": {"cost_usd": round(spend.get("cost_usd", 0.0), 4),
                       "calls": spend.get("calls", 0)},
             "telegram": {"chat_id": tg.chat_id, "token_set": bool(tg.bot_token),
-                         "token_hint": _mask(tg.bot_token)},
+                         "token_hint": _mask(tg.bot_token),
+                         "two_way": bool(getattr(tg, "two_way", False))},
             "email": {"smtp_server": em.smtp_server, "smtp_port": em.smtp_port,
                       "from_address": em.from_address, "to_address": em.to_address,
                       "password_set": bool(em.app_password)},
@@ -1091,6 +1092,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             cfg.notifications.telegram.chat_id = str(tg.get("chat_id") or "").strip()
         if (tg.get("bot_token") or "").strip():
             cfg.notifications.telegram.bot_token = tg["bot_token"].strip()
+        if "two_way" in tg:
+            cfg.notifications.telegram.two_way = bool(tg["two_way"])
 
         em = body.get("email") or {}
         for f in ("smtp_server", "from_address", "to_address"):
@@ -1117,6 +1120,12 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             cfg.models.cloud.roles = roles
 
         save(cfg)
+        # Apply a two-way-chat change immediately — the user shouldn't have to restart the app
+        # to start (or stop) texting The Watcher.
+        try:
+            manager.restart_telegram()
+        except Exception as exc:
+            log.debug("could not restart the Telegram bridge: %s", exc)
         return {"ok": True}
 
     @app.post("/api/telegram/test")

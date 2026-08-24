@@ -50,6 +50,12 @@ CONTROL_HINTS: dict[str, dict] = {
         # craigslist'; the RESULTS box's placeholder is 'search for sale'. 'search' covers both;
         # type_search also falls back to the default selectors.
         "search_box": "input[placeholder*='search' i], input[name='query'], #query",
+        # Category browsing (a watch with NO keyword — "show me cars+trucks"). The area hub
+        # (seattle.craigslist.org redirects to /area/seattle) lists every category as a link
+        # carrying its code, e.g. 'cars + trucks' -> ?cat=cta. Mapped live 23 Aug 2026. {cat} is
+        # substituted with the category code from the watch's URL, so we CLICK the same link a
+        # person would instead of goto-ing the deep parametric results URL.
+        "category_link": "a[href*='cat={cat}'], a[href$='/search/{cat}'], a[href*='/search/{cat}?']",
         # Location + price live in the RESULTS-PAGE sidebar (mapped live), applied by one
         # 'apply' button. Price min/max are type=text (the auto miles/year fields are type=tel,
         # so type=text uniquely targets PRICE); distance is the tel box labelled 'miles'.
@@ -252,6 +258,19 @@ def build_search_request(url: str, instruction: str = "") -> SearchRequest:
 
 def _pause(lo: float = 0.25, hi: float = 0.7) -> None:
     time.sleep(random.uniform(lo, hi))
+
+
+def _wait_for_controls(page, selectors, timeout_ms: int = 8_000) -> bool:
+    """Wait (bounded) for the first of these selectors to become visible. Results sidebars are
+    commonly rendered by JS after domcontentloaded, so acting the instant we land finds nothing
+    and silently drops whatever we meant to set. Returns True if something appeared."""
+    for sel in [s for s in (selectors or []) if s]:
+        try:
+            page.wait_for_selector(sel, timeout=timeout_ms, state="visible")
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _first_visible(page, selector: str):
@@ -516,6 +535,12 @@ def _apply_inline_filters(page, req: "SearchRequest", hint: dict) -> bool:
     zip, distance, min/max price) and click the site's own 'apply' button — the human way to
     localize + price-limit, instead of URL params. Returns True if it filled at least one field
     and submitted. Best-effort; never raises."""
+    # craigslist renders the results sidebar with JS AFTER domcontentloaded — measured live, the
+    # zip box is absent the instant we land and present ~3s later. Filling immediately therefore
+    # found nothing and silently dropped BOTH the location and the price. Wait (bounded) for the
+    # first control we mean to touch before typing into it.
+    _wait_for_controls(page, [hint.get(k) for k in ("postal", "price_min", "price_max", "distance")])
+
     filled = False
 
     def _fill(sel_key: str, value) -> None:
@@ -559,22 +584,60 @@ def can_fully_drive(req: "SearchRequest", hint: dict) -> bool:
     if (req.price_min is not None or req.price_max is not None) and not (
             hint.get("price_min") or hint.get("price_max")):
         return False
-    # Something must be drivable at all (terms to type, or a location to set).
-    return bool(req.terms or req.zip or req.price_min is not None or req.price_max is not None)
+    # A category-only watch ("browse cars+trucks", no keyword) is drivable only where we can
+    # CLICK the category the way a person does; without that hint the URL path must handle it,
+    # or we'd land on the site's front page and quietly browse the wrong thing.
+    if not req.terms and req.category and not hint.get("category_link"):
+        return False
+    # Something must be drivable at all (terms, a category to click, a location, or a price).
+    return bool(req.terms or (req.category and hint.get("category_link"))
+                or req.zip or req.price_min is not None or req.price_max is not None)
+
+
+def click_category(page, category: str, hint: dict) -> bool:
+    """Click the site's own link for a category code (craigslist 'cta' = cars + trucks), the way
+    a person picks it off the homepage — instead of goto-ing the deep results URL. Returns True
+    only if a real navigation happened. Best-effort; never raises."""
+    tmpl = (hint or {}).get("category_link")
+    cat = (category or "").strip()
+    if not tmpl or not cat:
+        return False
+    selector = tmpl.replace("{cat}", cat)
+    before = getattr(page, "url", "")
+    try:
+        loc = _first_visible(page, selector)
+        if loc is None:
+            log.debug("category link %r not found on %s", selector, before)
+            return False
+        _pause(0.4, 0.9)          # look at the category list before clicking, like a person
+        loc.click(timeout=5_000)
+        page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        moved = getattr(page, "url", "") != before
+        if moved:
+            log.info("Human-first: clicked the %r category link", cat)
+        return moved
+    except Exception as exc:
+        log.debug("category click failed for %r: %s", cat, exc)
+        return False
 
 
 def apply_search_request(page, req: "SearchRequest", hint: dict | None = None) -> dict:
     """Realize a SearchRequest by DRIVING the page's own controls like a human: type the terms
     into the search box, then set location/price via the site's controls (inline sidebar for
     craigslist; a location dialog for OfferUp-style sites). Returns what was applied,
-    {searched, located, filtered}, so the caller can decide whether to fall back to the URL.
-    Best-effort: each step is independent and logged; never raises."""
+    {searched, categorized, located, filtered}, so the caller can decide whether to fall back to
+    the URL. Best-effort: each step is independent and logged; never raises."""
     if hint is None:
         hint = hints_for(getattr(page, "url", "") or "")
-    applied = {"searched": False, "located": False, "filtered": False}
+    applied = {"searched": False, "categorized": False, "located": False, "filtered": False}
 
     if req.terms:
         applied["searched"] = type_search(page, req.terms, hint)
+    elif req.category:
+        # No keyword — this is a "browse this category" watch (e.g. craigslist cars+trucks).
+        # Click the category the way a person picks it off the homepage; the filters below then
+        # run on the resulting results page exactly as they do after a keyword search.
+        applied["categorized"] = click_category(page, req.category, hint)
 
     # Location and price are INDEPENDENT — a site may drive one via a dialog and the other inline
     # (OfferUp: location = a dialog, price = inline min/max), so they must not be an either/or.

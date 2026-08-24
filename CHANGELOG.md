@@ -48,9 +48,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Every launch writes a proper log again. A quirk meant most log files came out **empty**, which
   made "Report a bug" logs and troubleshooting far less useful. Fixed at the source.
 
+### Fixed — it now browses category watches like a person again
+- A watch that browses a **whole category** ("cars + trucks near Anacortes under $10,000" — no
+  keyword) was jumping **straight to a results link** instead of navigating the site. Now it lands
+  on the site's front page, **clicks the category** the way you would, then types your ZIP,
+  distance and price into the site's own filter boxes. Verified live end to end on Craigslist:
+  it lands on the Anacortes cars+trucks results with your ZIP, 50 miles and the $10,000 cap all
+  applied. This is the safest way to browse — jumping to deep links is what gets watchers blocked.
+- If a site's filters don't take for any reason, it now **falls back instead of quietly searching
+  the wrong area** — so a watch can never silently widen to the whole region at any price.
+
+### Fixed — it won't force a search phrase into a "city" box
+- On pages with a city/location box, typing the whole request (e.g. *"weather warning Saipan"*)
+  returns "no results". Web Watcher now **refuses** to put topic words in a place box and retries
+  with just the place — previously it was only advised not to, and sometimes did it anyway.
+
 ### Behind the scenes
 - Added a development-only safeguard around where app data is stored, so internal test builds
   can't silently write to a place that looks saved but isn't. No effect on your installed app.
+- Groundwork for texting with The Watcher from your phone (off by default).
 
 ---
 

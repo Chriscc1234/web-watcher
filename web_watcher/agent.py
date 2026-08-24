@@ -1465,6 +1465,29 @@ def _is_location_input(e: dict) -> bool:
     return label_is_location_box(f"{e.get('label') or ''}  {e.get('value') or ''}")
 
 
+def _is_topic_plus_place(text: str) -> bool:
+    """True when a string typed into a location box looks like TOPIC + PLACE ("weather warning
+    Saipan") rather than a bare place ("Saipan", "Anacortes, WA", "98221"). Deliberately crude:
+    3+ words and not already recognizable as a location. It only ever triggers a ONE-SHOT
+    correction (see _execute), so a false positive costs a single retry, never a loop."""
+    words = (text or "").split()
+    if len(words) < 3:
+        return False
+    from web_watcher.monitor import looks_like_location
+    return not looks_like_location(text)
+
+
+def _place_tail(text: str) -> str:
+    """Best guess at the place inside a topic+place string — the trailing word, or the last two
+    when they read as 'City, ST'. Used only to SUGGEST the correction to the model."""
+    words = (text or "").split()
+    if not words:
+        return ""
+    if len(words) >= 2 and words[-2].endswith(","):
+        return " ".join(words[-2:])
+    return words[-1]
+
+
 def _elements_text(elements: list[dict]) -> str:
     lines = []
     last_group: str | None = None
@@ -1759,6 +1782,35 @@ def _execute(page: Page, action: AgentAction, elements: list[dict]) -> None:
                     "Look at the element list for an element marked '>>> TEXT INPUT <<<' and use its index."
                 )
                 return  # skip the actual type — nothing useful to type into
+            # ── Enforce the location-box rule instead of merely advising it ──────────
+            # Tagging the box ">>> LOCATION INPUT <<<" and telling the model wasn't enough —
+            # a live run still typed "weather warning Saipan" into weather.gov's city box and
+            # got "No results found". So BLOCK the type and hand back the correction.
+            # ONE-SHOT by design: we refuse a given (element, text) once, then allow it. Never
+            # loop — looks_like_location() is a US gazetteer check that says False for perfectly
+            # good places ("Saipan", a bare ZIP), so a permanent rule would reject the correct
+            # retry forever.
+            if _is_location_input(el) and _is_topic_plus_place(action.text or ""):
+                rejects = getattr(page, "_ww_loc_rejects", None)
+                if rejects is None:
+                    rejects = set()
+                    try:
+                        setattr(page, "_ww_loc_rejects", rejects)
+                    except Exception:
+                        rejects = None
+                key = (action.element_index, (action.text or "").strip().lower())
+                if rejects is not None and key not in rejects:
+                    rejects.add(key)
+                    place = _place_tail(action.text or "")
+                    action.outcome = (
+                        f"REJECTED: element_index={action.element_index} is a LOCATION INPUT "
+                        f"(a city/ZIP picker) — typing {action.text!r} there searches for a PLACE "
+                        f"by that whole phrase and finds nothing. Type ONLY the place"
+                        + (f", i.e. {place!r}" if place else "")
+                        + ". Put topic/product words in a keyword search box instead, or read the "
+                          "page once the location is set."
+                    )
+                    return
             if not already_focused:
                 _human_mouse_move(page, el["cx"], el["cy"])
                 time.sleep(max(0.01, random.gauss(0.15, 0.03)))

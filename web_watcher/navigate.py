@@ -260,6 +260,86 @@ def _pause(lo: float = 0.25, hi: float = 0.7) -> None:
     time.sleep(random.uniform(lo, hi))
 
 
+def _human_click(page, loc, timeout: int = 5_000) -> bool:
+    """Click by actually MOVING THE MOUSE there and pressing — not Playwright's instant
+    teleport-and-click. An approach path, a hover dwell and a realistic press duration are the
+    cheap tells that separate a person from a script, and on Facebook that matters more than
+    anywhere else (see memory: mouse+click navigation is the priority there).
+
+    Falls back to loc.click() if the element has no stable box (off-screen, zero-size, detached).
+    Returns True if a click was delivered."""
+    try:
+        loc.scroll_into_view_if_needed(timeout=timeout)
+    except Exception:
+        pass
+    box = None
+    try:
+        box = loc.bounding_box()
+    except Exception:
+        box = None
+    # No page (or no stable box) → we can't drive the mouse; use the plain click.
+    if page is None or not box or box.get("width", 0) < 1 or box.get("height", 0) < 1:
+        try:
+            loc.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    try:
+        # Approach along a short curved path so the cursor TRAVELS to the control instead of
+        # teleporting. These intermediate moves are cosmetic — they must never decide where the
+        # click lands.
+        tx = box["x"] + box["width"] / 2
+        ty = box["y"] + box["height"] / 2
+        start = getattr(page, "_ww_mouse", None) or (tx - random.uniform(60, 220),
+                                                     ty - random.uniform(40, 160))
+        steps = random.randint(3, 6)
+        for i in range(1, steps):                      # stop short; hover() does the last leg
+            f = i / steps
+            page.mouse.move(start[0] + (tx - start[0]) * f + random.uniform(-3.5, 3.5),
+                            start[1] + (ty - start[1]) * f + random.uniform(-3.5, 3.5))
+            time.sleep(random.uniform(0.012, 0.045))
+
+        # LAND ON THE ELEMENT VIA PLAYWRIGHT. hover() moves the real mouse with actionability +
+        # stability checks, so we're provably over the right control. Clicking raw coordinates
+        # measured earlier is unsafe on a page that reflows — live on craigslist's homepage that
+        # hit a NEIGHBOURING category (asked for cat=cta, landed on cat=sse).
+        loc.hover(timeout=timeout)
+        try:
+            setattr(page, "_ww_mouse", (tx, ty))       # remember where the cursor rests
+        except Exception:
+            pass
+        time.sleep(max(0.06, random.gauss(0.20, 0.05)))     # hover dwell before pressing
+
+        # DELIVER the press with Playwright, not raw mouse.down/up. It is still a real mouse
+        # click (move → down → delay → up) but re-verifies the target first; hand-rolled
+        # down/up at a remembered point silently missed craigslist's category link when the
+        # page reflowed, and a click that lands on nothing is worse than a slightly tidier one.
+        loc.click(timeout=timeout, delay=random.randint(60, 130))
+        return True
+    except Exception:
+        try:
+            loc.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+
+def _wait_for_url_change(page, before: str, timeout_s: float = 8.0) -> bool:
+    """Poll until the page's URL differs from `before`, or we give up. Single-sample checks are
+    racy on SPAs that navigate via the history API (craigslist), especially when the click was a
+    real mouse press with no framework auto-waiting behind it."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            if (getattr(page, "url", "") or "") != before:
+                return True
+        except Exception:
+            return False
+        time.sleep(0.25)
+    return False
+
+
 def _wait_for_controls(page, selectors, timeout_ms: int = 8_000) -> bool:
     """Wait (bounded) for the first of these selectors to become visible. Results sidebars are
     commonly rendered by JS after domcontentloaded, so acting the instant we land finds nothing
@@ -290,7 +370,7 @@ def _human_fill(loc, text: str) -> bool:
     first keystroke — reuse the correction from monitor.humanized_search). Returns True if the
     value landed."""
     try:
-        loc.click(timeout=3000)
+        _human_click(getattr(loc, "page", None), loc, 3000)   # Locator carries its own Page
         _pause(0.1, 0.3)
         try:
             loc.fill("")
@@ -365,7 +445,7 @@ def _pick_suggestion(page) -> None:
         try:
             opt = page.locator(sel).first
             if opt.count() > 0 and opt.is_visible():
-                opt.click()
+                _human_click(page, opt)
                 return
         except Exception:
             continue
@@ -381,7 +461,7 @@ def _click_button_by_label(scope, label: str) -> bool:
     try:
         b = scope.get_by_role("button", name=re.compile(re.escape(label), re.I))
         if b.count() > 0 and b.first.is_visible():
-            b.first.click()
+            _human_click(page, b.first)
             return True
     except Exception:
         pass
@@ -413,7 +493,7 @@ def _reveal_location_editor(page, loc_hint: dict) -> None:
                 continue
             if re.search(r"\d", t) or "," in t or re.search(r"\b(change|edit|location|zip)\b", low):
                 try:
-                    b.click(timeout=2000)
+                    _human_click(page, b, 2000)
                     _pause(0.3, 0.6)
                     return
                 except Exception:
@@ -443,7 +523,7 @@ def set_location(page, place: str, radius: int | None = None, hint: dict | None 
         if opener is None:
             return False
         try:
-            opener.click(timeout=4000)
+            _human_click(page, opener, 4000)
             _pause(0.4, 0.9)
             return True
         except Exception:
@@ -524,7 +604,7 @@ def _click_selector(page, selector: str) -> bool:
     if loc is None:
         return False
     try:
-        loc.click(timeout=3000)
+        _human_click(page, loc, 3000)
         return True
     except Exception:
         return False
@@ -610,11 +690,20 @@ def click_category(page, category: str, hint: dict) -> bool:
             log.debug("category link %r not found on %s", selector, before)
             return False
         _pause(0.4, 0.9)          # look at the category list before clicking, like a person
-        loc.click(timeout=5_000)
-        page.wait_for_load_state("domcontentloaded", timeout=15_000)
-        moved = getattr(page, "url", "") != before
+        _human_click(page, loc, 5_000)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        except Exception:
+            pass
+        # Craigslist swaps the results in via the history API, so the URL can lag the click by a
+        # moment — and a real mouse press doesn't carry Playwright's auto-waiting. POLL for the
+        # change instead of sampling once, or a click that worked reports as a failure and the
+        # caller needlessly falls back to the deep URL.
+        moved = _wait_for_url_change(page, before, timeout_s=8.0)
         if moved:
             log.info("Human-first: clicked the %r category link", cat)
+        else:
+            log.debug("category click on %r did not change the URL from %s", cat, before[:60])
         return moved
     except Exception as exc:
         log.debug("category click failed for %r: %s", cat, exc)

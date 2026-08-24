@@ -196,6 +196,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .chats-thread{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:8px;overflow:hidden}
 .chats-thread-head{padding:11px 14px;border-bottom:1px solid var(--border);font-weight:600;font-size:14px;flex-shrink:0}
 #chats-convo{border:none;border-radius:0}
+.chats-composer{display:flex;gap:8px;padding:11px;border-top:1px solid var(--border);flex-shrink:0}
+.chats-composer input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 11px;border-radius:6px;font-size:13px}
+.chats-composer input:focus{outline:none;border-color:var(--blue)}
+.msg.admin-note{align-self:flex-end;background:#1e3a5f;border:1px solid #2f5c8f}
 .thread-row{text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;cursor:pointer;transition:border-color .12s}
 .thread-row:hover{border-color:var(--blue)}
 .thread-row.active{border-color:var(--blue);background:var(--bg)}
@@ -621,7 +625,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       <div class="chats-list" id="chats-list"><div class="empty-state" style="padding:16px">Loading…</div></div>
       <div class="chats-thread">
         <div class="chats-thread-head" id="chats-thread-head">Select a conversation to view it.</div>
-        <div class="dock-convo" id="chats-convo" style="height:60vh"></div>
+        <div class="dock-convo" id="chats-convo" style="height:54vh"></div>
+        <div class="chats-composer" id="chats-composer" style="display:none">
+          <input id="chats-composer-input" type="text" autocomplete="off"
+                 placeholder="Message this person as The Watcher…"
+                 onkeydown="if(event.key==='Enter')sendThreadMessage()">
+          <button onclick="sendThreadMessage()">Send</button>
+        </div>
       </div>
     </div>
   </section>
@@ -1875,6 +1885,9 @@ async function openChatThread(key) {
     r.classList.toggle('active', r.dataset.key === key));
   const t = _chatThreads.find(x => (x.owner === null ? 'null' : String(x.owner)) === key);
   document.getElementById('chats-thread-head').textContent = t ? t.label : 'Conversation';
+  // Admin can message a Telegram person (to help them); the desktop thread is your own dock.
+  const composer = document.getElementById('chats-composer');
+  composer.style.display = owner ? 'flex' : 'none';
   const box = document.getElementById('chats-convo');
   box.innerHTML = '';
   let history = [];
@@ -1882,13 +1895,34 @@ async function openChatThread(key) {
     history = await api('/api/oversight/chat/history' + (owner ? ('?owner=' + encodeURIComponent(owner)) : ''));
   } catch (_) { /* offline */ }
   if (!history || !history.length) {
-    box.innerHTML = '<div class="empty-state" style="padding:16px">No messages in this conversation yet.</div>';
+    box.innerHTML = owner
+      ? '<div class="empty-state" style="padding:16px">No messages yet — send one below to start.</div>'
+      : '<div class="empty-state" style="padding:16px">No messages in this conversation yet.</div>';
     return;
   }
   for (const m of history) {
     if (m.role !== 'user' && m.role !== 'assistant') continue;
-    appendMsg(m.role, historyText(m.content || ''), 'chats-convo', m.ts || null);
+    const prefix = m.admin ? '🧑‍💼 You: ' : '';
+    const div = appendMsg(m.role, prefix + historyText(m.content || ''), 'chats-convo', m.ts || null);
+    if (m.admin) div.classList.add('admin-note');
   }
+}
+
+async function sendThreadMessage() {
+  if (_activeThreadOwner == null) return;                 // desktop thread: use the dock instead
+  const inp = document.getElementById('chats-composer-input');
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.disabled = true;
+  try {
+    const res = await api('/api/oversight/threads/message',
+      { method: 'POST', body: JSON.stringify({ owner: _activeThreadOwner, text }) });
+    if (!res.ok) { alert('Could not send: ' + (res.error || 'unknown error')); inp.disabled = false; inp.focus(); return; }
+    inp.value = '';
+    const div = appendMsg('assistant', '🧑‍💼 You: ' + text, 'chats-convo', Date.now() / 1000);
+    div.classList.add('admin-note');
+  } catch (e) { alert('Could not send: ' + e.message); }
+  inp.disabled = false; inp.focus();
 }
 
 async function renderAccessRequests() {

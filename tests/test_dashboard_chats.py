@@ -5,11 +5,14 @@ automatically). Pure filesystem logic — no server needed. See dashboard/server
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
-from web_watcher.config import AppConfig, Watch
+from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
 from web_watcher.dashboard import server as S
+from web_watcher.dashboard.server import create_app
 
 
 @pytest.fixture()
@@ -69,3 +72,41 @@ def test_thread_index_lists_desktop_first_then_people(isolated):
     assert person["messages"] == 2
     assert person["last_snippet"] == "the last line here"
     assert person["watches"] == 1                            # only the watch they own
+
+
+# ── admin steps into a person's thread ───────────────────────────────────────────
+
+def test_admin_message_delivers_to_telegram_and_records(isolated, monkeypatch):
+    calls = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, **kw):
+        calls["url"] = url
+        calls["json"] = kw.get("json")
+        return _Resp()
+
+    monkeypatch.setattr(S.httpx, "post", fake_post)
+    cfg = AppConfig(notifications=NotificationsConfig(
+        telegram=TelegramConfig(bot_token="111:TOK", chat_id="12345")))
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    client = TestClient(create_app(MagicMock()))
+
+    r = client.post("/api/oversight/threads/message", json={"owner": "555", "text": "Hi Dave, fixed it."})
+    assert r.json() == {"ok": True}
+    assert calls["json"]["chat_id"] == "555"                  # delivered to the person, not the admin
+    assert calls["json"]["text"] == "Hi Dave, fixed it."
+    hist = S._load_watcher_history("555")
+    assert hist[-1]["content"] == "Hi Dave, fixed it." and hist[-1].get("admin") is True
+
+
+def test_admin_message_needs_owner_and_token(isolated, monkeypatch):
+    client = TestClient(create_app(MagicMock()))
+    monkeypatch.setattr(S, "_load_cfg", lambda: AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(bot_token="", chat_id=""))))
+    assert client.post("/api/oversight/threads/message",
+                       json={"owner": "", "text": "x"}).json()["ok"] is False   # no target
+    assert client.post("/api/oversight/threads/message",
+                       json={"owner": "555", "text": "x"}).json()["ok"] is False  # no token

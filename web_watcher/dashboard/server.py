@@ -1299,6 +1299,36 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         person's thread, with message counts and the last line."""
         return _list_conversation_threads(_load_cfg())
 
+    @app.post("/api/oversight/threads/message")
+    def admin_thread_message(body: dict):
+        """Admin steps into a person's conversation to help them: send a message AS The Watcher
+        to that Telegram chat. It's delivered to their phone and recorded in their thread (from
+        their side it's just the bot talking). Only for Telegram threads — the desktop thread is
+        the admin's own dock."""
+        owner = str(body.get("owner") or "").strip()
+        text = str(body.get("text") or "").strip()
+        if not owner:
+            return {"ok": False, "error": "Pick a Telegram conversation to message."}
+        if not text:
+            return {"ok": False, "error": "Nothing to send."}
+        token = (_load_cfg().notifications.telegram.bot_token or "").strip()
+        if not token:
+            return {"ok": False, "error": "No Telegram bot token is configured (Settings → Notifications & Keys)."}
+        try:
+            r = httpx.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                           json={"chat_id": owner, "text": text, "disable_web_page_preview": True},
+                           timeout=15.0)
+            data = r.json()
+            if not data.get("ok"):
+                return {"ok": False, "error": data.get("description", "Telegram rejected the message.")}
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not reach Telegram: {exc}"}
+        import time as _t
+        hist = _load_watcher_history(owner)
+        hist.append({"role": "assistant", "content": text, "ts": _t.time(), "admin": True})
+        _save_watcher_history(hist[-200:], owner)
+        return {"ok": True}
+
     # ------------------------------------------------------------------
     # System specs + hardware re-scan (Settings → System)
     # ------------------------------------------------------------------

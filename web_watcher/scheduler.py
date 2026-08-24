@@ -74,7 +74,7 @@ from web_watcher.storage import (
     list_site_profiles,
 )
 from web_watcher.monitor import parse_listing_attributes, listing_fingerprint
-from web_watcher import fb_safety
+from web_watcher import fb_safety, llm
 
 log = logging.getLogger(__name__)
 
@@ -1339,8 +1339,6 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
       • fail_closed=True (cross-watch matching) → return [] : injecting un-judged listings into
         ANOTHER watch is how off-topic items leak in. When we can't confidently judge, skip.
     """
-    import httpx
-    OLLAMA_URL = "http://localhost:11434"
     threshold = getattr(watch, "min_rating", 3)
 
     def _entry(i: int, l) -> str:
@@ -1367,19 +1365,22 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             f"Criteria: {watch.instruction}\n{watch.judgment_prompt or ''}\n\n"
             f"Listings:\n{numbered}\n\nRate every listing."
         )
-        payload = {
-            "model": cfg.models.effective_council_model,
-            "messages": [
+        # Route through the provider layer: role "judge" may be config-routed to a cloud model
+        # (Haiku by default) with the fixed rubric prompt-cached; otherwise it uses the local
+        # council model, and any cloud failure falls back to local automatically. See llm.py.
+        content = llm.chat(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_msg},
             ],
-            "stream": False,
-            "format": "json",
-        }
-        with httpx.Client(timeout=90.0) as client:
-            r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            r.raise_for_status()
-        data = json.loads(r.json()["message"]["content"])
+            role="judge",
+            local_model=cfg.models.effective_council_model,
+            cfg=cfg,
+            format_json=True,
+            cache_system=True,
+            timeout=90.0,
+        )
+        data = json.loads(content)
         out: dict[int, tuple[int, str]] = {}
         for item in (data.get("ratings") or []):
             try:

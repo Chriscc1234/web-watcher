@@ -49,6 +49,62 @@ def _chat_client(monkeypatch, tmp_path, turn_result):
     return TestClient(create_app(manager)), S
 
 
+def _cred_client(monkeypatch):
+    """A TestClient with an in-memory AppConfig for the credentials endpoints — no disk, no
+    network, isolated per test (the suite's temp config is session-wide and would leak state)."""
+    from web_watcher.dashboard import server as S
+    from web_watcher import config as C
+    from web_watcher.config import AppConfig
+    state = {"cfg": AppConfig()}
+    monkeypatch.setattr(S, "_load_cfg", lambda: state["cfg"])
+    monkeypatch.setattr(C, "load", lambda path=None: state["cfg"])
+    monkeypatch.setattr(C, "save", lambda cfg, path=None: state.__setitem__("cfg", cfg))
+    return TestClient(create_app(MagicMock())), state
+
+
+def test_credentials_default_shape(monkeypatch):
+    client, _ = _cred_client(monkeypatch)
+    d = client.get("/api/credentials").json()
+    assert {"telegram", "email", "anthropic", "spend"} <= set(d)
+    assert d["anthropic"]["judge_enabled"] is False
+    assert d["telegram"]["token_set"] is False
+
+
+def test_credentials_save_masks_secrets_and_enables_judge(monkeypatch):
+    client, _ = _cred_client(monkeypatch)
+    r = client.post("/api/credentials", json={
+        "telegram": {"chat_id": "12345", "bot_token": "111:SECRET"},
+        "anthropic": {"api_key": "sk-ant-SECRET", "judge_enabled": True, "judge_model": "claude-haiku-4-5"},
+    })
+    assert r.status_code == 200 and r.json().get("ok")
+    d = client.get("/api/credentials").json()
+    assert d["telegram"]["chat_id"] == "12345" and d["telegram"]["token_set"] is True
+    assert d["anthropic"]["judge_enabled"] is True and d["anthropic"]["key_set"] is True
+    # Secrets are NEVER echoed back in any field.
+    assert "111:SECRET" not in str(d) and "sk-ant-SECRET" not in str(d)
+
+
+def test_credentials_blank_secret_keeps_existing(monkeypatch):
+    client, state = _cred_client(monkeypatch)
+    client.post("/api/credentials", json={"telegram": {"bot_token": "keep-me", "chat_id": "9"}})
+    client.post("/api/credentials", json={"telegram": {"bot_token": "", "chat_id": "9"}})   # blank
+    assert state["cfg"].notifications.telegram.bot_token == "keep-me"
+
+
+def test_credentials_disable_judge_removes_route(monkeypatch):
+    client, state = _cred_client(monkeypatch)
+    client.post("/api/credentials", json={"anthropic": {"api_key": "sk", "judge_enabled": True}})
+    assert "judge" in state["cfg"].models.cloud.roles
+    client.post("/api/credentials", json={"anthropic": {"judge_enabled": False}})
+    assert "judge" not in state["cfg"].models.cloud.roles
+
+
+def test_telegram_test_requires_credentials(monkeypatch):
+    client, _ = _cred_client(monkeypatch)
+    r = client.post("/api/telegram/test", json={})       # nothing configured → no network attempt
+    assert r.status_code == 200 and r.json()["ok"] is False
+
+
 def test_chat_turn_is_persisted(monkeypatch, tmp_path):
     """A normal Watcher chat turn saves BOTH the user message and the reply to history."""
     client, S = _chat_client(monkeypatch, tmp_path,

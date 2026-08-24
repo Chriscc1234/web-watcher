@@ -18,6 +18,11 @@ httpx>=0.27          # Telegram HTTP calls + server health check in main.py
 # App window (wraps dashboard in a native frame)
 pywebview>=5.0
 
+# Cloud LLM (OPTIONAL) — only used when a role is routed to Anthropic in config
+# (models.cloud). The app runs fully locally without it; if it's missing, any cloud-routed
+# role falls back to the local model. See web_watcher/llm.py.
+anthropic>=0.40
+
 # Anti-bot / stealth
 playwright-stealth>=2.0  # patches browser fingerprint to avoid bot detection
 

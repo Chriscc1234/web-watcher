@@ -1039,6 +1039,144 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "show_agent_cursor": cfg.browser.show_agent_cursor}
 
     # ------------------------------------------------------------------
+    # Credentials (Settings → Notifications & Keys): Telegram, Anthropic key, email
+    # ------------------------------------------------------------------
+
+    def _mask(secret: str) -> str:
+        """Show a secret as ••••last4 so the UI can confirm it's set without echoing it back."""
+        s = (secret or "").strip()
+        if not s:
+            return ""
+        return ("•" * max(4, len(s) - 4)) + s[-4:] if len(s) > 4 else "••••"
+
+    @app.get("/api/credentials")
+    def get_credentials():
+        """Current notification/key config with SECRETS MASKED — never echoes a raw token/key.
+        On save, a blank secret field means 'keep the existing one' (see set_credentials)."""
+        from web_watcher import llm
+        cfg = _load_cfg()
+        tg = cfg.notifications.telegram
+        em = cfg.notifications.email
+        cloud = cfg.models.cloud
+        judge = (cloud.roles or {}).get("judge")
+        judge_on = bool(judge and (judge.provider or "").lower() == "anthropic")
+        spend = llm.usage_snapshot()
+        return {
+            "spend": {"cost_usd": round(spend.get("cost_usd", 0.0), 4),
+                      "calls": spend.get("calls", 0)},
+            "telegram": {"chat_id": tg.chat_id, "token_set": bool(tg.bot_token),
+                         "token_hint": _mask(tg.bot_token)},
+            "email": {"smtp_server": em.smtp_server, "smtp_port": em.smtp_port,
+                      "from_address": em.from_address, "to_address": em.to_address,
+                      "password_set": bool(em.app_password)},
+            "anthropic": {
+                "key_set": bool(cloud.anthropic_api_key) or bool(os.environ.get("ANTHROPIC_API_KEY")),
+                "key_hint": _mask(cloud.anthropic_api_key),
+                "key_from_env": (not cloud.anthropic_api_key) and bool(os.environ.get("ANTHROPIC_API_KEY")),
+                "judge_enabled": judge_on,
+                "judge_model": (judge.model if judge else "") or "claude-haiku-4-5",
+            },
+        }
+
+    @app.post("/api/credentials")
+    def set_credentials(body: dict):
+        """Save notification/key config. Secret fields (bot_token, app_password, api_key) are only
+        updated when a non-blank value is supplied — a blank keeps the stored secret intact, so the
+        masked display never overwrites the real value. Writes config.yaml via config.save()."""
+        from web_watcher.config import load, save, ProviderRoute
+        cfg = load()
+
+        tg = body.get("telegram") or {}
+        if "chat_id" in tg:
+            cfg.notifications.telegram.chat_id = str(tg.get("chat_id") or "").strip()
+        if (tg.get("bot_token") or "").strip():
+            cfg.notifications.telegram.bot_token = tg["bot_token"].strip()
+
+        em = body.get("email") or {}
+        for f in ("smtp_server", "from_address", "to_address"):
+            if f in em:
+                setattr(cfg.notifications.email, f, str(em.get(f) or "").strip())
+        if "smtp_port" in em:
+            try:
+                cfg.notifications.email.smtp_port = int(em["smtp_port"])
+            except (TypeError, ValueError):
+                pass
+        if (em.get("app_password") or "").strip():
+            cfg.notifications.email.app_password = em["app_password"].strip()
+
+        an = body.get("anthropic") or {}
+        if (an.get("api_key") or "").strip():
+            cfg.models.cloud.anthropic_api_key = an["api_key"].strip()
+        if "judge_enabled" in an:
+            roles = dict(cfg.models.cloud.roles or {})
+            if an.get("judge_enabled"):
+                model = str(an.get("judge_model") or "").strip()
+                roles["judge"] = ProviderRoute(provider="anthropic", model=model)
+            else:
+                roles.pop("judge", None)
+            cfg.models.cloud.roles = roles
+
+        save(cfg)
+        return {"ok": True}
+
+    @app.post("/api/telegram/test")
+    def telegram_test(body: dict):
+        """Send a real test message to the configured (or just-entered) chat, so the user can
+        confirm notifications reach their phone. Uses the posted token/chat_id if given, else
+        the saved ones (POST /api/credentials first to persist)."""
+        cfg = _load_cfg()
+        token = (str(body.get("bot_token") or "").strip()
+                 or cfg.notifications.telegram.bot_token or "").strip()
+        chat_id = (str(body.get("chat_id") or "").strip()
+                   or cfg.notifications.telegram.chat_id or "").strip()
+        if not token or not chat_id:
+            return {"ok": False, "error": "Enter a bot token and chat ID (or use Detect) first."}
+        try:
+            r = httpx.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id,
+                      "text": "✅ Web Watcher test — your Telegram alerts are working."},
+                timeout=15.0)
+            data = r.json()
+            if data.get("ok"):
+                return {"ok": True}
+            return {"ok": False, "error": data.get("description", "Telegram rejected the message.")}
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not reach Telegram: {exc}"}
+
+    @app.post("/api/telegram/detect-chat-id")
+    def telegram_detect(body: dict):
+        """Find the chat ID(s) that have messaged this bot (via getUpdates), so the user doesn't
+        have to hunt for the number — they just message their bot once, then click Detect."""
+        token = (str(body.get("bot_token") or "").strip()
+                 or _load_cfg().notifications.telegram.bot_token or "").strip()
+        if not token:
+            return {"ok": False, "error": "Enter your bot token first."}
+        try:
+            r = httpx.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=15.0)
+            data = r.json()
+            if not data.get("ok"):
+                return {"ok": False, "error": data.get("description", "That bot token looks invalid.")}
+            chats, seen = [], set()
+            for upd in reversed(data.get("result") or []):
+                msg = upd.get("message") or upd.get("channel_post") or {}
+                chat = msg.get("chat") or {}
+                cid = chat.get("id")
+                if cid is None or str(cid) in seen:
+                    continue
+                seen.add(str(cid))
+                name = (chat.get("title")
+                        or " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+                        or chat.get("username") or str(cid))
+                chats.append({"id": str(cid), "name": name})
+            if not chats:
+                return {"ok": False, "error": "No messages yet. Open Telegram, send any message to "
+                                              "your bot, then click Detect again."}
+            return {"ok": True, "chats": chats}
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not reach Telegram: {exc}"}
+
+    # ------------------------------------------------------------------
     # System specs + hardware re-scan (Settings → System)
     # ------------------------------------------------------------------
 

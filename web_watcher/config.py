@@ -76,6 +76,24 @@ class NotificationsConfig(BaseModel):
 # Model settings
 # ---------------------------------------------------------------------------
 
+class ProviderRoute(BaseModel):
+    """Where one LLM role runs. provider "local" (default) uses the Ollama model; "anthropic"
+    uses `model` (a cloud id like "claude-haiku-4-5"; blank => llm.py's per-role default)."""
+    provider: str = "local"   # "local" | "anthropic"
+    model:    str = ""
+
+
+class CloudConfig(BaseModel):
+    """Opt-in cloud (Anthropic) routing. DEFAULT IS FULLY LOCAL: with no roles mapped and no
+    key, nothing changes. The key is the USER'S OWN — from here or $ANTHROPIC_API_KEY; a blank
+    key with no env var keeps every role local. See web_watcher/llm.py for routing + fallback."""
+    anthropic_api_key: str = ""
+    # role name → route. Recognized roles: "judge" (per-sweep listing rating), "chat"
+    # (the Watcher assistant), "inspect" (Deep Inspect), "terms", "reason". Unlisted roles
+    # or provider="local" stay on the local model. Only "judge" is wired so far.
+    roles: dict[str, ProviderRoute] = Field(default_factory=dict)
+
+
 class ModelsConfig(BaseModel):
     text_model:    str = "qwen2.5:7b"
     vision_model:  str = "qwen2.5vl:7b"
@@ -89,6 +107,8 @@ class ModelsConfig(BaseModel):
     # pulled qwen2.5:72b is used automatically without editing config. Not the coder tune.
     inspect_model: str = ""
     ocr_threshold: int = 200  # chars — if DOM text is below this, fall back to vision OCR
+    # Opt-in cloud routing (default: all roles local). See CloudConfig / web_watcher/llm.py.
+    cloud: CloudConfig = Field(default_factory=CloudConfig)
 
     @property
     def effective_council_model(self) -> str:

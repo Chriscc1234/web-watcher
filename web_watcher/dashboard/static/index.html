@@ -303,6 +303,98 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   </section>
 
   <section style="margin-top:24px">
+    <h2>Notifications &amp; Keys</h2>
+
+    <!-- Telegram -->
+    <h3 style="margin-top:8px;font-size:15px">Telegram alerts</h3>
+    <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+        Get a buzz on your phone the moment a match is found. In Telegram, message
+        <b>@BotFather</b>, send <b>/newbot</b>, and paste the token it gives you below. Then open a
+        chat with your new bot, send it any message, and click <b>Detect</b> to fill in your chat ID.
+      </div>
+      <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Bot token</label>
+      <input id="cred-tg-token" type="password" placeholder="123456:ABC-…" autocomplete="off"
+             style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+      <label style="display:block;font-size:12px;color:var(--dim);margin:10px 0 4px">Chat ID</label>
+      <div style="display:flex;gap:8px">
+        <input id="cred-tg-chatid" type="text" placeholder="e.g. 987654321" autocomplete="off"
+               style="flex:1;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+        <button onclick="detectChatId(this)" style="white-space:nowrap">Detect</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap">
+        <button class="success" onclick="testTelegram(this)" style="white-space:nowrap">Send test message</button>
+        <span id="cred-tg-status" style="font-size:12px;color:var(--dim)"></span>
+      </div>
+    </div>
+
+    <!-- Claude (Anthropic) -->
+    <h3 style="margin-top:22px;font-size:15px">Claude (optional — faster, sharper matching)</h3>
+    <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+        Web Watcher runs fully on your own computer by default. If you have an Anthropic API key
+        (from <b>console.anthropic.com</b>), you can let Claude rate listings — it's faster and its
+        alerts are more accurate. Billed to your own key; leave this blank to stay 100% local.
+      </div>
+      <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Anthropic API key</label>
+      <input id="cred-an-key" type="password" placeholder="sk-ant-…" autocomplete="off"
+             style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+      <div id="cred-an-keynote" style="font-size:12px;color:var(--dim);margin-top:6px"></div>
+      <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:12px 14px;margin-top:12px;background:var(--bg)">
+        <div style="flex:1">
+          <div style="font-weight:600;margin-bottom:4px">Use Claude to rate listings</div>
+          <div style="font-size:12px;color:var(--dim)">The per-check judge that decides which finds are worth alerting. Off = your local model does it.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+          <div class="toggle-wrap">
+            <input type="checkbox" id="cred-an-judge-chk" style="display:none" onchange="_applyJudgeToggle(this.checked)">
+            <div class="toggle-track" id="cred-an-judge-track" onclick="document.getElementById('cred-an-judge-chk').click()">
+              <div class="toggle-thumb"></div>
+            </div>
+          </div>
+          <span id="cred-an-judge-label" style="font-size:13px;color:var(--dim)">Off</span>
+        </label>
+      </div>
+      <div id="cred-an-spend" style="font-size:12px;color:var(--dim);margin-top:10px"></div>
+    </div>
+
+    <!-- Email -->
+    <h3 style="margin-top:22px;font-size:15px">Email alerts (optional)</h3>
+    <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+        For Gmail, use an <b>App Password</b> (not your normal password). Leave blank if you only
+        want Telegram.
+      </div>
+      <div style="display:flex;gap:8px">
+        <div style="flex:2">
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">SMTP server</label>
+          <input id="cred-em-server" type="text" placeholder="smtp.gmail.com"
+                 style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+        </div>
+        <div style="flex:1">
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Port</label>
+          <input id="cred-em-port" type="number" placeholder="587"
+                 style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+        </div>
+      </div>
+      <label style="display:block;font-size:12px;color:var(--dim);margin:10px 0 4px">From address</label>
+      <input id="cred-em-from" type="text" placeholder="you@gmail.com" autocomplete="off"
+             style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+      <label style="display:block;font-size:12px;color:var(--dim);margin:10px 0 4px">App password</label>
+      <input id="cred-em-pass" type="password" placeholder="••••••••" autocomplete="off"
+             style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+      <label style="display:block;font-size:12px;color:var(--dim);margin:10px 0 4px">Send alerts to</label>
+      <input id="cred-em-to" type="text" placeholder="you@gmail.com" autocomplete="off"
+             style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+    </div>
+
+    <div style="display:flex;align-items:center;gap:12px;margin-top:16px;max-width:600px">
+      <button class="success" onclick="saveCredentials(this)" style="white-space:nowrap">Save credentials</button>
+      <span id="cred-status" style="font-size:12px;color:var(--dim)"></span>
+    </div>
+  </section>
+
+  <section style="margin-top:24px">
     <h2>System</h2>
     <div class="service-card" style="padding:16px 20px;max-width:600px">
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Web Watcher scans your hardware to pick the best local AI models it can run. If you change your graphics card or memory, re-scan to switch to the models that fit your new hardware.</div>
@@ -2819,8 +2911,98 @@ loadModelSets();        // Settings → System panel (model set selector + disk 
 loadWatches();          // Watches is home — load it + The Watcher's ambient feed on boot
 loadOversight();        // (the dock's conversation loads lazily the first time it's opened)
 loadOrchestrator();     // reflect whether The Watcher is currently driving
+loadCredentials();      // Settings → Notifications & Keys (Telegram / Claude / email)
 _initDockResize();      // top grip resizes the whole chat window (auto-grows with content otherwise)
 _initDockResizeX();     // left grip resizes the width (auto-grows to fit wide content otherwise)
+
+// ── Settings → Notifications & Keys (Telegram / Claude / email) ────────────────
+function _applyJudgeToggle(on) {
+  const track = document.getElementById('cred-an-judge-track');
+  const label = document.getElementById('cred-an-judge-label');
+  if (track) { on ? track.classList.add('on') : track.classList.remove('on'); }
+  if (label) { label.textContent = on ? 'On' : 'Off'; label.style.color = on ? 'var(--green)' : 'var(--dim)'; }
+}
+
+async function loadCredentials() {
+  let s;
+  try { s = await api('/api/credentials'); } catch(e) { return; }   // Settings not in DOM yet, etc.
+  const tg = s.telegram || {}, an = s.anthropic || {}, em = s.email || {}, sp = s.spend || {};
+  // Secrets are never echoed — inputs stay blank; a note tells the user one is saved.
+  const chatId = document.getElementById('cred-tg-chatid'); if (chatId) chatId.value = tg.chat_id || '';
+  const tgTok  = document.getElementById('cred-tg-token');
+  if (tgTok) tgTok.placeholder = tg.token_set ? '•••• saved — leave blank to keep' : '123456:ABC-…';
+  const keyNote = document.getElementById('cred-an-keynote');
+  if (keyNote) keyNote.textContent = an.key_from_env ? 'Using ANTHROPIC_API_KEY from your environment.'
+                : (an.key_set ? 'A key is saved — leave blank to keep it.' : 'No key set — staying local.');
+  const anKey = document.getElementById('cred-an-key');
+  if (anKey) anKey.placeholder = an.key_set ? '•••• saved — leave blank to keep' : 'sk-ant-…';
+  const jchk = document.getElementById('cred-an-judge-chk');
+  if (jchk) { jchk.checked = !!an.judge_enabled; _applyJudgeToggle(!!an.judge_enabled); }
+  const spend = document.getElementById('cred-an-spend');
+  if (spend) spend.textContent = (sp.calls ? `Claude usage so far: $${(sp.cost_usd||0).toFixed(2)} over ${sp.calls} call(s).` : '');
+  const setV = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; };
+  setV('cred-em-server', em.smtp_server); setV('cred-em-port', em.smtp_port);
+  setV('cred-em-from', em.from_address); setV('cred-em-to', em.to_address);
+  const emPass = document.getElementById('cred-em-pass');
+  if (emPass) emPass.placeholder = em.password_set ? '•••• saved — leave blank to keep' : '••••••••';
+}
+
+async function saveCredentials(btn) {
+  const status = document.getElementById('cred-status');
+  const body = {
+    telegram: { chat_id: document.getElementById('cred-tg-chatid').value.trim(),
+                bot_token: document.getElementById('cred-tg-token').value.trim() },
+    anthropic: { api_key: document.getElementById('cred-an-key').value.trim(),
+                 judge_enabled: document.getElementById('cred-an-judge-chk').checked },
+    email: { smtp_server: document.getElementById('cred-em-server').value.trim(),
+             smtp_port: document.getElementById('cred-em-port').value.trim(),
+             from_address: document.getElementById('cred-em-from').value.trim(),
+             to_address: document.getElementById('cred-em-to').value.trim(),
+             app_password: document.getElementById('cred-em-pass').value.trim() },
+  };
+  if (btn) btn.disabled = true;
+  if (status) { status.textContent = 'Saving…'; status.style.color = 'var(--dim)'; }
+  try {
+    await api('/api/credentials', {method:'POST', body: JSON.stringify(body)});
+    if (status) { status.textContent = 'Saved ✓'; status.style.color = 'var(--green)'; }
+    // Clear the secret inputs and refresh the "saved" hints so nothing lingers on screen.
+    ['cred-tg-token','cred-an-key','cred-em-pass'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+    loadCredentials();
+  } catch(e) {
+    if (status) { status.textContent = 'Save failed — ' + (e.message || e); status.style.color = 'var(--red,#e66)'; }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function testTelegram(btn) {
+  const status = document.getElementById('cred-tg-status');
+  const token = document.getElementById('cred-tg-token').value.trim();
+  const chat_id = document.getElementById('cred-tg-chatid').value.trim();
+  if (btn) btn.disabled = true;
+  if (status) { status.textContent = 'Sending…'; status.style.color = 'var(--dim)'; }
+  try {
+    const r = await api('/api/telegram/test', {method:'POST', body: JSON.stringify({bot_token: token, chat_id})});
+    if (r.ok) { if (status) { status.textContent = 'Sent ✓ — check your phone'; status.style.color = 'var(--green)'; } }
+    else { if (status) { status.textContent = r.error || 'Failed'; status.style.color = 'var(--red,#e66)'; } }
+  } catch(e) {
+    if (status) { status.textContent = 'Failed — ' + (e.message || e); status.style.color = 'var(--red,#e66)'; }
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function detectChatId(btn) {
+  const status = document.getElementById('cred-tg-status');
+  const token = document.getElementById('cred-tg-token').value.trim();
+  if (btn) btn.disabled = true;
+  if (status) { status.textContent = 'Looking…'; status.style.color = 'var(--dim)'; }
+  try {
+    const r = await api('/api/telegram/detect-chat-id', {method:'POST', body: JSON.stringify({bot_token: token})});
+    if (r.ok && r.chats && r.chats.length) {
+      document.getElementById('cred-tg-chatid').value = r.chats[0].id;
+      if (status) { status.textContent = `Found: ${r.chats[0].name} (${r.chats[0].id})`; status.style.color = 'var(--green)'; }
+    } else { if (status) { status.textContent = r.error || 'No chats found'; status.style.color = 'var(--red,#e66)'; } }
+  } catch(e) {
+    if (status) { status.textContent = 'Failed — ' + (e.message || e); status.style.color = 'var(--red,#e66)'; }
+  } finally { if (btn) btn.disabled = false; }
+}
 </script>
 </body>
 </html>

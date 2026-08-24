@@ -19,6 +19,17 @@ models:
   council_model: qwen2.5:14b  # blank = reuse text_model
   ocr_threshold: 200
 
+  # OPTIONAL cloud (Anthropic). Default is 100% local — leave this out entirely to stay local.
+  # Uses YOUR OWN API key (from console.anthropic.com), here or via the ANTHROPIC_API_KEY env
+  # var. Each role you list runs on the cloud model; anything unlisted stays on the local model,
+  # and any cloud error falls back to local automatically. Only "judge" is wired so far.
+  # cloud:
+  #   anthropic_api_key: ''            # blank => use $ANTHROPIC_API_KEY (keep keys out of git)
+  #   roles:
+  #     judge:                          # the per-sweep listing rating (precision of your alerts)
+  #       provider: anthropic
+  #       model: claude-haiku-4-5       # blank => Haiku by default (fast + cheap for the hot loop)
+
 browser:
   headless: false        # the browser is visible so you can watch the agent work; true = hide it
   stealth: true

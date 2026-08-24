@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.55.0-alpha] — 2026-08-24 (Formatting fix: no more stray tags in chat)
+
+### Fixed — the settings block printed raw tags
+- Asking the bot for settings showed things like `<i>Change yours:</i>` as literal text instead of
+  formatting, because chat replies were sent without Telegram's formatting mode turned on. Blocks
+  the app builds itself (settings, match lists) now render properly — and the bot's own wording no
+  longer shows stray `*asterisks*` either. Ordinary replies are still sent as plain text so an odd
+  character in a listing title can never break a message.
+
+---
+
 ## [0.54.0-alpha] — 2026-08-24 (Vet from your phone + check-ins you control)
 
 ### New — tap to vet a find, right in the alert

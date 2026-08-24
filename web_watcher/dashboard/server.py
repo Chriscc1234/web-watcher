@@ -953,8 +953,10 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         # owner also gets the server-wide block. See _render_settings.
         _latest = _latest_user_text(messages)
         if _is_settings_request(_latest):
+            # html=True tells the Telegram bridge to send this with HTML parse mode — the block
+            # is ours and fully escaped, so its <b>/<i> render as formatting, not literal tags.
             result = {"message": _render_settings(cfg, manager, owner),
-                      "watch_suggestion": None, "raw": None}
+                      "watch_suggestion": None, "html": True, "raw": None}
             result["raw"] = result["message"]
             _persist_chat_turn(messages, result, owner)
             result.pop("raw", None)

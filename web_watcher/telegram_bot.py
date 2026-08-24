@@ -251,13 +251,19 @@ class TelegramBridge:
             return
 
         reply = (result.get("message") or "").strip()
+        # Is this text already HTML we built (e.g. the settings block)? Then send it as HTML.
+        as_html = bool(result.get("html"))
 
         # "Show me the matches" — the assistant resolves a listing_query and returns rows; the
         # dashboard renders them as cards. On a phone we render a compact scannable list, so the
-        # bot actually SHOWS finds instead of only talking about them.
+        # bot actually SHOWS finds instead of only talking about them. The list is HTML, so the
+        # model's own prose must be escaped before the two are joined.
         listings = result.get("listings")
         if isinstance(listings, list) and listings:
-            reply = (reply + "\n\n" + _format_listings(listings)).strip()
+            import html as _h
+            head = reply if as_html else _h.escape(reply)
+            reply = (head + "\n\n" + _format_listings(listings)).strip()
+            as_html = True
 
         # Lifecycle actions the assistant grounded + owner-scoped for us. Reversible ones apply
         # right away (snappy — no "are you sure?" for a start/stop); delete needs a yes.
@@ -272,11 +278,11 @@ class TelegramBridge:
         if deletes:
             self._pending_deletes = deletes
             names = ", ".join(f"“{a.get('name')}”" for a in deletes)
-            reply = (reply + f"\n\n🗑 Delete {names}? Reply *yes* to confirm.").strip()
+            reply = (reply + f"\n\n🗑 Delete {names}? Reply “yes” to confirm.").strip()
         elif sugg:
             self._pending = sugg
             reply = (reply + "\n\n" + _describe_suggestions(result)).strip()
-        self._send(reply or "(no reply)", to)
+        self._send(reply or "(no reply)", to, html=as_html)
 
     def _apply_pending(self, pending: list[dict]) -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the
@@ -548,13 +554,20 @@ class TelegramBridge:
         except Exception:
             pass
 
-    def _send(self, text: str, chat_id: str = "") -> None:
+    def _send(self, text: str, chat_id: str = "", html: bool = False) -> None:
+        """Send a reply. html=True enables Telegram's HTML parse mode — ONLY for text WE built
+        (the settings block, a listing list), where every dynamic value is already escaped. Model
+        prose is sent as plain text: it can contain < & > that would break the parser (or be eaten),
+        and without parse_mode our own tags would print literally — which is what happened to the
+        settings block's <i>…</i>."""
         target = chat_id or self.chat_id       # reply to the sender; fall back to the alert chat
         for chunk in _chunk(text, _MSG_LIMIT):
+            body = {"chat_id": target, "text": chunk, "disable_web_page_preview": True}
+            if html:
+                body["parse_mode"] = "HTML"
             try:
                 httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendMessage",
-                           json={"chat_id": target, "text": chunk,
-                                 "disable_web_page_preview": True}, timeout=20.0)
+                           json=body, timeout=20.0)
             except Exception as exc:
                 log.warning("Telegram: reply send failed: %s", exc)
                 return
@@ -687,5 +700,5 @@ def _describe_suggestions(result: dict) -> str:
     verb = lambda s: "Edit" if str(s.get("action") or "").lower() == "update" else "New watch"
     names = [f"{verb(s)}: “{str(s.get('name') or 'untitled')}”" for s in sugg]
     if len(names) == 1:
-        return f"📋 {names[0]}\n\nReply *yes* and I'll set it up."
-    return ("📋 " + "\n📋 ".join(names) + "\n\nReply *yes* and I'll set them all up.")
+        return f"📋 {names[0]}\n\nReply “yes” and I'll set it up."
+    return ("📋 " + "\n📋 ".join(names) + "\n\nReply “yes” and I'll set them all up.")

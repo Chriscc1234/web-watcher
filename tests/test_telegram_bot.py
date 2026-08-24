@@ -5,7 +5,10 @@ See web_watcher/telegram_bot.py."""
 
 from __future__ import annotations
 
-from web_watcher.telegram_bot import TelegramBridge, _chunk, _describe_suggestions
+from web_watcher.telegram_bot import (
+    TelegramBridge, _chunk, _describe_suggestions, _is_affirmative, _is_negative,
+    _suggestions_of,
+)
 
 
 def _bridge(chat_id="12345") -> TelegramBridge:
@@ -59,9 +62,78 @@ def test_chunk_handles_a_single_unbroken_run():
     assert all(len(p) <= 100 for p in parts) and "".join(parts) == "x" * 500
 
 
-def test_describe_suggestions_names_the_drafted_watches():
+def test_describe_suggestions_names_them_and_asks_for_a_yes():
     assert _describe_suggestions({}) == ""
     one = _describe_suggestions({"watch_suggestion": {"name": "Trucks"}})
-    assert "Trucks" in one
+    assert "Trucks" in one and "yes" in one.lower()
     many = _describe_suggestions({"watch_suggestions": [{"name": "A"}, {"name": "B"}]})
-    assert "A" in many and "B" in many and "2" in many
+    assert "A" in many and "B" in many
+    edit = _describe_suggestions({"watch_suggestion": {"name": "Trucks", "action": "update"}})
+    assert "Edit" in edit          # an edit must not read as a brand-new watch
+
+
+def test_suggestions_of_handles_both_shapes():
+    assert _suggestions_of({}) == []
+    assert _suggestions_of({"watch_suggestion": {"name": "A"}}) == [{"name": "A"}]
+    assert len(_suggestions_of({"watch_suggestions": [{"name": "A"}, {"name": "B"}]})) == 2
+
+
+# ── the confirm-from-your-phone flow ───────────────────────────────────────────
+
+def test_affirmative_and_negative_detection():
+    for yes in ("yes", "y", "Yep", "ok", "do it", "go ahead", "sure!", "apply"):
+        assert _is_affirmative(yes) is True, yes
+    for no in ("no", "nope", "cancel", "never mind", "don't"):
+        assert _is_negative(no) is True, no
+    # A message that merely STARTS with a yes-word is a NEW request, not consent to apply.
+    for not_yes in ("ok now find me a boat instead", "yes but change the price to 5000",
+                    "sure, what about trucks?"):
+        assert _is_affirmative(not_yes) is False, not_yes
+
+
+def test_yes_applies_the_pending_change(monkeypatch):
+    b = _bridge()
+    sent, applied = [], []
+    monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_apply_pending", lambda p: applied.append(p) or "✅ Done.")
+    monkeypatch.setattr(b, "_ask_watcher", lambda t: pytest.fail("a yes must not re-ask the model"))
+    b._pending = [{"name": "Trucks", "action": "update"}]
+    b._handle_message("yes")
+    assert applied == [[{"name": "Trucks", "action": "update"}]]
+    assert b._pending is None            # consumed, so a later stray "yes" can't re-apply
+    assert sent == ["✅ Done."]
+
+
+def test_no_cancels_without_applying(monkeypatch):
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply on 'no'"))
+    b._pending = [{"name": "Trucks"}]
+    b._handle_message("no")
+    assert b._pending is None and "left everything" in sent[0].lower()
+
+
+def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply"))
+    monkeypatch.setattr(b, "_ask_watcher", lambda t: {"message": "Sure, boats instead."})
+    b._pending = [{"name": "Trucks"}]
+    b._handle_message("actually find me a boat")
+    assert sent == ["Sure, boats instead."]
+
+
+def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
+    b = _bridge()
+    monkeypatch.setattr(b, "_send", lambda t: None)
+    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_ask_watcher",
+                        lambda t: {"message": "Here's what I'd set up.",
+                                   "watch_suggestion": {"name": "Trucks"}})
+    b._handle_message("watch for trucks")
+    assert b._pending == [{"name": "Trucks"}]

@@ -33,8 +33,10 @@ Design notes
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+from urllib.parse import quote
 
 import httpx
 
@@ -64,6 +66,9 @@ class TelegramBridge:
         self._stop         = threading.Event()
         self._thread: threading.Thread | None = None
         self._offset: int | None = None      # next update_id to fetch
+        # Watch changes the assistant proposed and is waiting on a yes/no for. The dashboard
+        # shows these as click-to-confirm cards; on a phone the confirmation is the next message.
+        self._pending: list[dict] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -162,6 +167,20 @@ class TelegramBridge:
 
     def _handle_message(self, text: str) -> None:
         log.info("Telegram message received: %r", text[:80])
+
+        # A yes to a proposal we're holding APPLIES it — that's how a watch gets created or
+        # edited from the phone, standing in for the dashboard's confirm button.
+        if self._pending:
+            pending, self._pending = self._pending, None
+            if _is_affirmative(text):
+                self._typing()
+                self._send(self._apply_pending(pending))
+                return
+            if _is_negative(text):
+                self._send("Okay, left everything as it was.")
+                return
+            # Anything else: not an answer to the question — fall through and just chat.
+
         self._typing()
         try:
             result = self._ask_watcher(text)
@@ -171,10 +190,44 @@ class TelegramBridge:
             return
 
         reply = (result.get("message") or "").strip()
-        extra = _describe_suggestions(result)
-        if extra:
-            reply = (reply + "\n\n" + extra).strip()
+        sugg = _suggestions_of(result)
+        if sugg:
+            self._pending = sugg
+            reply = (reply + "\n\n" + _describe_suggestions(result)).strip()
         self._send(reply or "(no reply)")
+
+    def _apply_pending(self, pending: list[dict]) -> str:
+        """Create/update the proposed watches through the app's own API (the same endpoints the
+        dashboard's confirm button uses), and report what happened in plain words."""
+        done, failed = [], []
+        for s in pending:
+            name = str(s.get("name") or "").strip()
+            body = {k: v for k, v in s.items() if k != "action"}
+            try:
+                if str(s.get("action") or "").lower() == "update" and name:
+                    r = httpx.put(f"{self.dashboard_url}/api/watches/{quote(name)}",
+                                  json=body, timeout=30.0)
+                else:
+                    r = httpx.post(f"{self.dashboard_url}/api/watches", json=body, timeout=30.0)
+                if r.status_code < 300:
+                    done.append(name or "watch")
+                else:
+                    detail = ""
+                    try:
+                        detail = str((r.json() or {}).get("detail", ""))[:120]
+                    except Exception:
+                        pass
+                    failed.append(f"{name or 'watch'}{f' ({detail})' if detail else ''}")
+            except Exception as exc:
+                log.warning("Telegram: applying %r failed: %s", name, exc)
+                failed.append(f"{name or 'watch'} ({exc})")
+
+        parts = []
+        if done:
+            parts.append("✅ Done — " + ", ".join(f"“{n}”" for n in done) + ".")
+        if failed:
+            parts.append("⚠️ Couldn't apply " + ", ".join(f"“{n}”" for n in failed) + ".")
+        return " ".join(parts) or "Nothing to apply."
 
     def _ask_watcher(self, text: str) -> dict:
         """Run the message through the app's OWN chat endpoint, so Telegram and the in-app dock
@@ -245,16 +298,37 @@ def _chunk(text: str, limit: int) -> list[str]:
     return out
 
 
-def _describe_suggestions(result: dict) -> str:
-    """The dashboard renders watch proposals as click-to-confirm cards; Telegram can't, so
-    say in words what it wants to do and point at the app to confirm."""
+_YES_RE = re.compile(r"^\s*(y|ye|yes|yep|yeah|yup|ok|okay|sure|do it|go|go ahead|apply|"
+                     r"confirm|please do|sounds good|make it|save it)\b[\s.!]*$", re.I)
+_NO_RE  = re.compile(r"^\s*(n|no|nope|nah|cancel|stop|don'?t|never ?mind|leave it)\b[\s.!]*$", re.I)
+
+
+def _is_affirmative(text: str) -> bool:
+    """Is this a plain yes to the proposal we're holding? Deliberately strict — a message that
+    merely STARTS with 'ok' but goes on to say something else is a new request, not a yes."""
+    return bool(_YES_RE.match(text or ""))
+
+
+def _is_negative(text: str) -> bool:
+    return bool(_NO_RE.match(text or ""))
+
+
+def _suggestions_of(result: dict) -> list[dict]:
+    """The watch proposals in an assistant turn, in both shapes the API returns."""
     sugg = result.get("watch_suggestions") or []
     if not sugg and result.get("watch_suggestion"):
         sugg = [result["watch_suggestion"]]
-    names = [str((s or {}).get("name") or "a new watch") for s in sugg if isinstance(s, dict)]
-    if not names:
+    return [s for s in sugg if isinstance(s, dict)]
+
+
+def _describe_suggestions(result: dict) -> str:
+    """The dashboard renders watch proposals as click-to-confirm cards; on a phone the confirm
+    is the next message, so say what it will do and ask for a yes."""
+    sugg = _suggestions_of(result)
+    if not sugg:
         return ""
+    verb = lambda s: "Edit" if str(s.get("action") or "").lower() == "update" else "New watch"
+    names = [f"{verb(s)}: “{str(s.get('name') or 'untitled')}”" for s in sugg]
     if len(names) == 1:
-        return f"📋 I've drafted a watch — “{names[0]}”. Open Web Watcher to confirm it."
-    return ("📋 I've drafted " + str(len(names)) + " watches — "
-            + ", ".join(f"“{n}”" for n in names) + ". Open Web Watcher to confirm them.")
+        return f"📋 {names[0]}\n\nReply *yes* and I'll set it up."
+    return ("📋 " + "\n📋 ".join(names) + "\n\nReply *yes* and I'll set them all up.")

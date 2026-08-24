@@ -181,6 +181,21 @@ def main() -> None:
 
     import webview
     from web_watcher.services import ServiceManager
+    from web_watcher.single_instance import InstanceLock, port_in_use
+
+    # ONE INSTANCE ONLY. Two copies would poll the SAME Telegram bot (so an outdated build could
+    # answer the user) and each drive their own browser on one GPU. Seen for real: six live copies
+    # stacked up by restarts that didn't fully exit. Take an OS-held lock, and also probe the port
+    # for an older build that predates the lock. Either signal → this copy exits immediately.
+    lock = InstanceLock()
+    if not lock.acquire():
+        log.warning("Another copy of Web Watcher is already running — exiting this one.")
+        return
+    if port_in_use(ServiceManager.PORT):
+        log.warning("Port %d is already serving Web Watcher — exiting this copy.",
+                    ServiceManager.PORT)
+        lock.release()
+        return
 
     manager = ServiceManager()
 
@@ -245,6 +260,9 @@ def main() -> None:
     except TypeError:
         start_kwargs.pop("icon", None)
         webview.start(**start_kwargs)
+    # Hand the single-instance lock back explicitly. (The OS also drops it when the process ends —
+    # including a hard kill — so a crash can never wedge the app shut.)
+    lock.release()
     log.info("Web Watcher exited cleanly")
 
 

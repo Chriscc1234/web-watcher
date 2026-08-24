@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.57.0-alpha] — 2026-08-24 (Only one copy can ever run)
+
+### New — a hard one-copy-only guarantee
+- Web Watcher now takes an exclusive lock when it starts. If a copy is already running, the new
+  one **closes immediately** instead of stacking on top. Two copies would poll the same Telegram
+  bot (letting an outdated copy answer your messages) and each drive their own browser on one
+  graphics card.
+- The lock is held by the running program, not left behind in a file — so a crash, a forced
+  shutdown, or a power cut can never leave the app unable to start.
+
+---
+
 ## [0.56.0-alpha] — 2026-08-24 (No more stale copies of the app)
 
 ### Fixed — updating could leave the old copy running

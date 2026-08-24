@@ -11,7 +11,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.47.0-alpha] — 2026-08-24 (Smarter about when to spend, steadier under load)
+## [0.48.0-alpha] — 2026-08-24 (One clear on/off, and start/stop from your phone)
+
+### New — one master switch for the whole Watcher
+- The **Start / Stop watching** button is now a true master switch: **Stop** pauses *everything*
+  — scheduled checks, always-on watches, and the driver — for everyone; **Start** resumes it all.
+  It **stays paused across restarts**, so if you stop it overnight it's still stopped in the
+  morning. (Before, that button only paused part of the system, which was confusing.)
+
+### New — start and stop watches from the Telegram bot
+- The bot can now actually **start, stop, pause, enable, disable, and delete** watches — not just
+  create them. "Stop my truck watch" happens right away; **delete asks you to confirm first**.
+- **Two levels, kept straight:** "pause everything" controls the whole Watcher and is **owner-only**
+  — a friend using the bot can only start/stop **their own** watches. If it's unclear whether you
+  mean the whole thing or just yours, the bot asks first.
+- Ask the bot **"what can you do?"** and it now gives you a straight list of its tools.
+
+
 
 ### New — local-first chat, Claude only when it counts
 - Everyday chat — "how are my watches?", "status?", "yes" — now stays on your **fast local

@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.56.0-alpha] — 2026-08-24 (No more stale copies of the app)
+
+### Fixed — updating could leave the old copy running
+- After "Update & restart", the old copy of the app sometimes never actually shut down (a busy
+  browser or the built-in web server could keep it alive), so a new copy started **on top of it**.
+  Over several updates that stacked up into multiple copies running at once — each one polling
+  your Telegram bot, so an **outdated copy could answer your messages** (which is why the bot kept
+  replying with raw formatting tags after that was fixed), and each driving its own browser.
+- Restarting now makes sure the old copy really exits, and a second copy will **refuse to take
+  over your bot** if one is already running. If the bot ever behaves like an old version, that was
+  the cause.
+
+---
+
 ## [0.55.0-alpha] — 2026-08-24 (Formatting fix: no more stray tags in chat)
 
 ### Fixed — the settings block printed raw tags

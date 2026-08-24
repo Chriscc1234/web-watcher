@@ -120,9 +120,27 @@ class ServiceManager:
     # Two-way Telegram (opt-in) — text the bot, talk to The Watcher
     # ------------------------------------------------------------------
 
+    def _another_instance_owns_the_port(self) -> bool:
+        """True when ANOTHER Web Watcher already owns the dashboard port. Two live instances mean
+        two Telegram bridges racing for the same bot (an older build could answer messages) and two
+        drivers browsing at once — so the second instance must not start a bridge."""
+        import socket
+        if self._uvicorn_server is not None:
+            return False                     # WE own it
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                return s.connect_ex(("127.0.0.1", self.PORT)) == 0
+        except Exception:
+            return False
+
     def _start_telegram(self) -> None:
         """Start the inbound Telegram bridge when the user has enabled two-way chat. Failure to
         start is never fatal — alerts and watches work regardless."""
+        if self._another_instance_owns_the_port():
+            log.warning("Another Web Watcher instance is already running — not starting a second "
+                        "Telegram bridge (two bridges would fight over the same bot)")
+            return
         try:
             from web_watcher.config import load as load_config
             from web_watcher.telegram_bot import TelegramBridge
@@ -290,6 +308,28 @@ class ServiceManager:
             "installer_pct":         self._installer_pct,
         }
 
+    def _force_exit_soon(self, grace: float = 12.0) -> None:
+        """Guarantee this process actually DIES after a restart/reset is requested.
+
+        Closing the window normally unwinds main() and exits — but a hung Playwright browser, a
+        uvicorn worker, or any non-daemon thread can keep the process alive. When that happened the
+        launcher started a NEW instance while the old one kept running: several copies of the app
+        at once, each polling Telegram (so an OUTDATED build could answer messages) and each
+        driving its own browser. After a grace period for a clean shutdown, exit hard."""
+        import os as _os
+        import threading as _th
+
+        def _bail():
+            log.warning("restart: forcing exit after %.0fs so no stale instance survives", grace)
+            try:
+                _os._exit(0)                 # bypasses atexit/thread joins — nothing can block it
+            except Exception:
+                pass
+
+        t = _th.Timer(grace, _bail)
+        t.daemon = True
+        t.start()
+
     def request_restart(self) -> bool:
         """Flag a restart and close the window so launcher.py applies the staged update and
         relaunches. Returns True if a staged update exists to apply."""
@@ -308,6 +348,9 @@ class ServiceManager:
                 self._window.destroy()
             except Exception as exc:
                 log.debug("window destroy failed: %s", exc)
+        # ...and make sure THIS process is gone even if something refuses to unwind, so the
+        # relaunched app is the only one running (no stale build answering Telegram).
+        self._force_exit_soon()
         return True
 
     def request_reset(self) -> bool:

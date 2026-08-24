@@ -145,3 +145,34 @@ def test_admin_on_telegram_sees_all_watches():
     assert len(S._watches_for_owner(cfg, "999")) == 1      # a buddy sees only their own
     assert S._is_owned("W1", cfg, "111") is True           # admin may act on an unassigned watch
     assert S._is_owned("W1", cfg, "999") is False
+
+
+# ── no stale second instance (the "6 copies running" bug) ───────────────────────
+
+def test_second_instance_does_not_start_a_telegram_bridge(monkeypatch):
+    """Two live instances = two bridges racing for the same bot, and an OUTDATED build can answer
+    messages (that's how literal <b> tags kept appearing after the fix shipped). A second instance
+    must decline to start a bridge."""
+    from web_watcher.services import ServiceManager
+    m = ServiceManager()
+    monkeypatch.setattr(m, "_another_instance_owns_the_port", lambda: True)
+    called = []
+    monkeypatch.setattr("web_watcher.telegram_bot.TelegramBridge",
+                        lambda *a, **k: called.append(1))
+    m._start_telegram()
+    assert called == []                      # declined
+
+
+def test_restart_arms_a_hard_exit(monkeypatch):
+    """A restart must guarantee this process dies, or the launcher's new instance stacks on top
+    of a still-running old one."""
+    from web_watcher.services import ServiceManager
+    m = ServiceManager()
+    armed = {}
+    class _T:
+        def __init__(self, delay, fn): armed["delay"] = delay
+        def start(self): armed["started"] = True
+        daemon = True
+    monkeypatch.setattr("threading.Timer", _T)
+    m._force_exit_soon(grace=5.0)
+    assert armed.get("started") is True and armed.get("delay") == 5.0

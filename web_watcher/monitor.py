@@ -778,11 +778,22 @@ _LOCATION_BOX_LABEL_RE = re.compile(
 )
 
 
+# Exact name/id identifiers of known location boxes that carry NO wordy label to match on.
+# weather.gov's forecast search is <input name="inputstring"> — on the homepage its hint
+# ("Enter location ...") sits in the value so the label regex catches it, but on a direct
+# forecast link (MapClick?CityName=Seattle...) the box is EMPTY and its only label is the name
+# "inputstring", which matches nothing. Mapped live; extend as we meet more such boxes.
+_LOCATION_BOX_NAMES = {"inputstring"}
+
+
 def label_is_location_box(label: str) -> bool:
     """True when a search box's label/placeholder marks it a place/geo picker (type only a
     city/ZIP here, never topic keywords). Shared by the agent's element rendering and the
     deterministic humanized_search so both paths agree on what a location box is."""
-    return bool(_LOCATION_BOX_LABEL_RE.search(label or ""))
+    text = (label or "").strip()
+    if text.lower() in _LOCATION_BOX_NAMES:
+        return True
+    return bool(_LOCATION_BOX_LABEL_RE.search(text))
 
 
 def suggestions_are_locations(suggestions: list) -> bool:

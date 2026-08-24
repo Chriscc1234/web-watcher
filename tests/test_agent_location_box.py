@@ -25,6 +25,15 @@ def test_weather_gov_main_box_detected_via_value():
     assert ">>> LOCATION INPUT <<<" in _elements_text([e])
 
 
+def test_weather_gov_box_detected_when_empty_on_a_direct_link():
+    # On a direct forecast link (MapClick?CityName=Seattle...) the box is EMPTY — no value hint,
+    # label is just the name "inputstring". Must STILL be a location box (caught by known-name),
+    # or the agent types its goal into it and breaks the page. Reported live 2026-08.
+    e = _inp("inputstring", value="")
+    assert _is_location_input(e) is True
+    assert ">>> LOCATION INPUT <<<" in _elements_text([e])
+
+
 # ── the classifier ────────────────────────────────────────────────────────────
 
 def test_location_labels_are_detected():

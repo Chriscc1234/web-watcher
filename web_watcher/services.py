@@ -93,10 +93,19 @@ class ServiceManager:
         self._start_ollama()    # first: scheduler needs Ollama available
         self._start_server()
         self._start_scheduler()
-        # Respect a pause the user left in place before closing the app: if the master switch was
-        # off, re-pause after the scheduler comes up so nothing sweeps until they resume.
+        # Master switch on launch. If the user left it PAUSED, re-pause so nothing sweeps. If it's
+        # ON (the default), actually WATCH: hand any enabled continuous watches to the driver —
+        # scheduled watches already run via apscheduler, but continuous ones register "stopped", so
+        # without this a not-paused app would show "watching" while nothing actually swept (the
+        # "it says it's on but never finds anything" gap).
         if self._load_paused():
             self.pause_all()
+        else:
+            try:
+                if self._has_enabled_continuous():
+                    self.start_orchestrator()
+            except Exception as exc:
+                log.warning("start_all: could not start the driver: %s", exc)
         self._start_update_checker()
         self._start_telegram()  # last: the bridge talks to the server we just started
 

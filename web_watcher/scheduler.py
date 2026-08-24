@@ -531,10 +531,17 @@ def _watch_geolocation(watch: Watch):
     None when the location is unknown."""
     try:
         from web_watcher.cl_geo import url_zip, zip_from_text, zip_latlon
-        z = next((zz for zz in (url_zip(u) for u in (watch.urls or [])) if zz), None)
-        if not z:
-            z = zip_from_text(watch.instruction or "")
-        return zip_latlon(z) if z else None
+        # Try each source and accept the FIRST zip that actually resolves. A URL can carry a
+        # non-gazetteer zip (e.g. craigslist postal=98214) that yields no anchor — which silently
+        # disabled the out-of-area filter and let out-of-state OfferUp junk through. Falling back
+        # to the instruction and the watch NAME ("Anacortes …") recovers a real anchor.
+        for z in (next((zz for zz in (url_zip(u) for u in (watch.urls or [])) if zz), None),
+                  zip_from_text(watch.instruction or ""),
+                  zip_from_text(watch.name or "")):
+            ll = zip_latlon(z) if z else None
+            if ll:
+                return ll
+        return None
     except Exception:
         return None
 

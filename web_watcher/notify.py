@@ -198,10 +198,14 @@ def _format_telegram(payload: NotificationPayload) -> str:
     conf = (r.confidence or "").upper()
     icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(conf, "🔔")
     lines = [f"{icon} <b>{_tg(payload.watch_name)}</b>"]
-    summary = _tg((r.summary or "").strip())
+    summary = (r.summary or "").strip()
     if summary:
-        lines += ["", summary]
-    if conf:
+        lines += ["", _tg(summary)]
+    # Marketplace finds carry a ★ rating that IS the quality signal — the generic "confidence"
+    # field is hardcoded HIGH for those and just adds noise, so show it only when there's no
+    # rating (e.g. a yes/no watch like a weather warning, where confidence is meaningful).
+    has_rating = "★" in summary
+    if conf and not has_rating:
         lines += ["", f"<b>{conf}</b> confidence"]
     if r.link:
         lines.append(f'🔗 <a href="{_tg(r.link, quote=True)}">Open listing</a>')

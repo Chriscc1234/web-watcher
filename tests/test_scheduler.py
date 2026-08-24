@@ -854,3 +854,24 @@ def test_interval_jobs_get_jitter(config_file, db):
     # WATCH_DEF is interval_minutes=5 → jitter = min(300, 5*60*0.2) = 60s
     assert getattr(job.trigger, "jitter", None) == 60
     s.stop()
+
+
+# ── out-of-area anchor recovery (the "NJ listing on an Anacortes watch" bug) ──────
+
+def test_watch_geolocation_falls_back_to_name_when_url_zip_is_invalid():
+    """A URL zip that isn't in the gazetteer (craigslist postal=98214) must not leave the watch
+    with NO anchor — that silently disabled the out-of-area filter. The watch NAME ("Anacortes")
+    recovers a real anchor so out-of-state OfferUp junk gets dropped."""
+    from web_watcher.scheduler import _watch_geolocation
+    from web_watcher.cl_geo import out_of_area, state_for_latlon
+    w = Watch(name="Anacortes Manual Transmission Cars Watch",
+              urls=["https://seattle.craigslist.org/search/cta?postal=98214",
+                    "https://offerup.com/search?radius=100"],
+              instruction="manual cars under 8000", interval_minutes=30)
+    anchor = _watch_geolocation(w)
+    assert anchor is not None                                   # recovered from the name
+    st = state_for_latlon(*anchor)
+    assert st == "WA"
+    # And the NJ listing that slipped through is now confidently dropped.
+    assert out_of_area("2020 Toyota C-HR in Mountain Lakes, NJ", anchor, st) is True
+    assert out_of_area("Truck in Burlington, WA", anchor, st) is False

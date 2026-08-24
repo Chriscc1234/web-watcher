@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.53.0-alpha] — 2026-08-24 (No more out-of-state junk, cleaner alerts)
+
+### Fixed — out-of-state listings no longer slip through
+- OfferUp ignores distance limits and surfaces listings from across the country. The filter that
+  drops those relies on knowing your watch's location — but if the watch's zip didn't resolve, it
+  had no anchor and quietly let *everything* through (that's how a New Jersey car reached an
+  Anacortes watch). It now falls back to the watch's name/location, so out-of-state finds are
+  dropped before they ever reach you.
+
+### Changed — alerts show the rating, not a meaningless "confidence"
+- Marketplace alerts showed both a ★ rating and a "HIGH confidence" line — but that confidence was
+  hardcoded to HIGH for every listing, so it meant nothing. The ★ rating (how good the match is)
+  now stands on its own; "confidence" only appears on yes/no watches where it's real.
+
+---
+
 ## [0.52.0-alpha] — 2026-08-24 (Proactive check-ins + attribute-aware watches)
 
 ### New — the bot checks in with you

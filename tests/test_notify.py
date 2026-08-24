@@ -115,6 +115,21 @@ def test_telegram_format_omits_link_when_none():
     assert "Open listing" not in msg
 
 
+def test_telegram_omits_confidence_for_rated_listings():
+    # A marketplace find has a ★ rating (the real signal); the hardcoded "HIGH confidence" is noise.
+    rated = _result(summary="★★★☆☆ New match: 2008 Miata — $6,500", confidence="high")
+    msg = _format_telegram(_payload(result=rated))
+    assert "confidence" not in msg.lower()
+    assert "★★★☆☆" in msg
+
+
+def test_telegram_keeps_confidence_for_yesno_watches():
+    # A yes/no watch (weather) has no rating — confidence is meaningful there, so keep it.
+    plain = _result(summary="Frost warning tonight", confidence="high")
+    msg = _format_telegram(_payload(result=plain))
+    assert "HIGH" in msg and "confidence" in msg.lower()
+
+
 # ---------------------------------------------------------------------------
 # Telegram — missing config
 # ---------------------------------------------------------------------------

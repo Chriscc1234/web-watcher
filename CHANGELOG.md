@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.51.0-alpha] — 2026-08-24 (Telegram alerts actually arrive)
+
+### Fixed — the big one: alerts never reached your phone
+- Telegram alerts were being built as a full HTML email document and sent to Telegram, which
+  only accepts a tiny set of formatting tags — so **Telegram rejected every alert** ("can't parse
+  entities") and nothing ever arrived, even though watches were finding matches. Alerts now use a
+  clean, phone-friendly format (the find, its confidence, and a tappable link) that Telegram
+  accepts. Your finds will now actually show up.
+
+---
+
 ## [0.50.0-alpha] — 2026-08-24 (Owners kept straight, and honest replies)
 
 ### Fixed — a watch's owner is no longer lost

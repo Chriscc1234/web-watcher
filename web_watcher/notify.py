@@ -14,6 +14,7 @@ Notification content (spec Section 4.5):
 
 from __future__ import annotations
 
+import html as _html
 import logging
 import smtplib
 import ssl
@@ -67,7 +68,7 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
         log.warning("Telegram not configured — skipping notification for %r", payload.watch_name)
         return False
 
-    text = _format_message(payload)
+    text = _format_telegram(payload)
 
     try:
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
@@ -182,6 +183,30 @@ def send_notifications(
 # ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------
+
+def _tg(s, quote: bool = False) -> str:
+    """Escape text for Telegram's HTML parse mode (only &, <, > matter; quote for href)."""
+    return _html.escape(str(s or ""), quote=quote)
+
+
+def _format_telegram(payload: NotificationPayload) -> str:
+    """A Telegram-native alert. Telegram's HTML mode allows ONLY a small tag set (<b>, <i>,
+    <a>, <code>…) — NOT full documents. The email formatter returns a whole <html><body><table>
+    doc, which Telegram rejects ("Unsupported start tag html"), so alerts silently failed. This
+    builds a compact, phone-friendly message with just the essentials + a tappable link."""
+    r = payload.result
+    conf = (r.confidence or "").upper()
+    icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(conf, "🔔")
+    lines = [f"{icon} <b>{_tg(payload.watch_name)}</b>"]
+    summary = _tg((r.summary or "").strip())
+    if summary:
+        lines += ["", summary]
+    if conf:
+        lines += ["", f"<b>{conf}</b> confidence"]
+    if r.link:
+        lines.append(f'🔗 <a href="{_tg(r.link, quote=True)}">Open listing</a>')
+    return "\n".join(lines)
+
 
 def _format_message(payload: NotificationPayload, html: bool = True) -> str:
     r    = payload.result

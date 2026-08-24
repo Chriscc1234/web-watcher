@@ -15,6 +15,7 @@ from web_watcher.config import NotificationsConfig, TelegramConfig, EmailConfig
 from web_watcher.notify import (
     NotificationPayload,
     _format_message,
+    _format_telegram,
     send_email,
     send_notifications,
     send_telegram,
@@ -83,6 +84,35 @@ def test_format_html_no_link_tag_when_none():
 def test_format_timestamp_present():
     msg = _format_message(_payload(), html=False)
     assert "2026-06-20" in msg
+
+
+# ---------------------------------------------------------------------------
+# Telegram message format (the "no alert ever arrived" bug: the email HTML doc
+# was sent to Telegram, which rejected it — "Unsupported start tag html")
+# ---------------------------------------------------------------------------
+
+_TG_FORBIDDEN = ("<html", "<body", "<table", "<tr", "<td", "<h2", "<span", "style=", "<br")
+
+
+def test_telegram_format_has_no_unsupported_tags():
+    msg = _format_telegram(_payload(result=_result(link="https://x.com/i")))
+    low = msg.lower()
+    for tag in _TG_FORBIDDEN:
+        assert tag not in low, tag
+    assert "<b>" in msg and 'href="https://x.com/i"' in msg   # supported tags only
+
+
+def test_telegram_format_escapes_raw_html_in_summary():
+    # A scraped summary containing raw tags must be escaped, not passed through.
+    r = _result(summary="Deal <b>x</b> & <script>evil</script> at <html>")
+    msg = _format_telegram(_payload(result=r))
+    assert "<script>" not in msg and "&lt;script&gt;" in msg
+    assert msg.startswith(("🟢", "🟡", "🔴", "🔔"))          # never starts with a raw tag
+
+
+def test_telegram_format_omits_link_when_none():
+    msg = _format_telegram(_payload(result=_result(link=None)))
+    assert "Open listing" not in msg
 
 
 # ---------------------------------------------------------------------------

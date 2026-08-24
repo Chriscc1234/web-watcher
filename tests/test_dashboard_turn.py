@@ -154,7 +154,7 @@ def test_long_history_is_capped_before_the_model(monkeypatch):
     from web_watcher.dashboard import server as S
 
     seen = {}
-    def _fake_reply(system, messages, model):
+    def _fake_reply(system, messages, model, force_local=False):
         seen["n"] = len(messages)
         return ("ok", 1, 1, 1)
     monkeypatch.setattr(S, "_chat_reply_natural", _fake_reply)

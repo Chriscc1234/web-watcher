@@ -78,6 +78,16 @@ def test_chat_cloud_path_used_when_routed(monkeypatch):
     assert '"ratings"' in out
 
 
+def test_force_local_bypasses_cloud_route(monkeypatch):
+    # Role IS routed to cloud, but force_local keeps it local (smart escalation for easy turns).
+    cfg = _cfg(roles={"chat": ProviderRoute(provider="anthropic", model="claude-haiku-4-5")}, key="sk-abc")
+    monkeypatch.setattr(llm, "_anthropic_chat", lambda *a, **k: pytest.fail("force_local must stay local"))
+    monkeypatch.setattr(llm, "_ollama_chat", lambda *a, **k: "LOCAL")
+    out = llm.chat([{"role": "user", "content": "yes"}], role="chat",
+                   local_model="qwen2.5:14b", cfg=cfg, force_local=True)
+    assert out == "LOCAL"
+
+
 def test_chat_falls_back_to_local_on_cloud_error(monkeypatch):
     cfg = _cfg(roles={"judge": ProviderRoute(provider="anthropic", model="claude-haiku-4-5")}, key="sk-abc")
     def boom(*a, **k):

@@ -110,3 +110,33 @@ def test_admin_message_needs_owner_and_token(isolated, monkeypatch):
                        json={"owner": "", "text": "x"}).json()["ok"] is False   # no target
     assert client.post("/api/oversight/threads/message",
                        json={"owner": "555", "text": "x"}).json()["ok"] is False  # no token
+
+
+# ── smart local/cloud escalation ─────────────────────────────────────────────────
+
+def _um(text):
+    return [{"role": "user", "content": text}]
+
+
+def test_easy_turns_stay_local():
+    for msg in ["yes", "hi", "status?", "how are my watches?", "what watches do I have?", "thanks"]:
+        assert S._is_hard_chat_turn(_um(msg), None) is False, msg
+
+
+def test_hard_turns_escalate():
+    for msg in ["watch craigslist for 4x4 trucks under 15k",
+                "find me a diesel Tacoma around Anacortes",
+                "change the price cap to 8000",
+                "make my watch always run",
+                "look on facebook marketplace for boats"]:
+        assert S._is_hard_chat_turn(_um(msg), None) is True, msg
+
+
+def test_pending_create_is_always_hard():
+    assert S._is_hard_chat_turn(_um("make it black"), S.PENDING_CREATE) is True
+
+
+def test_always_run_counts_as_a_change_request():
+    # The exact miss from the logs: "…always run" must register as asking to change the watch.
+    assert bool(S._CHANGE_SIGNAL_RE.search("my watch I just created always run")) is True
+    assert bool(S._CHANGE_SIGNAL_RE.search("can you make it run continuously?")) is True

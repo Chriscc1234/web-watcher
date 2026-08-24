@@ -44,6 +44,13 @@ log = logging.getLogger(__name__)
 
 OLLAMA_BASE = "http://localhost:11434"
 
+# Process-wide serialization for LOCAL (Ollama) inference. One local GPU realistically does one
+# call at a time; several sweep threads each running vision + reasoning in parallel just thrash it
+# and time out. Every local call — here and the browsing agent's direct vision/reasoning calls in
+# agent.py (which import this same lock) — acquires it, so local inference runs one-at-a-time at
+# full speed. Held only for the inference HTTP call, so browsers still interleave. Cloud is exempt.
+GPU_LOCK = threading.Lock()
+
 # Cloud model a role defaults to when it is routed to Anthropic without an explicit model.
 # Chosen for the plan's cost/latency tiers: Haiku for the hot/cheap roles, Sonnet for chat,
 # Opus for the slow thorough vet. A user can override any of these per role in config.
@@ -125,6 +132,7 @@ def chat(
     timeout:     float = 90.0,
     cache_system: bool = False,
     max_tokens:  int = 4096,
+    force_local: bool = False,
 ) -> str:
     """Run one chat completion for `role`, returning the assistant text.
 
@@ -135,6 +143,9 @@ def chat(
     format_json: return a clean JSON string for either provider (callers json.loads it).
     images: base64 image strings (vision). Cloud vision isn't wired yet — a cloud route with
       images falls back to local automatically.
+    force_local: run on the local model even when the role is routed to cloud. Used for
+      smart escalation — the caller keeps easy/short turns local (fast + free) and only lets
+      the hard ones reach cloud. A no-op when the role is already local.
     """
     if cfg is None:
         try:
@@ -144,7 +155,7 @@ def chat(
             cfg = None
 
     provider, model, key = ("local", "", "")
-    if cfg is not None:
+    if cfg is not None and not force_local:
         provider, model, key = resolve_route(cfg, role)
 
     # Hard monthly cap: once the estimate hits the ceiling, stop spending — run local for the
@@ -212,7 +223,10 @@ def _ollama_chat(messages: list[dict], model: str, *, format_json: bool,
     payload: dict = {"model": model, "messages": msgs, "stream": False}
     if format_json:
         payload["format"] = "json"
-    with httpx.Client(timeout=timeout) as client:
+    # Serialize on the shared GPU lock so the judge/chat here never runs a local inference at the
+    # same time as a browsing agent's vision call — one local GPU does one call at a time; two at
+    # once just thrash and time out. See GPU_LOCK. Cloud calls never reach here, so they're free.
+    with GPU_LOCK, httpx.Client(timeout=timeout) as client:
         r = client.post(f"{base_url.rstrip('/')}/api/chat", json=payload)
         r.raise_for_status()
         return r.json()["message"]["content"]

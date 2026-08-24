@@ -2539,7 +2539,10 @@ _CHANGE_SIGNAL_RE = re.compile(
     r"set\b|make it|rename|remov\w*|delete|drop|exclud\w*|switch\w*|instead|widen\w*|"
     r"expand\w*|broaden\w*|narrow\w*|raise|lower|increase|decrease|bump|cap\b|limit\b|"
     r"only\b|no longer|as well|max\b|min\b|price|budget|under|over|less than|more than|"
-    r"radius|distance|sites?|keyword|antikeyword)\b", re.IGNORECASE)
+    r"radius|distance|sites?|keyword|antikeyword|"
+    # run-mode changes: "make it always run", "run continuously", "keep it running", "24/7".
+    r"always run|run always|run all the time|all the time|run continuous\w*|continuous\w*|"
+    r"keep (it )?running|24/?7|nonstop|constantly|every \d+ ?min\w*|hourly|daily)\b", re.IGNORECASE)
 
 # "both/all/every watch(es)" — an explicit request to change more than one at once (rare, but real).
 _ALL_WATCHES_RE = re.compile(r"\b(both|all|every|each)\b[\w\s]{0,24}\bwatch", re.IGNORECASE)
@@ -2574,6 +2577,27 @@ def _watch_referenced_in(text: str, name: str) -> bool:
     hits = sum(1 for t in toks
                if t in low or (t.endswith("s") and t[:-1] in low) or (t + "s") in low)
     return hits >= min(2, len(toks))
+
+
+# Words that mark a turn as worth escalating to cloud (create/search intent). Change-intent is
+# covered separately by _CHANGE_SIGNAL_RE; everyday chat (greetings, status, yes/no) matches
+# neither and stays local — fast and free.
+_HARD_CHAT_RE = re.compile(
+    r"\b(watch|monitor|alert|track|find|looking for|look for|search|set up|setup|create|"
+    r"under|over|\$|price|budget|miles?|radius|distance|craigslist|facebook|offerup|ebay|"
+    r"marketplace|always run|continuous\w*)\b", re.IGNORECASE)
+
+
+def _is_hard_chat_turn(messages: list, focus: str | None) -> bool:
+    """Should this turn be allowed to use cloud? Everyday chat stays local; the hard turns —
+    creating or changing a watch, or a long/complex ask — escalate when cloud chat is enabled.
+    Deliberately cheap and text-only (no extra model call). A no-op unless cloud chat is on."""
+    if focus == PENDING_CREATE:
+        return True                                   # mid-setup of a new watch — needs care
+    text = (_latest_user_text(messages) or "").strip()
+    if len(text) > 80:
+        return True                                   # a long / multi-part message
+    return bool(_CHANGE_SIGNAL_RE.search(text) or _HARD_CHAT_RE.search(text))
 
 
 def _ground_update_suggestions(suggestions: list, messages: list, focus: str | None) -> list:
@@ -2664,22 +2688,24 @@ def _converse_focus_line(focus: str | None, conv: list) -> str:
     return ""
 
 
-def _chat_reply_natural(system: str, messages: list, model: str):
-    """Phase 1 — a natural-language reply (NO forced JSON). Returns (text, eval, prompt, dur)."""
-    # Routed through the provider seam: with the "chat" role pointed at Anthropic this is the
-    # single biggest latency win in the app (a local 14b turn takes seconds; Claude answers in
-    # well under one) and it falls back to the local model automatically. See llm.py.
+def _chat_reply_natural(system: str, messages: list, model: str, force_local: bool = False):
+    """Phase 1 — a natural-language reply (NO forced JSON). Returns (text, eval, prompt, dur).
+    force_local keeps easy turns on the local model even when cloud chat is enabled."""
+    # Routed through the provider seam. Everyday chat stays local (fast + free on this machine);
+    # only the hard turns escalate to cloud when it's on (force_local=False). Falls back to local
+    # automatically on any cloud error. See llm.py and _is_hard_chat_turn.
     from web_watcher import llm
     text = llm.chat(
         [{"role": "system", "content": system + "\n\n" + _CONVERSE_OVERRIDE}, *messages],
         role="chat", local_model=model, cfg=_load_cfg(), timeout=90.0, cache_system=True,
+        force_local=force_local,
     )
     # Token counts are an Ollama-only diagnostic; the cloud path simply reports none.
     return (_prose(text), 0, 0, 0)
 
 
 def _extract_watch_action(messages: list, reply: str, cfg, model: str,
-                          focus: str | None) -> dict:
+                          focus: str | None, force_local: bool = False) -> dict:
     """Phase 2 — decide if the conversation warrants a concrete watch action and, if so,
     return it as {watch_suggestion?, watch_actions?, listing_query?}. Returns {} for 'none'.
     A dedicated call so extraction can't be crowded out by conversation. Never raises."""
@@ -2703,7 +2729,7 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
         content = llm.chat(
             [{"role": "system", "content": system}, *messages],
             role="chat", local_model=model, cfg=cfg,
-            format_json=True, timeout=60.0,
+            format_json=True, timeout=60.0, force_local=force_local,
         )
         data = _parse_chat_response(content)
     except Exception as exc:
@@ -2795,10 +2821,17 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
              if isinstance(m, dict) and m.get("role") == "assistant" else m)
             for m in messages]
     focus = _focused_watch_name(conv, cfg)
+    # Smart escalation: everyday chat stays on the fast local model; only the hard turns (creating
+    # or changing a watch, a long/complex ask) are allowed to reach cloud when it's enabled. This
+    # keeps the phone snappy and the bill near zero while cloud still handles the comprehension-
+    # heavy turns. A no-op when cloud chat is off — everything is local either way.
+    hard = _is_hard_chat_turn(conv, focus)
+    log.debug("chat: %s turn (%s)", "hard" if hard else "easy",
+              "cloud-eligible" if hard else "local-only")
     try:
         reply, eval_count, prompt_count, duration_ns = _chat_reply_natural(
-            system + _converse_focus_line(focus, conv), conv, model)
-        action = _extract_watch_action(conv, reply, cfg, model, focus)
+            system + _converse_focus_line(focus, conv), conv, model, force_local=not hard)
+        action = _extract_watch_action(conv, reply, cfg, model, focus, force_local=not hard)
         data = _normalize_turn({"message": reply, **action})
 
         listings = None

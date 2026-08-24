@@ -5,6 +5,8 @@ See web_watcher/telegram_bot.py."""
 
 from __future__ import annotations
 
+import pytest
+
 from web_watcher.telegram_bot import (
     TelegramBridge, _chunk, _describe_suggestions, _is_affirmative, _is_negative,
     _suggestions_of,
@@ -43,14 +45,27 @@ def test_blank_extra_ids_do_not_open_the_door():
 
 def test_dispatch_ignores_unauthorized_and_empty(monkeypatch):
     b = _bridge("12345")
-    handled = []
-    monkeypatch.setattr(b, "_handle_message", lambda t, sender="": handled.append(t))
+    handled, knocks = [], []
+    monkeypatch.setattr(b, "_handle_message", lambda t, sender="", sender_name="": handled.append(t))
+    monkeypatch.setattr(b, "_notify_access_request", lambda cid, name="": knocks.append(cid))
     b._dispatch({"message": {"text": "hi", "chat": {"id": "99999"}}})   # stranger
-    assert handled == []
+    assert handled == [] and knocks == ["99999"]                        # not handled, admin alerted
     b._dispatch({"message": {"text": "", "chat": {"id": "12345"}}})     # no text
     assert handled == []
     b._dispatch({"message": {"text": "hello", "chat": {"id": "12345"}}})
     assert handled == ["hello"]
+
+
+def test_notify_access_request_alerts_admin_once(monkeypatch):
+    b = _bridge("12345")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append((chat_id, t)))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda *a, **k: None)
+    b._notify_access_request("99999", "Stranger")
+    b._notify_access_request("99999", "Stranger")          # same knocker again — no second alert
+    admin_alerts = [t for cid, t in sent if cid == "12345"]
+    assert len(admin_alerts) == 1 and "99999" in admin_alerts[0]
+    assert any(cid == "99999" for cid, _ in sent)          # the knocker got an acknowledgement
 
 
 def test_not_configured_without_token_or_chat():
@@ -110,10 +125,10 @@ def test_affirmative_and_negative_detection():
 def test_yes_applies_the_pending_change(monkeypatch):
     b = _bridge()
     sent, applied = [], []
-    monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
-    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: applied.append(p) or "✅ Done.")
-    monkeypatch.setattr(b, "_ask_watcher", lambda t, o="": pytest.fail("a yes must not re-ask the model"))
+    monkeypatch.setattr(b, "_ask_watcher", lambda t, o="", n="": pytest.fail("a yes must not re-ask the model"))
     b._pending = [{"name": "Trucks", "action": "update"}]
     b._handle_message("yes")
     assert applied == [[{"name": "Trucks", "action": "update"}]]
@@ -124,8 +139,8 @@ def test_yes_applies_the_pending_change(monkeypatch):
 def test_no_cancels_without_applying(monkeypatch):
     b = _bridge()
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
-    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply on 'no'"))
     b._pending = [{"name": "Trucks"}]
     b._handle_message("no")
@@ -135,10 +150,10 @@ def test_no_cancels_without_applying(monkeypatch):
 def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     b = _bridge()
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
-    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply"))
-    monkeypatch.setattr(b, "_ask_watcher", lambda t, o="": {"message": "Sure, boats instead."})
+    monkeypatch.setattr(b, "_ask_watcher", lambda t, o="", n="": {"message": "Sure, boats instead."})
     b._pending = [{"name": "Trucks"}]
     b._handle_message("actually find me a boat")
     assert sent == ["Sure, boats instead."]
@@ -146,10 +161,10 @@ def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
 
 def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
     b = _bridge()
-    monkeypatch.setattr(b, "_send", lambda t: None)
-    monkeypatch.setattr(b, "_typing", lambda: None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": None)
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_ask_watcher",
-                        lambda t, o="": {"message": "Here's what I'd set up.",
+                        lambda t, o="", n="": {"message": "Here's what I'd set up.",
                                    "watch_suggestion": {"name": "Trucks"}})
     b._handle_message("watch for trucks")
     assert b._pending == [{"name": "Trucks"}]

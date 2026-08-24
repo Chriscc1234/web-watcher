@@ -876,6 +876,9 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         # owner scopes the whole turn to one Telegram person (their chat_id): they see and act
         # on ONLY their own watches, on their OWN chat thread. None = the desktop admin view.
         owner = str(body.get("owner") or "").strip() or None
+        # Remember the sender's Telegram name so the admin console shows a person, not a number.
+        if owner:
+            _record_owner_name(owner, str(body.get("owner_name") or "").strip())
 
         try:
             snap = manager.oversight_snapshot(limit=14)
@@ -1238,6 +1241,63 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             return {"ok": True, "chats": chats}
         except Exception as exc:
             return {"ok": False, "error": f"Could not reach Telegram: {exc}"}
+
+    # ------------------------------------------------------------------
+    # Telegram access requests — a stranger who messages the bot is NOT let in, but the
+    # admin is alerted (by the bridge, on their phone) and the request is parked here so it
+    # can be approved with one click from the console. See telegram_bot._notify_access_request.
+    # ------------------------------------------------------------------
+
+    @app.post("/api/telegram/access-request")
+    def telegram_access_request(body: dict):
+        """Record a pending access request (called by the bridge when an unknown chat messages)."""
+        cid = str(body.get("chat_id") or "").strip()
+        if not cid:
+            return {"ok": False}
+        _record_access_request(cid, str(body.get("name") or "").strip())
+        return {"ok": True}
+
+    @app.get("/api/telegram/access-requests")
+    def telegram_list_access_requests():
+        return _load_access_requests()
+
+    @app.post("/api/telegram/access-requests/allow")
+    def telegram_allow_access(body: dict):
+        """Grant a pending request: add its chat_id to the allowlist, save, restart the bridge
+        so it takes effect live, and clear it from the pending list."""
+        from web_watcher.config import load, save
+        cid = str(body.get("chat_id") or "").strip()
+        if not cid:
+            return {"ok": False, "error": "no chat_id"}
+        cfg = load()
+        allowed = list(cfg.notifications.telegram.allowed_chat_ids or [])
+        if cid not in allowed:
+            allowed.append(cid)
+            cfg.notifications.telegram.allowed_chat_ids = allowed
+            save(cfg)
+        # Remember their name for the console, then drop the pending request.
+        name = str(body.get("name") or "").strip()
+        if name:
+            _record_owner_name(cid, name)
+        _remove_access_request(cid)
+        try:
+            manager.restart_telegram()
+        except Exception as exc:
+            log.debug("could not restart the Telegram bridge: %s", exc)
+        return {"ok": True}
+
+    @app.post("/api/telegram/access-requests/dismiss")
+    def telegram_dismiss_access(body: dict):
+        cid = str(body.get("chat_id") or "").strip()
+        if cid:
+            _remove_access_request(cid)
+        return {"ok": True}
+
+    @app.get("/api/oversight/threads")
+    def list_oversight_threads():
+        """The admin console's per-person chat index: the desktop thread + each Telegram
+        person's thread, with message counts and the last line."""
+        return _list_conversation_threads(_load_cfg())
 
     # ------------------------------------------------------------------
     # System specs + hardware re-scan (Settings → System)
@@ -1664,6 +1724,125 @@ def _save_watcher_history(history: list, owner: str | None = None) -> None:
         p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log.warning("Could not save watcher history: %s", exc)
+
+
+# --- Owner display names ----------------------------------------------------------
+# A Telegram thread is keyed by chat_id (a bare number). So the admin console can show a
+# human name instead of "5821334", we remember the sender's Telegram name the first time
+# they talk. This is display sugar only — the security boundary is still the chat_id.
+_OWNER_NAMES_PATH = _WATCHER_HISTORY_PATH.with_name("watcher_owners.json")
+
+
+def _load_owner_names() -> dict:
+    try:
+        if _OWNER_NAMES_PATH.exists():
+            d = json.loads(_OWNER_NAMES_PATH.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return {str(k): str(v) for k, v in d.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _record_owner_name(owner: str | None, name: str) -> None:
+    owner, name = str(owner or "").strip(), str(name or "").strip()
+    if not owner or not name:
+        return
+    try:
+        d = _load_owner_names()
+        if d.get(owner) == name:
+            return
+        d[owner] = name
+        _OWNER_NAMES_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not record owner name: %s", exc)
+
+
+# --- Telegram access requests (parked for one-click approval in the console) -------
+_ACCESS_REQ_PATH = _WATCHER_HISTORY_PATH.with_name("telegram_access_requests.json")
+
+
+def _load_access_requests() -> list:
+    try:
+        if _ACCESS_REQ_PATH.exists():
+            d = json.loads(_ACCESS_REQ_PATH.read_text(encoding="utf-8"))
+            if isinstance(d, list):
+                return d
+    except Exception:
+        pass
+    return []
+
+
+def _save_access_requests(reqs: list) -> None:
+    try:
+        _ACCESS_REQ_PATH.write_text(json.dumps(reqs, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not save access requests: %s", exc)
+
+
+def _record_access_request(chat_id: str, name: str) -> None:
+    chat_id = str(chat_id or "").strip()
+    if not chat_id:
+        return
+    import time as _t
+    reqs = _load_access_requests()
+    for r in reqs:
+        if str(r.get("chat_id")) == chat_id:      # already pending — refresh name/time only
+            if name:
+                r["name"] = name
+            r["ts"] = _t.time()
+            _save_access_requests(reqs)
+            return
+    reqs.append({"chat_id": chat_id, "name": name, "ts": _t.time()})
+    _save_access_requests(reqs[-50:])             # cap so a spammer can't grow this unbounded
+
+
+def _remove_access_request(chat_id: str) -> None:
+    chat_id = str(chat_id or "").strip()
+    reqs = [r for r in _load_access_requests() if str(r.get("chat_id")) != chat_id]
+    _save_access_requests(reqs)
+
+
+# --- Conversation-thread index (the admin console's per-person chat viewer) --------
+
+def _thread_summary(owner: str | None, label: str, hist: list, cfg) -> dict:
+    """One row for the Chats console: who, how many messages, the last line, and how many
+    watches they own (owner=None is the desktop admin, who sees every watch)."""
+    last = hist[-1] if hist else None
+    snippet, last_ts = "", None
+    if isinstance(last, dict):
+        snippet = str(last.get("content") or "").strip().replace("\n", " ")
+        if len(snippet) > 90:
+            snippet = snippet[:90] + "…"
+        last_ts = last.get("ts")
+    return {
+        "owner": owner,
+        "label": label,
+        "messages": len(hist),
+        "last_ts": last_ts,
+        "last_snippet": snippet,
+        "watches": len(cfg.watches) if owner is None else len(_watches_for_owner(cfg, owner)),
+    }
+
+
+def _list_conversation_threads(cfg) -> list[dict]:
+    """Every chat thread for the admin console: the desktop/main thread (owner=None, sees all)
+    plus one per Telegram person (owner = their chat_id). Read-only summaries, newest first."""
+    names = _load_owner_names()
+    threads = [_thread_summary(None, "Desktop · you (all watches)", _load_watcher_history(None), cfg)]
+    try:
+        for p in sorted(_WATCHER_HISTORY_PATH.parent.glob("watcher_history_*.json")):
+            token = p.stem[len("watcher_history_"):]
+            if not token:
+                continue
+            hist = _load_watcher_history(token)
+            label = names.get(token) or f"Telegram · {token}"
+            threads.append(_thread_summary(token, label, hist, cfg))
+    except Exception as exc:
+        log.warning("could not list chat threads: %s", exc)
+    # Desktop first, then the busiest / most-recent Telegram threads.
+    tel = sorted(threads[1:], key=lambda t: (t.get("last_ts") or 0), reverse=True)
+    return threads[:1] + tel
 
 
 def _desktop_dir():

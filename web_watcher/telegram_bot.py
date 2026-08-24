@@ -24,9 +24,10 @@ Design notes
   TelegramBridge.start/stop  ~L70   Thread lifecycle (daemon; owned by ServiceManager)
   _loop                      ~L110  Long-poll getUpdates → dispatch → reply
   _authorized                ~L165  The sender allowlist (security boundary)
+  _notify_access_request     ~L205  A stranger knocked → alert the admin + park for approval
   _handle_message            ~L180  One inbound message → assistant turn → reply
-  _ask_watcher               ~L215  Calls the app's own chat API (shared history + brain)
-  _send / _typing            ~L265  Outbound helpers (4096-char chunking)
+  _ask_watcher               ~L235  Calls the app's own chat API (shared history + brain)
+  _send / _typing            ~L285  Outbound helpers (per-sender target + 4096-char chunking)
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -75,6 +76,9 @@ class TelegramBridge:
         self._stop         = threading.Event()
         self._thread: threading.Thread | None = None
         self._offset: int | None = None      # next update_id to fetch
+        # Strangers we've already alerted the admin about, so one persistent knocker can't spam
+        # the owner's phone. Reset on restart (re-alerting once after a restart is fine).
+        self._access_notified: set[str] = set()
         # Watch changes the assistant proposed and is waiting on a yes/no for. The dashboard
         # shows these as click-to-confirm cards; on a phone the confirmation is the next message.
         self._pending: list[dict] | None = None
@@ -158,12 +162,16 @@ class TelegramBridge:
         msg  = update.get("message") or update.get("edited_message") or {}
         text = (msg.get("text") or "").strip()
         chat = (msg.get("chat") or {}).get("id")
+        frm  = msg.get("from") or {}
+        name = (" ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
+                or frm.get("username") or (msg.get("chat") or {}).get("title") or "")
         if not text:
             return                                            # photo/sticker/etc — nothing to answer
         if not self._authorized(chat):
-            log.warning("Telegram: ignoring message from unauthorized chat %s", chat)
+            log.warning("Telegram: unauthorized chat %s (%s) — alerting admin", chat, name)
+            self._notify_access_request(str(chat), name)
             return
-        self._handle_message(text, str(chat))
+        self._handle_message(text, str(chat), name)
 
     def _authorized(self, chat_id) -> bool:
         """Security boundary: only the allowed chats may drive the app. A bot token is
@@ -175,29 +183,30 @@ class TelegramBridge:
     # One message → assistant turn → reply
     # ------------------------------------------------------------------
 
-    def _handle_message(self, text: str, sender: str = "") -> None:
-        log.info("Telegram message received from %s: %r", sender, text[:80])
+    def _handle_message(self, text: str, sender: str = "", sender_name: str = "") -> None:
+        log.info("Telegram message received from %s (%s): %r", sender, sender_name, text[:80])
         owner = sender or self.chat_id      # scope this turn to the person who sent it
+        to = sender or self.chat_id         # ...and reply to THEM, not always the alert chat
 
         # A yes to a proposal we're holding APPLIES it — that's how a watch gets created or
         # edited from the phone, standing in for the dashboard's confirm button.
         if self._pending:
             pending, self._pending = self._pending, None
             if _is_affirmative(text):
-                self._typing()
-                self._send(self._apply_pending(pending))
+                self._typing(to)
+                self._send(self._apply_pending(pending), to)
                 return
             if _is_negative(text):
-                self._send("Okay, left everything as it was.")
+                self._send("Okay, left everything as it was.", to)
                 return
             # Anything else: not an answer to the question — fall through and just chat.
 
-        self._typing()
+        self._typing(to)
         try:
-            result = self._ask_watcher(text, owner)
+            result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)
-            self._send("Sorry — I couldn't think that through just now. Try again in a moment.")
+            self._send("Sorry — I couldn't think that through just now. Try again in a moment.", to)
             return
 
         reply = (result.get("message") or "").strip()
@@ -205,7 +214,7 @@ class TelegramBridge:
         if sugg:
             self._pending = sugg
             reply = (reply + "\n\n" + _describe_suggestions(result)).strip()
-        self._send(reply or "(no reply)")
+        self._send(reply or "(no reply)", to)
 
     def _apply_pending(self, pending: list[dict]) -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the
@@ -240,7 +249,32 @@ class TelegramBridge:
             parts.append("⚠️ Couldn't apply " + ", ".join(f"“{n}”" for n in failed) + ".")
         return " ".join(parts) or "Nothing to apply."
 
-    def _ask_watcher(self, text: str, owner: str = "") -> dict:
+    def _notify_access_request(self, chat_id: str, name: str) -> None:
+        """A stranger messaged the bot. We DON'T let them in — but we alert the owner on their
+        phone and park the request in the app so it can be approved with one click. Alert once
+        per stranger per run so a persistent knocker can't spam the owner."""
+        chat_id = str(chat_id or "").strip()
+        if not chat_id or chat_id in self._access_notified:
+            return
+        self._access_notified.add(chat_id)
+        who = name or "Someone"
+        self._send(
+            f"🔔 Access request\n{who} (chat id {chat_id}) messaged your Web Watcher bot but "
+            f"isn't on your allow-list. Open the app → Chats to let them in, or add {chat_id} "
+            f"under Settings → Notifications & Keys.",
+            self.chat_id,                      # the owner/admin alert chat
+        )
+        # Park it for one-click approval in the console (best-effort; the phone alert is primary).
+        try:
+            httpx.post(f"{self.dashboard_url}/api/telegram/access-request",
+                       json={"chat_id": chat_id, "name": name}, timeout=10.0)
+        except Exception as exc:
+            log.debug("Telegram: could not record access request (%s)", exc)
+        # Let the knocker know a human has to approve them, so silence doesn't read as broken.
+        self._send("Thanks — you're not on the allow-list yet. I've asked the owner to grant "
+                   "you access.", chat_id)
+
+    def _ask_watcher(self, text: str, owner: str = "", owner_name: str = "") -> dict:
         """Run the message through the app's OWN chat endpoint, so Telegram and the in-app dock
         share one brain. `owner` scopes the turn to this person — their own watches and their own
         chat thread. Sends prior history for continuity; the endpoint persists the turn itself."""
@@ -262,6 +296,8 @@ class TelegramBridge:
         body = {"messages": messages}
         if owner:
             body["owner"] = owner
+        if owner_name:
+            body["owner_name"] = owner_name
         r = httpx.post(f"{self.dashboard_url}/api/oversight/chat", json=body, timeout=_CHAT_TIMEOUT)
         r.raise_for_status()
         return r.json() or {}
@@ -270,20 +306,21 @@ class TelegramBridge:
     # Outbound helpers
     # ------------------------------------------------------------------
 
-    def _typing(self) -> None:
+    def _typing(self, chat_id: str = "") -> None:
         """Show Telegram's '…is typing' while the model thinks — a local turn isn't instant and
-        silence reads as broken."""
+        silence reads as broken. Defaults to the alert chat when no target is given."""
         try:
             httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendChatAction",
-                       json={"chat_id": self.chat_id, "action": "typing"}, timeout=10.0)
+                       json={"chat_id": chat_id or self.chat_id, "action": "typing"}, timeout=10.0)
         except Exception:
             pass
 
-    def _send(self, text: str) -> None:
+    def _send(self, text: str, chat_id: str = "") -> None:
+        target = chat_id or self.chat_id       # reply to the sender; fall back to the alert chat
         for chunk in _chunk(text, _MSG_LIMIT):
             try:
                 httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendMessage",
-                           json={"chat_id": self.chat_id, "text": chunk,
+                           json={"chat_id": target, "text": chunk,
                                  "disable_web_page_preview": True}, timeout=20.0)
             except Exception as exc:
                 log.warning("Telegram: reply send failed: %s", exc)

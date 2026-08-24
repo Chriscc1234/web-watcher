@@ -190,6 +190,24 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .advanced-section{display:none;margin-top:10px;padding:12px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)}
 .advanced-section.open{display:block}
 
+/* ---- Chats admin console (per-person thread viewer) ---- */
+.chats-layout{display:flex;gap:14px;align-items:stretch}
+.chats-list{flex:0 0 260px;display:flex;flex-direction:column;gap:6px;max-height:66vh;overflow-y:auto}
+.chats-thread{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.chats-thread-head{padding:11px 14px;border-bottom:1px solid var(--border);font-weight:600;font-size:14px;flex-shrink:0}
+#chats-convo{border:none;border-radius:0}
+.thread-row{text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;cursor:pointer;transition:border-color .12s}
+.thread-row:hover{border-color:var(--blue)}
+.thread-row.active{border-color:var(--blue);background:var(--bg)}
+.thread-row .tr-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.thread-row .tr-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.thread-row .tr-count{font-size:11px;color:var(--dim);white-space:nowrap}
+.thread-row .tr-snip{font-size:12px;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.access-card{background:#2a2413;border:1px solid #7a6320;border-radius:8px;padding:11px 13px;margin-bottom:12px}
+.access-card .ac-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.access-card .ac-who{flex:1 1 auto;font-size:13px;min-width:180px}
+.access-card button{font-size:12px}
+.access-allow{background:var(--blue);border-color:var(--blue)}
 /* ---- chat bubbles (shared by The Watcher dock) ---- */
 .msg{max-width:82%;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.5}
 .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:3px}
@@ -252,6 +270,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 <nav>
   <button class="active" onclick="showTab('watches',this)">Watches</button>
   <button onclick="showTab('results',this)">Results</button>
+  <button onclick="showTab('chats',this)">Chats</button>
   <button onclick="showTab('live',this)">Live</button>
   <button onclick="showTab('history',this)">Activity</button>
   <button onclick="showTab('services',this)">Settings</button>
@@ -592,6 +611,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   </section>
 </div>
 
+<!-- ================================================================ CHATS (admin console) -->
+<div id="tab-chats" class="tab-panel">
+  <section>
+    <h2>Conversations</h2>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">Every thread with The Watcher — your desktop chat and each person texting the Telegram bot. You see all of them; each person on Telegram sees only their own.</div>
+    <div id="access-requests"></div>
+    <div class="chats-layout">
+      <div class="chats-list" id="chats-list"><div class="empty-state" style="padding:16px">Loading…</div></div>
+      <div class="chats-thread">
+        <div class="chats-thread-head" id="chats-thread-head">Select a conversation to view it.</div>
+        <div class="dock-convo" id="chats-convo" style="height:60vh"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
 <!-- ================================================================ CONSOLE -->
 <div id="tab-live" class="tab-panel">
   <section>
@@ -906,6 +941,7 @@ function showTab(name, btn) {
   activeTab = name;
   if (name === 'watches')  { loadWatches(); loadOversight(); }
   if (name === 'results')  loadResults();
+  if (name === 'chats')    loadChatThreads();
   if (name === 'live')     startLive();
   if (name === 'history')  loadHistory();
   if (name === 'services') loadOrchestrator();
@@ -1785,6 +1821,110 @@ async function showWatcherGreeting() {
     msg = p.join(' ');
   }
   appendMsg('assistant', msg, 'dock-convo');
+}
+
+// ============================================================ CHATS (admin console)
+// One place to watch every conversation: the desktop thread plus each person on Telegram.
+// Read-only viewer — you act as admin from the dock; this is oversight of who's talking to
+// the bot and what they're asking. Also surfaces access requests from strangers for approval.
+let _chatThreads = [];
+let _activeThreadOwner = undefined;   // undefined = none selected; null = desktop; string = a chat_id
+
+function _agoFromTs(ts) {
+  if (!ts) return '';
+  const secs = Math.floor(Date.now() / 1000 - ts);
+  if (secs < 60)    return 'just now';
+  if (secs < 3600)  return `${Math.floor(secs/60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
+  return `${Math.floor(secs/86400)}d ago`;
+}
+
+async function loadChatThreads() {
+  await renderAccessRequests();
+  let threads = [];
+  try { threads = await api('/api/oversight/threads'); } catch (_) { /* offline */ }
+  _chatThreads = threads || [];
+  const list = document.getElementById('chats-list');
+  if (!_chatThreads.length) {
+    list.innerHTML = '<div class="empty-state" style="padding:16px">No conversations yet.</div>';
+    return;
+  }
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  list.innerHTML = _chatThreads.map((t, i) => {
+    const key = t.owner === null ? 'null' : String(t.owner);
+    const active = (t.owner === _activeThreadOwner) ? ' active' : '';
+    const meta = `${t.messages} msg${t.messages === 1 ? '' : 's'}`
+      + (t.watches ? ` · ${t.watches} watch${t.watches === 1 ? '' : 'es'}` : '')
+      + (t.last_ts ? ` · ${_agoFromTs(t.last_ts)}` : '');
+    return `<button class="thread-row${active}" data-key="${esc(key)}" onclick="openChatThread(this.dataset.key)">
+      <div class="tr-top"><span class="tr-name">${esc(t.label)}</span></div>
+      <div class="tr-snip">${esc(t.last_snippet || '(no messages yet)')}</div>
+      <div class="tr-count">${esc(meta)}</div>
+    </button>`;
+  }).join('');
+  // Keep the current selection populated (message counts refresh), else open the desktop thread.
+  if (_activeThreadOwner === undefined) openChatThread('null');
+  else openChatThread(_activeThreadOwner === null ? 'null' : String(_activeThreadOwner));
+}
+
+async function openChatThread(key) {
+  const owner = (key === 'null') ? null : key;
+  _activeThreadOwner = owner;
+  document.querySelectorAll('#chats-list .thread-row').forEach(r =>
+    r.classList.toggle('active', r.dataset.key === key));
+  const t = _chatThreads.find(x => (x.owner === null ? 'null' : String(x.owner)) === key);
+  document.getElementById('chats-thread-head').textContent = t ? t.label : 'Conversation';
+  const box = document.getElementById('chats-convo');
+  box.innerHTML = '';
+  let history = [];
+  try {
+    history = await api('/api/oversight/chat/history' + (owner ? ('?owner=' + encodeURIComponent(owner)) : ''));
+  } catch (_) { /* offline */ }
+  if (!history || !history.length) {
+    box.innerHTML = '<div class="empty-state" style="padding:16px">No messages in this conversation yet.</div>';
+    return;
+  }
+  for (const m of history) {
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    appendMsg(m.role, historyText(m.content || ''), 'chats-convo', m.ts || null);
+  }
+}
+
+async function renderAccessRequests() {
+  const box = document.getElementById('access-requests');
+  if (!box) return;
+  let reqs = [];
+  try { reqs = await api('/api/telegram/access-requests'); } catch (_) { box.innerHTML = ''; return; }
+  if (!reqs || !reqs.length) { box.innerHTML = ''; return; }
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  box.innerHTML = reqs.map(r => {
+    const who = r.name ? `${esc(r.name)} (id ${esc(r.chat_id)})` : `Chat id ${esc(r.chat_id)}`;
+    return `<div class="access-card"><div class="ac-row">
+      <span class="ac-who">🔔 <b>Access request</b> — ${who} messaged the bot but isn't on your allow-list.</span>
+      <button class="access-allow" data-id="${esc(r.chat_id)}" data-name="${esc(r.name || '')}" onclick="allowAccess(this)">Allow</button>
+      <button data-id="${esc(r.chat_id)}" onclick="dismissAccess(this)">Ignore</button>
+    </div></div>`;
+  }).join('');
+}
+
+async function allowAccess(btn) {
+  btn.disabled = true; btn.textContent = 'Allowing…';
+  try {
+    await api('/api/telegram/access-requests/allow',
+      { method: 'POST', body: JSON.stringify({ chat_id: btn.dataset.id, name: btn.dataset.name }) });
+  } catch (e) { btn.disabled = false; btn.textContent = 'Allow'; alert('Could not allow: ' + e.message); return; }
+  loadChatThreads();   // the new person now has a thread; the request card clears
+}
+
+async function dismissAccess(btn) {
+  btn.disabled = true;
+  try {
+    await api('/api/telegram/access-requests/dismiss',
+      { method: 'POST', body: JSON.stringify({ chat_id: btn.dataset.id }) });
+  } catch (_) { /* ignore */ }
+  renderAccessRequests();
 }
 
 function timeUntil(iso) {

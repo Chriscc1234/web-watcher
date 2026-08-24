@@ -25,10 +25,26 @@ def test_only_the_configured_chat_is_authorized():
     assert b._authorized(None) is False
 
 
+def test_extra_allowed_chats_can_talk_too():
+    # "you AND your buddy": the alert chat plus any extra IDs, nobody else.
+    b = TelegramBridge("tok", "111", "u", allowed_chat_ids=["222", " 333 "])
+    assert b._authorized("111") is True          # the alert chat is always allowed
+    assert b._authorized("222") is True
+    assert b._authorized(333) is True            # whitespace trimmed, int-safe
+    assert b._authorized("444") is False         # everyone else is still ignored
+
+
+def test_blank_extra_ids_do_not_open_the_door():
+    # An empty string must never end up in the allowlist — str(None)/"" could match junk.
+    b = TelegramBridge("tok", "111", "u", allowed_chat_ids=["", "   ", None])
+    assert b.allowed == {"111"}
+    assert b._authorized("") is False
+
+
 def test_dispatch_ignores_unauthorized_and_empty(monkeypatch):
     b = _bridge("12345")
     handled = []
-    monkeypatch.setattr(b, "_handle_message", lambda t: handled.append(t))
+    monkeypatch.setattr(b, "_handle_message", lambda t, sender="": handled.append(t))
     b._dispatch({"message": {"text": "hi", "chat": {"id": "99999"}}})   # stranger
     assert handled == []
     b._dispatch({"message": {"text": "", "chat": {"id": "12345"}}})     # no text
@@ -97,7 +113,7 @@ def test_yes_applies_the_pending_change(monkeypatch):
     monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda: None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: applied.append(p) or "✅ Done.")
-    monkeypatch.setattr(b, "_ask_watcher", lambda t: pytest.fail("a yes must not re-ask the model"))
+    monkeypatch.setattr(b, "_ask_watcher", lambda t, o="": pytest.fail("a yes must not re-ask the model"))
     b._pending = [{"name": "Trucks", "action": "update"}]
     b._handle_message("yes")
     assert applied == [[{"name": "Trucks", "action": "update"}]]
@@ -122,7 +138,7 @@ def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     monkeypatch.setattr(b, "_send", lambda t: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda: None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply"))
-    monkeypatch.setattr(b, "_ask_watcher", lambda t: {"message": "Sure, boats instead."})
+    monkeypatch.setattr(b, "_ask_watcher", lambda t, o="": {"message": "Sure, boats instead."})
     b._pending = [{"name": "Trucks"}]
     b._handle_message("actually find me a boat")
     assert sent == ["Sure, boats instead."]
@@ -133,7 +149,7 @@ def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
     monkeypatch.setattr(b, "_send", lambda t: None)
     monkeypatch.setattr(b, "_typing", lambda: None)
     monkeypatch.setattr(b, "_ask_watcher",
-                        lambda t: {"message": "Here's what I'd set up.",
+                        lambda t, o="": {"message": "Here's what I'd set up.",
                                    "watch_suggestion": {"name": "Trucks"}})
     b._handle_message("watch for trucks")
     assert b._pending == [{"name": "Trucks"}]

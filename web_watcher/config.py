@@ -61,6 +61,11 @@ class TelegramConfig(BaseModel):
     # you send the bot and answers with the SAME assistant as the in-app dock, so your phone
     # becomes one conversation with The Watcher. Off = alerts only. See telegram_bot.py.
     two_way: bool = False
+    # Extra Telegram chat IDs allowed to TALK to the bot, beyond chat_id (which is also where
+    # alerts are sent). A bot token is effectively public — anyone who finds the bot can message
+    # it — so only the IDs listed here plus chat_id are ever answered. Use this to let a second
+    # person (e.g. you AND your buddy) drive the same watcher.
+    allowed_chat_ids: list[str] = Field(default_factory=list)
 
 
 class EmailConfig(BaseModel):
@@ -166,6 +171,12 @@ class Watch(BaseModel):
     id: str | None = None
     name: str
     enabled: bool = True
+    # Who this watch belongs to: a Telegram chat_id (as a string), or "" for unassigned.
+    # Via the Telegram bot a person sees and manages ONLY watches whose owner is their own
+    # chat_id — so you can hand the bot to your buddy and he sees just his. The desktop
+    # dashboard is the admin view and shows every watch regardless of owner. See
+    # server._watches_for_owner / telegram_bot.
+    owner: str = ""
     urls: list[str] = Field(min_length=1)
     click_path: list[ClickStep] = Field(default_factory=list)
     interval_minutes: int | None = None  # mutually exclusive with cron_expression

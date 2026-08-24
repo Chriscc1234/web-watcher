@@ -113,7 +113,8 @@ class ServiceManager:
             tg = load_config().notifications.telegram
             if not getattr(tg, "two_way", False):
                 return
-            bridge = TelegramBridge(tg.bot_token, tg.chat_id, f"http://127.0.0.1:{self.PORT}")
+            bridge = TelegramBridge(tg.bot_token, tg.chat_id, f"http://127.0.0.1:{self.PORT}",
+                                    allowed_chat_ids=list(getattr(tg, "allowed_chat_ids", []) or []))
             if bridge.start():
                 self._telegram = bridge
         except Exception as exc:

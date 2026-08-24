@@ -59,10 +59,19 @@ class TelegramBridge:
     must never be able to take down a running watch.
     """
 
-    def __init__(self, bot_token: str, chat_id: str, dashboard_url: str) -> None:
+    def __init__(self, bot_token: str, chat_id: str, dashboard_url: str,
+                 allowed_chat_ids: list[str] | None = None) -> None:
         self.bot_token     = (bot_token or "").strip()
         self.chat_id       = str(chat_id or "").strip()
         self.dashboard_url = dashboard_url.rstrip("/")
+        # Everyone permitted to TALK to the bot: the alert chat plus any extra IDs (e.g. you and
+        # your buddy). Anyone else is ignored — see _authorized.
+        # NB: guard `c is not None` before str() — str(None) is "None", which is truthy and
+        # would silently put a bogus entry in the allowlist.
+        self.allowed: set[str] = {self.chat_id} | {
+            str(c).strip() for c in (allowed_chat_ids or []) if c is not None and str(c).strip()
+        }
+        self.allowed.discard("")
         self._stop         = threading.Event()
         self._thread: threading.Thread | None = None
         self._offset: int | None = None      # next update_id to fetch
@@ -154,19 +163,21 @@ class TelegramBridge:
         if not self._authorized(chat):
             log.warning("Telegram: ignoring message from unauthorized chat %s", chat)
             return
-        self._handle_message(text)
+        self._handle_message(text, str(chat))
 
     def _authorized(self, chat_id) -> bool:
-        """Security boundary: only the configured chat may drive the app. A bot token is
-        effectively public, so without this anyone who finds the bot could create watches."""
-        return str(chat_id) == self.chat_id
+        """Security boundary: only the allowed chats may drive the app. A bot token is
+        effectively public — anyone who finds the bot can message it — so without this a
+        stranger could create watches, read your finds, and change what you're watching."""
+        return str(chat_id) in self.allowed
 
     # ------------------------------------------------------------------
     # One message → assistant turn → reply
     # ------------------------------------------------------------------
 
-    def _handle_message(self, text: str) -> None:
-        log.info("Telegram message received: %r", text[:80])
+    def _handle_message(self, text: str, sender: str = "") -> None:
+        log.info("Telegram message received from %s: %r", sender, text[:80])
+        owner = sender or self.chat_id      # scope this turn to the person who sent it
 
         # A yes to a proposal we're holding APPLIES it — that's how a watch gets created or
         # edited from the phone, standing in for the dashboard's confirm button.
@@ -183,7 +194,7 @@ class TelegramBridge:
 
         self._typing()
         try:
-            result = self._ask_watcher(text)
+            result = self._ask_watcher(text, owner)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)
             self._send("Sorry — I couldn't think that through just now. Try again in a moment.")
@@ -229,13 +240,14 @@ class TelegramBridge:
             parts.append("⚠️ Couldn't apply " + ", ".join(f"“{n}”" for n in failed) + ".")
         return " ".join(parts) or "Nothing to apply."
 
-    def _ask_watcher(self, text: str) -> dict:
+    def _ask_watcher(self, text: str, owner: str = "") -> dict:
         """Run the message through the app's OWN chat endpoint, so Telegram and the in-app dock
-        share one brain and one history. Sends prior history for continuity; the endpoint
-        persists both sides of the turn itself."""
+        share one brain. `owner` scopes the turn to this person — their own watches and their own
+        chat thread. Sends prior history for continuity; the endpoint persists the turn itself."""
         history: list[dict] = []
         try:
-            r = httpx.get(f"{self.dashboard_url}/api/oversight/chat/history", timeout=15.0)
+            r = httpx.get(f"{self.dashboard_url}/api/oversight/chat/history",
+                          params={"owner": owner} if owner else None, timeout=15.0)
             if r.status_code == 200:
                 loaded = r.json()
                 if isinstance(loaded, list):
@@ -247,8 +259,10 @@ class TelegramBridge:
             log.debug("Telegram: could not load chat history (%s) — starting fresh", exc)
 
         messages = history + [{"role": "user", "content": text}]
-        r = httpx.post(f"{self.dashboard_url}/api/oversight/chat",
-                       json={"messages": messages}, timeout=_CHAT_TIMEOUT)
+        body = {"messages": messages}
+        if owner:
+            body["owner"] = owner
+        r = httpx.post(f"{self.dashboard_url}/api/oversight/chat", json=body, timeout=_CHAT_TIMEOUT)
         r.raise_for_status()
         return r.json() or {}
 

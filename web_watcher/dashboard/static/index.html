@@ -360,6 +360,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
           <span id="cred-tg-twoway-label" style="font-size:13px;color:var(--dim)">Off</span>
         </label>
       </div>
+      <label style="display:block;font-size:12px;color:var(--dim);margin:12px 0 4px">Also let these people chat with it (optional)</label>
+      <input id="cred-tg-allowed" type="text" placeholder="e.g. 987654321, 123456789" autocomplete="off"
+             style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+      <div style="font-size:12px;color:var(--dim);margin-top:6px">
+        Extra Telegram chat IDs, separated by commas. The Chat ID above is always allowed — add
+        another here so a second person (you <i>and</i> your buddy) can both talk to the bot.
+        <b>Anyone not listed is ignored</b>, which matters because anyone who finds your bot can
+        message it. To get someone's ID: have them message the bot, then press Detect.
+      </div>
     </div>
 
     <!-- Claude (Anthropic) -->
@@ -799,6 +808,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       <div class="form-row">
         <label>Model override (leave blank for default)</label>
         <input type="text" id="f-model" placeholder="e.g. qwen2.5:14b">
+      </div>
+      <div class="form-row">
+        <label>Owner — Telegram chat ID (leave blank for shared/admin)</label>
+        <input type="text" id="f-owner" placeholder="e.g. 987654321 (your buddy's chat ID)">
+        <div style="font-size:12px;color:var(--dim);margin-top:4px">
+          Assign this watch to a person so they see and manage only their own watches from the
+          Telegram bot. Get someone's ID from Settings → Notifications &amp; Keys → Detect. Blank =
+          not shown to any single Telegram user (visible only here on the desktop).
+        </div>
       </div>
     </div>
 
@@ -1974,6 +1992,7 @@ function openWatchModal(prefill = null) {
   document.getElementById('f-antikeywords').value = (prefill?.antikeywords || []).join(', ');
   document.getElementById('f-cron').value = prefill?.cron_expression || '';
   document.getElementById('f-model').value = prefill?.model_override || '';
+  document.getElementById('f-owner').value = prefill?.owner || '';
   // Mode + continuous settings
   document.getElementById('f-mode').value = prefill?.mode || 'schedule';
   document.getElementById('f-cont-scroll').value = prefill?.continuous_scroll_passes ?? 4;
@@ -2075,6 +2094,7 @@ async function saveWatch() {
       email:    document.getElementById('f-email').checked,
     },
     model_override:  model,
+    owner:           document.getElementById('f-owner').value.trim(),
     autonomous:      document.getElementById('f-autonomous').checked,
     max_agent_steps: parseInt(document.getElementById('f-max-steps').value) || 15,
     min_rating:      parseInt(document.getElementById('f-min-rating').value) || 3,
@@ -3015,6 +3035,8 @@ async function loadCredentials() {
   if (anKey) anKey.placeholder = an.key_set ? '•••• saved — leave blank to keep' : 'sk-ant-…';
   const jchk = document.getElementById('cred-an-judge-chk');
   if (jchk) { jchk.checked = !!an.judge_enabled; _applyJudgeToggle(!!an.judge_enabled); }
+  const allowed = document.getElementById('cred-tg-allowed');
+  if (allowed) allowed.value = (tg.allowed_chat_ids || []).join(', ');
   const twchk = document.getElementById('cred-tg-twoway-chk');
   if (twchk) { twchk.checked = !!tg.two_way; _applyTwoWayToggle(!!tg.two_way); }
   const spend = document.getElementById('cred-an-spend');
@@ -3031,7 +3053,8 @@ async function saveCredentials(btn) {
   const body = {
     telegram: { chat_id: document.getElementById('cred-tg-chatid').value.trim(),
                 bot_token: document.getElementById('cred-tg-token').value.trim(),
-                two_way: document.getElementById('cred-tg-twoway-chk').checked },
+                two_way: document.getElementById('cred-tg-twoway-chk').checked,
+                allowed_chat_ids: document.getElementById('cred-tg-allowed').value },
     anthropic: { api_key: document.getElementById('cred-an-key').value.trim(),
                  judge_enabled: document.getElementById('cred-an-judge-chk').checked },
     email: { smtp_server: document.getElementById('cred-em-server').value.trim(),

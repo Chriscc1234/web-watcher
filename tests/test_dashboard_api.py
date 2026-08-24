@@ -42,7 +42,7 @@ def _chat_client(monkeypatch, tmp_path, turn_result):
     from web_watcher.config import AppConfig
     monkeypatch.setattr(S, "_WATCHER_HISTORY_PATH", tmp_path / "watcher_history.json")
     monkeypatch.setattr(S, "_load_cfg", lambda: AppConfig())
-    monkeypatch.setattr(S, "_build_watches_context", lambda cfg, manager: "(watches)")
+    monkeypatch.setattr(S, "_build_watches_context", lambda cfg, manager, owner=None: "(watches)")
     monkeypatch.setattr(S, "_complete_assistant_turn", lambda *a, **k: dict(turn_result))
     manager = MagicMock()
     manager.oversight_snapshot.return_value = {"entries": []}
@@ -225,3 +225,49 @@ def test_normalize_urls_fixes_offerup_fabricated_path():
     assert out[0].startswith("https://offerup.com/search?")
     assert "price_max=10000" in out[0]
     assert "WA-Anacortes" not in out[0]
+
+
+# ── watch ownership: each Telegram person sees/acts on only their own ────────────
+
+def _cfg_with_owners():
+    from web_watcher.config import AppConfig, Watch
+    return AppConfig(watches=[
+        Watch(name="Mine", urls=["https://x.co"], instruction="a", interval_minutes=30, owner="111"),
+        Watch(name="Buddys", urls=["https://y.co"], instruction="b", interval_minutes=30, owner="222"),
+        Watch(name="Shared", urls=["https://z.co"], instruction="c", interval_minutes=30, owner=""),
+    ])
+
+
+def test_watches_for_owner_scopes_to_that_person():
+    from web_watcher.dashboard import server as S
+    cfg = _cfg_with_owners()
+    assert [w.name for w in S._watches_for_owner(cfg, None)] == ["Mine", "Buddys", "Shared"]  # desktop = all
+    assert [w.name for w in S._watches_for_owner(cfg, "222")] == ["Buddys"]                   # buddy = his
+    assert S._watches_for_owner(cfg, "999") == []                                             # stranger = none
+
+
+def test_is_owned_is_the_action_guard():
+    from web_watcher.dashboard import server as S
+    cfg = _cfg_with_owners()
+    assert S._is_owned("Mine", cfg, None) is True        # desktop may act on anything
+    assert S._is_owned("Buddys", cfg, "222") is True     # buddy may act on his own
+    assert S._is_owned("Mine", cfg, "222") is False      # but NOT on yours
+    assert S._is_owned("Shared", cfg, "222") is False    # nor an unassigned one
+
+
+def test_context_tells_a_person_with_no_watches(monkeypatch):
+    from web_watcher.dashboard import server as S
+    from unittest.mock import MagicMock
+    mgr = MagicMock(); mgr.get_job_info.return_value = []
+    txt = S._build_watches_context(_cfg_with_owners(), mgr, owner="999")
+    assert "none assigned to you" in txt.lower()
+
+
+def test_history_is_separate_per_owner(monkeypatch, tmp_path):
+    client, S = _chat_client(monkeypatch, tmp_path,
+                             {"message": "ok", "raw": "ok"})
+    client.post("/api/oversight/chat",
+                json={"messages": [{"role": "user", "content": "buddy msg"}], "owner": "222"})
+    # The buddy's turn lands in HIS thread, not the shared/desktop one.
+    assert S._load_watcher_history("222")[0]["content"] == "buddy msg"
+    assert S._load_watcher_history() == []

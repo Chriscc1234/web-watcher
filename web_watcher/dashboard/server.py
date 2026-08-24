@@ -873,6 +873,9 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         messages: list[dict] = body.get("messages", [])
         cfg   = _load_cfg()
         model = cfg.models.effective_council_model
+        # owner scopes the whole turn to one Telegram person (their chat_id): they see and act
+        # on ONLY their own watches, on their OWN chat thread. None = the desktop admin view.
+        owner = str(body.get("owner") or "").strip() or None
 
         try:
             snap = manager.oversight_snapshot(limit=14)
@@ -886,9 +889,9 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         )
         system = (
             _WATCHER_SYSTEM + "\n\n" + _CHAT_SYSTEM_BASE + "\n\n"
-            + _build_watches_context(cfg, manager) + "\n\n" + observed_ctx
+            + _build_watches_context(cfg, manager, owner=owner) + "\n\n" + observed_ctx
         )
-        result = _complete_assistant_turn(system, messages, cfg, model)
+        result = _complete_assistant_turn(system, messages, cfg, model, owner=owner)
 
         # Persist the exchange on EVERY turn that had a user message — including degraded/error
         # turns — so a transient model hiccup can't punch a permanent hole in the saved chat.
@@ -905,26 +908,27 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             log.info("Watcher chat turn: user=%r → reply %d char(s), %d suggestion(s)",
                      str(last.get("content", ""))[:80], len(reply_text), n_sugg)
             try:
-                history = _load_watcher_history()
+                history = _load_watcher_history(owner)
                 # Stamp both turns so the UI can show "when" dividers on scroll-back. Keep the
                 # client's own ts if it sent one (the user typed slightly before we replied).
                 user_msg = dict(last)
                 user_msg.setdefault("ts", now)
                 history.append(user_msg)
                 history.append({"role": "assistant", "content": reply_text, "ts": now})
-                _save_watcher_history(history[-200:])
+                _save_watcher_history(history[-200:], owner)
             except Exception as exc:
                 log.warning("Watcher chat: could not persist turn: %s", exc)
         result.pop("raw", None)
         return result
 
     @app.get("/api/oversight/chat/history")
-    def get_watcher_history():
-        return _load_watcher_history()
+    def get_watcher_history(owner: str | None = None):
+        # owner scopes to one Telegram person's thread; the desktop dock omits it (main thread).
+        return _load_watcher_history(str(owner).strip() if owner else None)
 
     @app.delete("/api/oversight/chat/history")
-    def clear_watcher_history():
-        _save_watcher_history([])
+    def clear_watcher_history(owner: str | None = None):
+        _save_watcher_history([], str(owner).strip() if owner else None)
         return {"ok": True}
 
     @app.post("/api/bug/report")
@@ -1088,7 +1092,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                       "calls": spend.get("calls", 0)},
             "telegram": {"chat_id": tg.chat_id, "token_set": bool(tg.bot_token),
                          "token_hint": _mask(tg.bot_token),
-                         "two_way": bool(getattr(tg, "two_way", False))},
+                         "two_way": bool(getattr(tg, "two_way", False)),
+                         "allowed_chat_ids": list(getattr(tg, "allowed_chat_ids", []) or [])},
             "email": {"smtp_server": em.smtp_server, "smtp_port": em.smtp_port,
                       "from_address": em.from_address, "to_address": em.to_address,
                       "password_set": bool(em.app_password)},
@@ -1116,6 +1121,13 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             cfg.notifications.telegram.bot_token = tg["bot_token"].strip()
         if "two_way" in tg:
             cfg.notifications.telegram.two_way = bool(tg["two_way"])
+        if "allowed_chat_ids" in tg:
+            # Accept a list or a comma/space-separated string from the UI field.
+            raw = tg["allowed_chat_ids"]
+            ids = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw or ""))
+            cfg.notifications.telegram.allowed_chat_ids = [
+                str(c).strip() for c in ids if str(c).strip()
+            ]
 
         em = body.get("email") or {}
         for f in ("smtp_server", "from_address", "to_address"):
@@ -1605,19 +1617,31 @@ from web_watcher import paths
 _WATCHER_HISTORY_PATH = paths.watcher_history_path()
 
 
-def _load_watcher_history() -> list:
+def _history_path(owner: str | None = None):
+    """Where a conversation is stored. The desktop dock (owner=None) uses the main file; each
+    Telegram person (owner = their chat_id) gets their OWN thread, so two people sharing the bot
+    don't see each other's conversation. The owner is sanitized to safe filename characters."""
+    if not owner:
+        return _WATCHER_HISTORY_PATH
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(owner))[:40] or "user"
+    return _WATCHER_HISTORY_PATH.with_name(f"watcher_history_{safe}.json")
+
+
+def _load_watcher_history(owner: str | None = None) -> list:
     try:
-        if _WATCHER_HISTORY_PATH.exists():
-            return json.loads(_WATCHER_HISTORY_PATH.read_text(encoding="utf-8"))
+        p = _history_path(owner)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         pass
     return []
 
 
-def _save_watcher_history(history: list) -> None:
+def _save_watcher_history(history: list, owner: str | None = None) -> None:
     try:
-        _WATCHER_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _WATCHER_HISTORY_PATH.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+        p = _history_path(owner)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log.warning("Could not save watcher history: %s", exc)
 
@@ -1774,10 +1798,22 @@ def _watch_search_terms(w) -> list[str]:
     return terms
 
 
-def _build_watches_context(cfg, manager) -> str:
+def _watches_for_owner(cfg, owner: str | None):
+    """The watches an assistant turn may see/act on. owner=None (the desktop dashboard) → ALL.
+    owner set (a Telegram sender's chat_id) → ONLY that person's watches, so the buddy sees
+    just his. An empty-owner watch is unassigned and never shown to a specific Telegram user."""
+    if not owner:
+        return list(cfg.watches)
+    return [w for w in cfg.watches if str(getattr(w, "owner", "") or "") == str(owner)]
+
+
+def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
     """Render the user's watches IN FULL, each with a HEALTH line (state + last-run
     result/error + matches found), for the assistant/Watcher system prompt. Shared by
-    the main assistant and the oversight Watcher so both review against the same facts."""
+    the main assistant and the oversight Watcher so both review against the same facts.
+
+    owner scopes the list (see _watches_for_owner): the desktop shows all; a Telegram user
+    sees only their own."""
     from web_watcher.storage import get_last_run, watch_stats
     try:
         job_map = {j["watch_name"]: j for j in manager.get_job_info()}
@@ -1833,8 +1869,10 @@ def _build_watches_context(cfg, manager) -> str:
             lines.append(f"      judgment_prompt: {w.judgment_prompt[:200]}")
         return "\n".join(lines)
 
+    scoped = _watches_for_owner(cfg, owner)
     body = (
-        "EXISTING WATCHES: none configured yet." if not cfg.watches else
+        ("EXISTING WATCHES: none assigned to you yet — ask the owner to assign you some in the "
+         "Web Watcher app." if owner else "EXISTING WATCHES: none configured yet.") if not scoped else
         "EXISTING WATCHES (edit one via action:\"update\"; manage via watch_actions; "
         "use the health line to review/advise; don't duplicate). When the user asks what "
         "you're searching for / what the search terms are / which cars/items you're "
@@ -1842,7 +1880,7 @@ def _build_watches_context(cfg, manager) -> str:
         "back in plain words. Do NOT run a listing_query for that (a listing_query looks up "
         "what's been FOUND, not what you're searching for), and do NOT propose an update "
         "unless they ask to change something:\n"
-        + "\n".join(_watch_summary(w) for w in cfg.watches)
+        + "\n".join(_watch_summary(w) for w in scoped)
     )
     return body + "\n\n" + _learned_sites_context()
 
@@ -2135,6 +2173,22 @@ _COMMIT_RE = re.compile(
 # for short-term back-references ("it", "that one") without dragging in stale, unrelated history.
 # ~7 exchanges (user+assistant pairs).
 _CHAT_CONTEXT_MESSAGES = 14
+# The 14-message cap exists because a local 14b model has a small context window and both
+# loses focus and eventually overflows when fed more. A cloud model (Claude, 200k context)
+# has neither problem, so when the chat role is routed there we remember far more of the
+# conversation. Kept bounded (not "everything") so cost + latency stay predictable.
+_CHAT_CONTEXT_MESSAGES_CLOUD = 60
+
+
+def _chat_context_limit(cfg) -> int:
+    """How many recent messages to feed the assistant — more when chat runs on Claude."""
+    try:
+        from web_watcher import llm
+        if llm.resolve_route(cfg, "chat")[0] == "anthropic":
+            return _CHAT_CONTEXT_MESSAGES_CLOUD
+    except Exception:
+        pass
+    return _CHAT_CONTEXT_MESSAGES
 
 
 def _reply_commits_to_action(message: str) -> bool:
@@ -2358,19 +2412,16 @@ def _converse_focus_line(focus: str | None, conv: list) -> str:
 
 def _chat_reply_natural(system: str, messages: list, model: str):
     """Phase 1 — a natural-language reply (NO forced JSON). Returns (text, eval, prompt, dur)."""
-    payload = {
-        "model":    model,
-        "messages": [{"role": "system", "content": system + "\n\n" + _CONVERSE_OVERRIDE},
-                     *messages],
-        "stream":   False,
-    }
-    with httpx.Client(timeout=90.0) as client:
-        r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-        r.raise_for_status()
-    resp = r.json()
-    return (_prose(resp["message"]["content"]),
-            resp.get("eval_count", 0), resp.get("prompt_eval_count", 0),
-            resp.get("eval_duration", 0))
+    # Routed through the provider seam: with the "chat" role pointed at Anthropic this is the
+    # single biggest latency win in the app (a local 14b turn takes seconds; Claude answers in
+    # well under one) and it falls back to the local model automatically. See llm.py.
+    from web_watcher import llm
+    text = llm.chat(
+        [{"role": "system", "content": system + "\n\n" + _CONVERSE_OVERRIDE}, *messages],
+        role="chat", local_model=model, cfg=_load_cfg(), timeout=90.0, cache_system=True,
+    )
+    # Token counts are an Ollama-only diagnostic; the cloud path simply reports none.
+    return (_prose(text), 0, 0, 0)
 
 
 def _extract_watch_action(messages: list, reply: str, cfg, model: str,
@@ -2393,17 +2444,14 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
         focus_line = "\n\nCURRENTLY IN FOCUS: (none yet)"
     system = (_EXTRACT_SYSTEM + "\n\n" + _watches_config_context(cfg) + focus_line
               + "\n\nThe assistant just told the user:\n\"" + (reply or "") + "\"")
-    payload = {
-        "model":    model,
-        "messages": [{"role": "system", "content": system}, *messages],
-        "stream":   False,
-        "format":   "json",
-    }
     try:
-        with httpx.Client(timeout=60.0) as client:
-            r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            r.raise_for_status()
-        data = _parse_chat_response(r.json()["message"]["content"])
+        from web_watcher import llm
+        content = llm.chat(
+            [{"role": "system", "content": system}, *messages],
+            role="chat", local_model=model, cfg=cfg,
+            format_json=True, timeout=60.0,
+        )
+        data = _parse_chat_response(content)
     except Exception as exc:
         log.warning("action-extraction failed: %s", exc)
         return {}
@@ -2461,18 +2509,32 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
     return {}
 
 
-def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> dict:
+def _is_owned(name: str, cfg, owner: str | None) -> bool:
+    """True if this watch may be acted on in the current scope. owner=None (desktop) → any
+    watch. owner set (a Telegram person) → only a watch whose owner is that same chat_id, so
+    the buddy can never start/stop/edit/delete someone else's watch."""
+    if not owner:
+        return True
+    w = next((x for x in cfg.watches if x.name == name), None)
+    return bool(w and str(getattr(w, "owner", "") or "") == str(owner))
+
+
+def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
+                             owner: str | None = None) -> dict:
     """Run one assistant turn as two phases: (1) a natural-language reply that focuses purely
     on understanding the user and tracking which watch is meant, then (2) a dedicated extraction
     that turns any concrete request into a validated watch_suggestion / watch_actions /
     listing_query. Returns the response dict (plus a private "raw" the caller persists then
-    drops). Powers the oversight Watcher chat. Never raises."""
+    drops). Powers the oversight Watcher chat. Never raises.
+
+    owner (a Telegram sender's chat_id) scopes EVERYTHING to that person: creates are stamped
+    with their owner, and edits/actions/lookups on watches they don't own are dropped."""
     # Only consider the RECENT tail of the conversation. The chat UI never clears itself, so the
     # client sends the ENTIRE history every turn; feeding all of it to the model makes it look too
     # far back (stale focus — it grabs a watch mentioned 20 messages ago — and eventually overflows
     # context). Keep the last _CHAT_CONTEXT_MESSAGES so "it"/"that one" resolve to the current
     # thread, not ancient history.
-    messages = (messages or [])[-_CHAT_CONTEXT_MESSAGES:]
+    messages = (messages or [])[-_chat_context_limit(cfg):]
     # Clean the replayed context: older assistant turns may be raw JSON envelopes, which
     # otherwise confuse the model about which watch is in play.
     conv = [({**m, "content": _prose(m.get("content"))}
@@ -2488,7 +2550,13 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
         listings = None
         lq = data.get("listing_query")
         if isinstance(lq, dict):
-            listings = _run_listing_query(lq)
+            # Scope a Telegram person's "what have you found" to THEIR watches: a lookup must
+            # name a watch they own, otherwise it could surface everyone's finds. Desktop is open.
+            if owner and not _is_owned(_resolve_watch_name(lq.get("watch", "") or "", cfg) or "",
+                                       cfg, owner):
+                log.info("chat: dropped listing lookup for %s — no owned watch named", owner)
+            else:
+                listings = _run_listing_query(lq)
 
         _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop"}
         latest_user = _latest_user_text(messages)
@@ -2505,6 +2573,9 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
                          act, a.get("name"))
                 continue
             real = _resolve_watch_name(a.get("name", ""), cfg)   # tolerate model name drift
+            if real and not _is_owned(real, cfg, owner):
+                log.info("chat: dropped '%s' on %r — not owned by %s", act, real, owner)
+                continue
             if real:
                 watch_actions.append({"action": act, "name": real})
         watch_actions = watch_actions or None
@@ -2526,6 +2597,23 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str) -> di
         # (the "2 edit cards I wasn't talking about" bug); an edit survives only when the user's
         # own latest message asks for a change AND points at that watch. Creates are untouched.
         suggestions = _ground_update_suggestions(suggestions, messages, focus)
+        # Ownership scope (Telegram): a person may only EDIT their own watches, and any watch
+        # they CREATE is stamped as theirs so it shows up under them next time. Desktop
+        # (owner=None) is unaffected.
+        if owner:
+            scoped = []
+            for s in suggestions:
+                if not isinstance(s, dict):
+                    continue
+                if (s.get("action") or "create") == "update":
+                    if _is_owned(s.get("name", ""), cfg, owner):
+                        scoped.append(s)
+                    else:
+                        log.info("chat: dropped edit of %r — not owned by %s", s.get("name"), owner)
+                else:
+                    s["owner"] = str(owner)      # a buddy-created watch belongs to the buddy
+                    scoped.append(s)
+            suggestions = scoped
         # Confirm-before-creating: if the assistant is ASKING the user to clarify (and NOT also
         # committing to the watch), hold any 'create' suggestion until they answer — so a truly
         # half-formed request ("guitars?") gets clarified first instead of instantly spawning a

@@ -11,6 +11,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.45.0-alpha] — 2026-08-24 (Chat with it on Telegram, per-person watches, safer Facebook)
+
+### New — text back and forth with The Watcher on Telegram
+- Turn on **"Text back and forth with The Watcher"** (Settings → Notifications & Keys) and your
+  bot becomes a two-way chat: ask how your watches are doing, change what it's looking for, or ask
+  about a listing it just sent — the same assistant as the in-app chat, right on your phone. Reply
+  **yes** to a suggestion and it actually sets the watch up for you.
+- **Only people you allow** can talk to the bot — your chat, plus any extra IDs you add. Everyone
+  else is ignored.
+
+### New — hand it to someone: per-person watches
+- Give a watch an **Owner** (a person's Telegram chat ID) and they see and manage **only their
+  own** watches from the bot, on their own private chat thread. You can hand the bot to a friend
+  and they won't see — or be able to touch — anyone else's. The desktop app still shows everything.
+
+### New — optional Claude for chat (faster replies, longer memory)
+- Point the chat at Claude and replies come back much faster, and it remembers far more of the
+  conversation. Off by default; runs fully local unless you turn it on, and falls back to local
+  automatically if the internet or your key is unavailable.
+
+### Safer Facebook
+- If Facebook ever shows a security check, Web Watcher now **stops all Facebook activity** and
+  keeps it stopped until you say it's OK — it won't quietly start poking a flagged account again,
+  even after a restart. You'll get an alert and a **Resume Facebook** button once you've checked
+  the account.
+
+### Fixed
+- **Category watches browse like a person again.** A "cars + trucks near me under $10k" watch (no
+  keyword) was jumping straight to a results link; now it opens the site, clicks the category, and
+  sets your ZIP/distance/price in the site's own filters — verified end to end on Craigslist. And
+  it moves the mouse to click instead of teleporting, which is far less bot-like.
+- **Won't dump your search into a "city" box.** On location/city search boxes (like weather.gov,
+  including direct forecast links) it now types only the place, never your topic words.
+- **Every Settings switch works.** They were toggling twice per click and landing back where they
+  started — so they looked dead.
+
+---
+
 ## [0.44.0-alpha] — 2026-08-23 (Set up phone alerts in the app — and optional Claude)
 
 ### New — a place to enter your keys: Settings → "Notifications & Keys"

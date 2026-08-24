@@ -61,6 +61,9 @@ class ServiceManager:
         self._oversight       = None   # OversightAgent — the visible narrator over all watches
         self._telegram        = None   # TelegramBridge — inbound phone chat (opt-in)
         self._orchestrator    = None   # Orchestrator — the single driver (opt-in)
+        # Global master switch. True = ALL watching is paused (scheduled jobs, continuous loops,
+        # and the driver) for everyone; persisted so it survives a restart. Admin-only at the API.
+        self._paused          = False
         self._ollama_proc:    Optional[subprocess.Popen] = None
         self._ollama_adopted  = False   # True when we adopted an existing instance
         # Facebook (login-profile) connect flow state, surfaced via get_statuses().
@@ -90,6 +93,10 @@ class ServiceManager:
         self._start_ollama()    # first: scheduler needs Ollama available
         self._start_server()
         self._start_scheduler()
+        # Respect a pause the user left in place before closing the app: if the master switch was
+        # off, re-pause after the scheduler comes up so nothing sweeps until they resume.
+        if self._load_paused():
+            self.pause_all()
         self._start_update_checker()
         self._start_telegram()  # last: the bridge talks to the server we just started
 
@@ -384,6 +391,9 @@ class ServiceManager:
     def run_watch_now(self, watch_name: str) -> None:
         if self._scheduler is None:
             raise RuntimeError("Scheduler is not running")
+        if self._paused:
+            log.info("The Watcher is paused — not running %r now; resume watching first", watch_name)
+            return
         self._scheduler.run_now(watch_name)
 
     def get_job_info(self) -> list[dict]:
@@ -410,6 +420,11 @@ class ServiceManager:
     def start_continuous(self, watch_name: str) -> None:
         if self._scheduler is None:
             raise RuntimeError("Scheduler is not running")
+        # Master switch off → nothing watches. Don't quietly start one watch behind a global
+        # pause; the caller (dashboard/bot) tells the user to resume The Watcher first.
+        if self._paused:
+            log.info("The Watcher is paused — not starting %r; resume watching first", watch_name)
+            return
         # While the orchestrator is driving, it owns the continuous watches — starting a
         # per-watch thread too would double-sweep the same site. Ignore (The Watcher is
         # already on it).
@@ -463,6 +478,101 @@ class ServiceManager:
         if self._orchestrator is None:
             return {"running": False, "current": None, "cycles": 0, "topics": []}
         return self._orchestrator.status()
+
+    # ------------------------------------------------------------------
+    # Global master switch — "The Watcher" watching vs paused (the whole program)
+    # ------------------------------------------------------------------
+    #
+    # Two distinct levels the user controls:
+    #   1. THIS master switch — is the program watching at all? Pausing stops EVERYTHING for
+    #      everyone: scheduled jobs, continuous loops, and the driver. Admin-only at the API.
+    #   2. Individual watches — enable/disable/start/stop one watch, scoped to its owner.
+    # Persisted so a pause survives a restart (an end user pausing overnight stays paused).
+
+    def _paused_flag_path(self):
+        from web_watcher import paths
+        return paths.data_dir() / "watcher_paused.flag"
+
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def _load_paused(self) -> bool:
+        try:
+            return self._paused_flag_path().exists()
+        except Exception:
+            return False
+
+    def _persist_paused(self, paused: bool) -> None:
+        try:
+            p = self._paused_flag_path()
+            if paused:
+                p.write_text("paused\n", encoding="utf-8")
+            elif p.exists():
+                p.unlink()
+        except Exception as exc:
+            log.warning("could not persist paused state: %s", exc)
+
+    def _has_enabled_continuous(self) -> bool:
+        try:
+            from web_watcher.config import load as load_config
+            return any(getattr(w, "enabled", True) and getattr(w, "mode", "") == "continuous"
+                       for w in load_config().watches)
+        except Exception:
+            return False
+
+    def pause_all(self) -> None:
+        """Master switch OFF: stop ALL watching — the driver, every continuous loop, and every
+        scheduled job — for everyone. Persisted. Individual watch settings are untouched, so a
+        later resume brings back exactly what was enabled."""
+        self._paused = True
+        self._persist_paused(True)
+        self._stop_orchestrator()
+        if self._scheduler is not None:
+            try:
+                self._scheduler.stop_all_continuous()
+            except Exception as exc:
+                log.warning("pause: could not stop continuous loops: %s", exc)
+            try:
+                self._scheduler.pause_jobs()
+            except Exception as exc:
+                log.warning("pause: could not pause scheduled jobs: %s", exc)
+        self._nudge_oversight()
+        log.info("The Watcher PAUSED — all watching stopped (master switch off)")
+
+    def resume_all(self) -> bool:
+        """Master switch ON: resume watching. Unpause scheduled jobs and, if any enabled
+        continuous watches exist, hand them back to the driver. Returns True if the driver started."""
+        self._paused = False
+        self._persist_paused(False)
+        if self._scheduler is not None:
+            try:
+                self._scheduler.resume_jobs()
+            except Exception as exc:
+                log.warning("resume: could not resume scheduled jobs: %s", exc)
+        started = False
+        try:
+            if self._has_enabled_continuous():
+                started = self.start_orchestrator()
+        except Exception as exc:
+            log.warning("resume: could not start the driver: %s", exc)
+        self._nudge_oversight()
+        log.info("The Watcher RESUMED — watching active (master switch on)")
+        return started
+
+    def watcher_status(self) -> dict:
+        """Unified global status for the dashboard + bot: is the program watching, and what's
+        actually running underneath. 'running' == not paused (the user-facing on/off)."""
+        st = {"running": (not self._paused), "paused": self._paused,
+              "driver_running": self.orchestrator_running()}
+        try:
+            st["current"] = self.orchestrator_status().get("current")
+        except Exception:
+            st["current"] = None
+        try:
+            st["continuous_running"] = self._scheduler.running_continuous() if self._scheduler else []
+        except Exception:
+            st["continuous_running"] = []
+        return st
 
     def _nudge_oversight(self) -> None:
         """Wake The Watcher so it narrates a start/stop near-instantly instead of on its

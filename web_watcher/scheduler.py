@@ -176,6 +176,23 @@ class WatchScheduler:
             self._apscheduler.shutdown(wait=False)
             log.info("Scheduler stopped")
 
+    def pause_jobs(self) -> None:
+        """Pause firing of all scheduled (interval/cron) jobs — the scheduled half of a global
+        pause. Running jobs finish; nothing new fires until resume_jobs()."""
+        try:
+            if self._apscheduler.running:
+                self._apscheduler.pause()
+        except Exception as exc:
+            log.warning("could not pause scheduled jobs: %s", exc)
+
+    def resume_jobs(self) -> None:
+        """Resume firing scheduled jobs after a global pause."""
+        try:
+            if self._apscheduler.running:
+                self._apscheduler.resume()
+        except Exception as exc:
+            log.warning("could not resume scheduled jobs: %s", exc)
+
     def reload(self) -> None:
         """Remove all jobs and re-read config.yaml. Call after saving config changes."""
         # Serialize the entire stop-then-restart so two concurrent reloads can't

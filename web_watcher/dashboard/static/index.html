@@ -668,7 +668,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
         </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <button id="watches-run-btn" onclick="toggleWatcherRun()"
-                  title="Start or stop The Watcher driving your watches">▶ Start watching</button>
+                  title="Master switch: start or pause ALL watching (every watch, for everyone)">▶ Start watching</button>
           <button class="watcher-ask" onclick="openWatcherDock()">💬 Ask The Watcher</button>
         </div>
       </div>
@@ -918,7 +918,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   <div class="dock-head">
     <span class="dock-title"><span class="launcher-orb sm idle" id="dock-orb"></span> The Watcher</span>
     <div style="display:flex;align-items:center;gap:8px">
-      <button id="dock-run-btn" onclick="toggleWatcherRun()" title="Start or stop The Watcher driving your watches"
+      <button id="dock-run-btn" onclick="toggleWatcherRun()" title="Master switch: start or pause ALL watching (every watch, for everyone)"
               style="font-size:11px;padding:4px 11px">▶ Start watching</button>
       <button class="dock-expand" id="dock-expand-btn" onclick="toggleDockExpand()" title="Expand to a side panel">⤢</button>
       <button class="dock-close" onclick="closeWatcherDock()" title="Close">×</button>
@@ -2827,15 +2827,17 @@ function loadAccessibilitySettings() {
 
 // ============================================================ ORCHESTRATOR
 async function setOrchestrator(on) {
+  // The global master switch: "watching" vs "paused". ON resumes ALL watching (scheduled +
+  // continuous + driver); OFF pauses everything for everyone. See /api/watcher.
   try {
-    const r = await api('/api/orchestrator/' + (on ? 'start' : 'stop'), { method: 'POST' });
+    const r = await api('/api/watcher/' + (on ? 'resume' : 'pause'), { method: 'POST' });
     _applyOrchState(r.running);
-    loadOversight();   // surface The Watcher's "taking the wheel" line right away
+    loadOversight();   // surface The Watcher's start/stop line right away
   } catch (e) {
     _applyOrchState(!on);   // put the button back the way it was on failure
   }
 }
-let _orchRunning = false;   // is The Watcher currently driving the watches?
+let _orchRunning = false;   // is The Watcher currently watching (master switch on)?
 let _orchCurrent = null;    // name of the watch it's checking right now (status column)
 function _applyOrchState(running) {
   _orchRunning = !!running;
@@ -2859,7 +2861,7 @@ async function toggleWatcherRun() {
 }
 async function loadOrchestrator() {
   try {
-    const s = await api('/api/orchestrator');
+    const s = await api('/api/watcher/status');
     // Re-render the watches table when the run-state or the watch being checked changes,
     // so the Status column tracks The Watcher in real time (this polls every 8s).
     const changed = (s.running !== _orchRunning) || ((s.current || null) !== _orchCurrent);

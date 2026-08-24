@@ -159,6 +159,50 @@ def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     assert sent == ["Sure, boats instead."]
 
 
+def test_reversible_action_applies_immediately(monkeypatch):
+    # "stop my truck watch" → the server grounds+scopes it; the bridge carries it out at once.
+    b = _bridge()
+    posted, sent = [], []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_ask_watcher",
+                        lambda t, o="", n="": {"message": "On it.",
+                                               "watch_actions": [{"action": "stop", "name": "Trucks"}]})
+
+    class _R:
+        status_code = 200
+        def json(self): return {"ok": True}
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.append(url) or _R())
+    b._handle_message("stop my truck watch")
+    assert any("/api/watches/Trucks/action" in u for u in posted)   # hit the action endpoint
+    assert b._pending is None and b._pending_deletes is None         # nothing left hanging
+    assert "stopped" in sent[0].lower()
+
+
+def test_delete_waits_for_a_yes(monkeypatch):
+    b = _bridge()
+    posted, sent = [], []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_ask_watcher",
+                        lambda t, o="", n="": {"message": "",
+                                               "watch_actions": [{"action": "delete", "name": "Trucks"}]})
+
+    class _R:
+        status_code = 200
+        def json(self): return {"ok": True}
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.append(url) or _R())
+    b._handle_message("delete my truck watch")
+    assert posted == []                                    # NOT applied yet — waiting for a yes
+    assert b._pending_deletes == [{"action": "delete", "name": "Trucks"}]
+    assert "yes" in sent[0].lower()
+    b._handle_message("yes")                               # confirm
+    assert any("/api/watches/Trucks/action" in u for u in posted)
+    assert b._pending_deletes is None
+
+
 def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
     b = _bridge()
     monkeypatch.setattr(b, "_send", lambda t, chat_id="": None)

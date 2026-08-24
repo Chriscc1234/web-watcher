@@ -26,7 +26,8 @@ Design notes
   _authorized                ~L165  The sender allowlist (security boundary)
   _notify_access_request     ~L205  A stranger knocked → alert the admin + park for approval
   _handle_message            ~L180  One inbound message → assistant turn → reply
-  _ask_watcher               ~L235  Calls the app's own chat API (shared history + brain)
+  _apply_actions             ~L255  Carry out grounded start/stop/enable/disable/delete actions
+  _ask_watcher               ~L290  Calls the app's own chat API (shared history + brain)
   _send / _typing            ~L285  Outbound helpers (per-sender target + 4096-char chunking)
 ──────────────────────────────────────────────────────────────────────────────
 """
@@ -82,6 +83,9 @@ class TelegramBridge:
         # Watch changes the assistant proposed and is waiting on a yes/no for. The dashboard
         # shows these as click-to-confirm cards; on a phone the confirmation is the next message.
         self._pending: list[dict] | None = None
+        # Destructive lifecycle actions (delete) held for a yes. Reversible ones (start/stop/
+        # enable/disable) are applied immediately — no confirmation needed.
+        self._pending_deletes: list[dict] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -188,13 +192,19 @@ class TelegramBridge:
         owner = sender or self.chat_id      # scope this turn to the person who sent it
         to = sender or self.chat_id         # ...and reply to THEM, not always the alert chat
 
-        # A yes to a proposal we're holding APPLIES it — that's how a watch gets created or
-        # edited from the phone, standing in for the dashboard's confirm button.
-        if self._pending:
-            pending, self._pending = self._pending, None
+        # A yes to a proposal we're holding APPLIES it — that's how a watch gets created, edited,
+        # or deleted from the phone, standing in for the dashboard's confirm button.
+        if self._pending or self._pending_deletes:
+            sugg_pending, del_pending = self._pending, self._pending_deletes
+            self._pending, self._pending_deletes = None, None
             if _is_affirmative(text):
                 self._typing(to)
-                self._send(self._apply_pending(pending), to)
+                out = []
+                if del_pending:
+                    out.append(self._apply_actions(del_pending))
+                if sugg_pending:
+                    out.append(self._apply_pending(sugg_pending))
+                self._send(" ".join(x for x in out if x) or "Done.", to)
                 return
             if _is_negative(text):
                 self._send("Okay, left everything as it was.", to)
@@ -210,8 +220,22 @@ class TelegramBridge:
             return
 
         reply = (result.get("message") or "").strip()
+
+        # Lifecycle actions the assistant grounded + owner-scoped for us. Reversible ones apply
+        # right away (snappy — no "are you sure?" for a start/stop); delete needs a yes.
+        actions = [a for a in (result.get("watch_actions") or []) if isinstance(a, dict)]
+        deletes    = [a for a in actions if str(a.get("action", "")).lower() == "delete"]
+        reversible = [a for a in actions if str(a.get("action", "")).lower()
+                      in ("start", "stop", "enable", "disable")]
+        if reversible:
+            reply = (reply + "\n\n" + self._apply_actions(reversible)).strip()
+
         sugg = _suggestions_of(result)
-        if sugg:
+        if deletes:
+            self._pending_deletes = deletes
+            names = ", ".join(f"“{a.get('name')}”" for a in deletes)
+            reply = (reply + f"\n\n🗑 Delete {names}? Reply *yes* to confirm.").strip()
+        elif sugg:
             self._pending = sugg
             reply = (reply + "\n\n" + _describe_suggestions(result)).strip()
         self._send(reply or "(no reply)", to)
@@ -273,6 +297,41 @@ class TelegramBridge:
         # Let the knocker know a human has to approve them, so silence doesn't read as broken.
         self._send("Thanks — you're not on the allow-list yet. I've asked the owner to grant "
                    "you access.", chat_id)
+
+    def _apply_actions(self, actions: list[dict]) -> str:
+        """Apply grounded lifecycle actions (start/stop/enable/disable/delete) through the app's
+        own mode-aware endpoint — the same one the dashboard buttons use. Ownership was already
+        enforced server-side when the action was produced, so we just carry it out and report."""
+        labels = {"start": "started", "stop": "stopped", "enable": "enabled",
+                  "disable": "disabled", "delete": "deleted"}
+        done, failed = [], []
+        for a in actions:
+            name = str(a.get("name") or "").strip()
+            act  = str(a.get("action") or "").strip().lower()
+            if not name or not act:
+                continue
+            try:
+                r = httpx.post(f"{self.dashboard_url}/api/watches/{quote(name)}/action",
+                               json={"action": act}, timeout=30.0)
+                if r.status_code < 300:
+                    note = ""
+                    try:
+                        if act == "start" and (r.json() or {}).get("paused"):
+                            note = " (the whole Watcher is paused — resume it to actually run)"
+                    except Exception:
+                        pass
+                    done.append(f"{labels.get(act, act)} “{name}”{note}")
+                else:
+                    failed.append(name)
+            except Exception as exc:
+                log.warning("Telegram: action %s on %r failed: %s", act, name, exc)
+                failed.append(f"{name} ({exc})")
+        parts = []
+        if done:
+            parts.append("✅ " + "; ".join(done) + ".")
+        if failed:
+            parts.append("⚠️ Couldn't: " + ", ".join(failed) + ".")
+        return " ".join(parts)
 
     def _ask_watcher(self, text: str, owner: str = "", owner_name: str = "") -> dict:
         """Run the message through the app's OWN chat endpoint, so Telegram and the in-app dock

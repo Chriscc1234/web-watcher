@@ -113,6 +113,23 @@ an AI model reads the page to decide if the user's condition is met. If it is, \
 a notification is sent via Telegram and/or email.
 
 ════════════════════════════════════════
+WHAT YOU CAN DO IN CHAT (your tools)
+════════════════════════════════════════
+When the user asks what you can do, answer plainly from this list — don't invent tools.
+  • Set up a new watch, or change / rename an existing one.
+  • Start, stop, pause, enable, disable, or delete an individual watch.
+  • Look up what a watch has found and share the links + a quick verdict.
+  • Report Claude spend for the month (when cloud is on).
+TWO LEVELS OF START/STOP — keep them straight:
+  1. THE WHOLE WATCHER (a master switch): "pause everything" / "stop the whole Watcher" /
+     "resume watching" pauses or resumes ALL watching for everyone. This is OWNER-ONLY.
+  2. A PERSON'S OWN WATCHES: "stop my truck watch" / "pause my watches" affects only the
+     watches that belong to whoever is talking. Everyone can do this to their own.
+If someone who isn't the owner asks to stop the whole Watcher, tell them only the owner can
+do that, but you can stop their own watches. If it's unclear whether they mean the whole
+Watcher or just their watches, ask which before doing anything.
+
+════════════════════════════════════════
 TWO INDEPENDENT CHOICES: how it reads, and how often it runs
 ════════════════════════════════════════
 Don't confuse these. Every watch picks one of each.
@@ -690,6 +707,43 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         bg.add_task(manager.stop_continuous, watch_name)
         return {"queued": "stop", "watch": watch_name}
 
+    @app.post("/api/watches/{watch_name}/action")
+    def watch_lifecycle_action(watch_name: str, body: dict, bg: BackgroundTasks):
+        """One mode-aware lifecycle control for a single watch: enable | disable | start | stop |
+        delete. The bot and dashboard get ONE tool that does the right thing for a continuous vs a
+        scheduled watch. OWNERSHIP is enforced by the chat layer before this is called."""
+        from web_watcher.config import load, save
+        action = str(body.get("action") or "").strip().lower()
+        cfg = load()
+        w = next((x for x in cfg.watches if x.name == watch_name), None)
+        if w is None:
+            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+        continuous = getattr(w, "mode", "") == "continuous"
+        if action == "delete":
+            cfg.watches = [x for x in cfg.watches if x.name != watch_name]
+            save(cfg)
+            bg.add_task(manager.reload_scheduler)
+            return {"ok": True, "name": watch_name, "action": "delete"}
+        if action in ("enable", "start"):
+            if not w.enabled:
+                w.enabled = True
+                save(cfg)
+                bg.add_task(manager.reload_scheduler)
+            if action == "start" and continuous:
+                bg.add_task(manager.start_continuous, watch_name)
+            # If the whole Watcher is paused, a single start won't actually sweep — surface that so
+            # the caller can tell the user to resume the master switch first.
+            return {"ok": True, "name": watch_name, "action": action, "paused": manager.is_paused()}
+        if action in ("disable", "stop"):
+            if action == "stop" and continuous:
+                bg.add_task(manager.stop_continuous, watch_name)     # transient: stop the loop now
+            elif w.enabled:
+                w.enabled = False                                    # scheduled: disable to stop it
+                save(cfg)
+                bg.add_task(manager.reload_scheduler)
+            return {"ok": True, "name": watch_name, "action": action}
+        raise HTTPException(400, detail=f"Unknown watch action {action!r}")
+
     @app.post("/api/connect/facebook")
     def connect_facebook(bg: BackgroundTasks):
         bg.add_task(manager.connect_facebook)
@@ -897,6 +951,20 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         )
         result = _complete_assistant_turn(system, messages, cfg, model, owner=owner)
 
+        # The master switch (pause/resume the WHOLE Watcher) is executed here, server-side, so it
+        # works identically from the desktop dock and the phone. _complete_assistant_turn only ever
+        # sets program_action after confirming the requester is the admin, so this is safe to run.
+        prog = result.pop("program_action", None)
+        if prog in ("pause", "resume"):
+            try:
+                if prog == "pause":
+                    manager.pause_all()
+                else:
+                    manager.resume_all()
+            except Exception as exc:
+                log.warning("could not %s the Watcher from chat: %s", prog, exc)
+                result["message"] = f"I couldn't {prog} the Watcher just now: {exc}"
+
         # Persist the exchange on EVERY turn that had a user message — including degraded/error
         # turns — so a transient model hiccup can't punch a permanent hole in the saved chat.
         # (The old gate only saved when the turn fully succeeded and carried a private "raw", so
@@ -978,6 +1046,34 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         try:
             manager.stop_orchestrator()
             return {"ok": True, "running": False}
+        except Exception as exc:
+            raise HTTPException(409, detail=str(exc))
+
+    # --- The global master switch: is the whole Watcher watching, or paused? ---------
+    @app.get("/api/watcher/status")
+    def watcher_status():
+        try:
+            return manager.watcher_status()
+        except Exception:
+            return {"running": True, "paused": False, "driver_running": False,
+                    "current": None, "continuous_running": []}
+
+    @app.post("/api/watcher/pause")
+    def watcher_pause():
+        """Master switch OFF — pause ALL watching for everyone. Admin action (the desktop, or the
+        bot's admin path; the chat layer enforces admin-only before ever calling this)."""
+        try:
+            manager.pause_all()
+            return {"ok": True, "paused": True, "running": False}
+        except Exception as exc:
+            raise HTTPException(409, detail=str(exc))
+
+    @app.post("/api/watcher/resume")
+    def watcher_resume():
+        """Master switch ON — resume watching."""
+        try:
+            started = manager.resume_all()
+            return {"ok": True, "paused": False, "running": True, "driver_started": started}
         except Exception as exc:
             raise HTTPException(409, detail=str(exc))
 
@@ -2579,6 +2675,53 @@ def _watch_referenced_in(text: str, name: str) -> bool:
     return hits >= min(2, len(toks))
 
 
+# ── Start/stop intent (the master switch vs a person's own watches) ───────────────
+# Two levels the user talks to: the WHOLE Watcher (admin-only master switch) and their OWN
+# watches. We classify this deterministically rather than trust the 14b — start/stop of everything
+# is too consequential to leave to a model that emits blank thoughts. See _classify_lifecycle.
+_STOP_VERB_RE  = re.compile(r"\b(stop|pause|halt|shut\s*(it|them|down|off)|turn\s*(it|them)?\s*off|"
+                            r"shut\s*down|standby|stand\s*down)\b", re.I)
+_START_VERB_RE = re.compile(r"\b(start|resume|unpause|un-?pause|turn\s*(it|them)?\s*(on|back\s*on)|"
+                            r"fire\s*up|kick\s*off|get\s*going|begin\s*watching|start\s*watching)\b", re.I)
+# "the whole thing" — the global program, not a single watch.
+_WHOLE_PROGRAM_RE = re.compile(
+    r"\b(everything|all\s+watching|all\s+the\s+watches|the\s+(whole|entire)\s+(watcher|thing|program|"
+    r"app)|the\s+watcher|it\s+all|all\s+of\s+it)\b", re.I)
+# "all my watches" — every watch the speaker owns (scoped, not global).
+_ALL_MINE_RE = re.compile(r"\b(all|both|every|each)\b[\w\s]{0,20}\b(my\s+|our\s+)?watch(es)?\b", re.I)
+
+
+def _classify_lifecycle(text: str):
+    """Classify a start/stop request into (verb, scope). verb is 'pause' or 'resume'; scope is
+    'program' (the whole Watcher), 'all_mine' (all the speaker's watches), or 'bare' (a lone
+    'stop'/'start' with no object). Returns (None, None) when the turn isn't a start/stop at all,
+    or (None,'ambiguous') when it mixes both verbs. A NAMED watch ('stop the truck watch') is left
+    to the normal action extractor — this only fires when no specific watch is named."""
+    t = text or ""
+    stop, start = bool(_STOP_VERB_RE.search(t)), bool(_START_VERB_RE.search(t))
+    if not (stop or start):
+        return (None, None)
+    if stop and start:
+        return (None, "ambiguous")             # "stop and restart" — let the model/user clarify
+    verb = "pause" if stop else "resume"
+    if _WHOLE_PROGRAM_RE.search(t):
+        return (verb, "program")
+    if _ALL_MINE_RE.search(t):
+        return (verb, "all_mine")
+    return (verb, "bare")
+
+
+def _is_admin_owner(owner, cfg) -> bool:
+    """The admin is the desktop dashboard (owner=None) or the main configured Telegram chat. Only
+    the admin may flip the global master switch; a buddy can only touch their own watches."""
+    if owner is None:
+        return True
+    try:
+        return str(owner) == str(cfg.notifications.telegram.chat_id or "")
+    except Exception:
+        return False
+
+
 # Words that mark a turn as worth escalating to cloud (create/search intent). Change-intent is
 # covered separately by _CHANGE_SIGNAL_RE; everyday chat (greetings, status, yes/no) matches
 # neither and stays local — fast and free.
@@ -2919,12 +3062,48 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
             seen = set(); uniq = [t for t in all_terms if not (t in seen or seen.add(t))]
             message += "\n\nI'll search a few ways to catch more of these: " + ", ".join(uniq) + "."
 
+        # ── Master switch vs "my watches" (deterministic — too consequential for the 14b) ──
+        # The whole-Watcher pause/resume is admin-only; a person's bare "stop" is scoped to their
+        # own watches, and an admin's ambiguous bare "stop" asks which they mean (the user's choice).
+        program_action = None
+        verb, scope = _classify_lifecycle(latest_user)
+        already_named = bool(watch_actions) or bool(suggestions)
+        if verb and scope and scope != "ambiguous":
+            is_admin = _is_admin_owner(owner, cfg)
+            act = "stop" if verb == "pause" else "start"
+            if scope == "program":
+                watch_actions, suggestions = None, []      # they meant the whole thing, not one watch
+                if is_admin:
+                    program_action = verb
+                    message = ("Pausing all watching now — nothing will sweep until you resume."
+                               if verb == "pause" else
+                               "Resuming — The Watcher is watching again.")
+                else:
+                    message = (f"Only the owner can {verb} the whole Watcher. I can {act} your own "
+                               f"watches though — just tell me to {act} my watches.")
+            elif scope == "all_mine":
+                suggestions = []
+                mine = _watches_for_owner(cfg, owner)
+                watch_actions = [{"action": act, "name": w.name} for w in mine] or None
+                message = (f"{act.title()}ing all {len(watch_actions)} of your watches."
+                           if watch_actions else "You don't have any watches yet.")
+            elif scope == "bare" and not already_named:
+                if is_admin:
+                    message = (f"Do you mean {verb} the **whole Watcher** (everything, for everyone), "
+                               f"or just your own watches?")     # ask when it's not obvious
+                else:
+                    mine = _watches_for_owner(cfg, owner)
+                    watch_actions = [{"action": act, "name": w.name} for w in mine] or None
+                    message = (f"{act.title()}ing your {len(watch_actions)} watch(es)."
+                               if watch_actions else "You don't have any watches yet.")
+
         return {
             "message":           message,
             "watch_suggestion":  suggestions[0] if suggestions else None,
             "watch_suggestions": suggestions or None,
             "listings":          listings,
             "watch_actions":     watch_actions,
+            "program_action":    program_action,
             "tokens":            eval_count,
             "prompt_tokens":     prompt_count,
             "duration_ms":       duration_ns // 1_000_000,

@@ -11,6 +11,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.46.0-alpha] — 2026-08-24 (Spend cap, a Chats console, and letting people in)
+
+### New — the Chats console: watch every conversation in one place
+- A new **Chats** tab shows every conversation with The Watcher — your own desktop chat plus a
+  separate thread for each person texting the bot. You see them all; each person on Telegram still
+  sees only their own. Click a thread to read the whole conversation.
+- **Step in to help.** Open anyone's thread and message them directly as The Watcher — it lands on
+  their phone and shows up in their thread. Handy when a friend is stuck and you want to give them
+  a hand without picking up your own phone.
+
+### New — let people in without editing settings
+- When someone new messages your bot, they're **not** let in automatically — but **you get a
+  Telegram alert** on your phone, and their request shows up at the top of the Chats tab. One click
+  **Allow** adds them; **Ignore** dismisses it. No more hunting for chat IDs to hand the bot to a
+  friend.
+
+### New — keep your Claude spending in check
+- Set a **monthly budget** (Settings → Notifications & Keys). When the month's estimated spend hits
+  your cap, chat automatically drops back to the free local model for the rest of the month — you
+  can't blow past the number you set.
+- **Pick the chat model** — Haiku (cheapest/fastest), Sonnet, or Opus — and see **"$X of $Y spent
+  this month (~$Z left)"** right on the page. You can also just ask the bot how much you've spent.
+
+### Fixed
+- **Replies now go to the right person.** When a friend texted the bot, the reply could go to your
+  phone instead of theirs — fixed; each person gets their own replies.
+
+---
+
 ## [0.45.0-alpha] — 2026-08-24 (Chat with it on Telegram, per-person watches, safer Facebook)
 
 ### New — text back and forth with The Watcher on Telegram

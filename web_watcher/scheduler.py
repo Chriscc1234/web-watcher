@@ -1481,7 +1481,6 @@ def _alert_new_listings(
     seen and re-surfaces next sweep, so a new listing is never silently swallowed.
     Returns the number of listings individually alerted.
     """
-    import html as _html
     from datetime import datetime as _dt
 
     ts = _dt.fromisoformat(run_ts)
@@ -1507,10 +1506,12 @@ def _alert_new_listings(
     _stars = lambda r: ("★" * r + "☆" * (5 - r)) if r else ""
 
     for l in head:
-        title = _html.escape(l.title or "(listing)")
-        price = _html.escape(l.price or "")
+        # Keep the summary RAW here — each notification channel escapes for its own format
+        # (email HTML, Telegram HTML). Pre-escaping here caused Telegram to double-escape.
+        title = l.title or "(listing)"
+        price = l.price or ""
         rating = getattr(l, "rating", None)
-        why    = _html.escape(getattr(l, "judge_reason", "") or "")
+        why    = getattr(l, "judge_reason", "") or ""
         star_prefix = f"{_stars(rating)} " if rating else ""
         summary = f"{star_prefix}New match: {title}" + (f" — {price}" if price else "")
         if why:

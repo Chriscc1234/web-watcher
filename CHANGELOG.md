@@ -11,6 +11,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.52.0-alpha] — 2026-08-24 (Proactive check-ins + attribute-aware watches)
+
+### New — the bot checks in with you
+- Even when nothing turns up, the bot now sends a **periodic check-in** so you know it's still on
+  watch — and when it's been quiet, it **offers to help**: broaden the search terms, or vet a
+  recent listing so you can decide fast. It's smart about timing — it stays quiet if you were just
+  alerted or just chatted, and only reaches out after a real lull. Each person gets their own.
+
+### Fixed — watches now check attributes the search page can't show
+- A search page lists a title and price but not a car's transmission, a truck's drivetrain,
+  mileage, etc. Watches that need a specific attribute ("manual", "4x4", "diesel", "under 100k")
+  now open each listing and check it — instead of guessing from the title and dropping almost
+  everything. New attribute watches get this automatically.
+
+### Fixed — cleaner alert text
+- Marketplace alerts no longer double-escape characters (stray `&amp;` etc.), so titles and
+  prices read naturally.
+
+---
+
 ## [0.51.0-alpha] — 2026-08-24 (Telegram alerts actually arrive)
 
 ### Fixed — the big one: alerts never reached your phone

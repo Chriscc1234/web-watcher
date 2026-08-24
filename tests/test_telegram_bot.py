@@ -8,8 +8,8 @@ from __future__ import annotations
 import pytest
 
 from web_watcher.telegram_bot import (
-    TelegramBridge, _chunk, _describe_suggestions, _is_affirmative, _is_negative,
-    _suggestions_of,
+    TelegramBridge, _chunk, _describe_suggestions, _heartbeat_message, _is_affirmative,
+    _is_negative, _parse_iso, _suggestions_of, _HEARTBEAT_EVERY_S,
 )
 
 
@@ -157,6 +157,47 @@ def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     b._pending = [{"name": "Trucks"}]
     b._handle_message("actually find me a boat")
     assert sent == ["Sure, boats instead."]
+
+
+# ── proactive check-ins (heartbeats) ─────────────────────────────────────────────
+
+def test_heartbeat_fires_when_quiet_and_offers_help(monkeypatch):
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append((chat_id, t)))
+    monkeypatch.setattr(b, "_fetch_watches",
+                        lambda: [{"name": "Manual Cars", "owner": "111", "enabled": True,
+                                  "stats": {"last_match_at": None}}])
+    monkeypatch.setattr(b, "_owner_last_chat_ts", lambda owner: 0.0)
+    b._start_ts = 0.0                                  # old enough that we're overdue
+    b._run_heartbeats(now=_HEARTBEAT_EVERY_S + 10)
+    assert sent and sent[0][0] == "111"
+    assert "broaden" in sent[0][1].lower() or "vet" in sent[0][1].lower()
+
+
+def test_heartbeat_stays_quiet_when_recently_in_touch(monkeypatch):
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_fetch_watches",
+                        lambda: [{"name": "Manual Cars", "owner": "111", "enabled": True,
+                                  "stats": {}}])
+    now = _HEARTBEAT_EVERY_S + 100
+    monkeypatch.setattr(b, "_owner_last_chat_ts", lambda owner: now - 60)   # chatted a minute ago
+    b._run_heartbeats(now=now)
+    assert sent == []                                  # recently in touch → no check-in
+
+
+def test_heartbeat_skips_owner_with_no_enabled_watches(monkeypatch):
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_fetch_watches",
+                        lambda: [{"name": "Off", "owner": "111", "enabled": False, "stats": {}}])
+    monkeypatch.setattr(b, "_owner_last_chat_ts", lambda owner: 0.0)
+    b._start_ts = 0.0
+    b._run_heartbeats(now=_HEARTBEAT_EVERY_S + 10)
+    assert sent == []                                  # nothing actually watching
 
 
 def test_reversible_action_applies_immediately(monkeypatch):

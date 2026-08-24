@@ -216,6 +216,15 @@ When to use judgment_prompt:
   - Price comparison tasks (is this a good deal?)
   - Research tasks with specific criteria (is this job a good fit?)
   - Any task where "found" depends on comparing gathered facts, not just detecting text
+  - ⭐ ATTRIBUTE FILTERS THE SEARCH RESULTS CAN'T SHOW. Marketplace search results list a
+    title + price only — they do NOT show a car's transmission, a truck's drivetrain, mileage,
+    trim, condition, or most specifics. So if the user wants a specific ATTRIBUTE ("manual
+    transmission", "4x4", "diesel", "under 100k miles", "no accidents"), you MUST add a
+    judgment_prompt telling the watch to open each listing, read that attribute, and match on
+    it — otherwise it can only guess from the title and will drop nearly everything. Write the
+    judgment_prompt as the concrete check, e.g. for "manual cars under $8k": "Open the listing
+    and read the transmission — a MATCH is a MANUAL car (stick / 5-speed / 6-speed) under $8000;
+    automatics are not a match; if unstated but the title hints manual, flag it as a maybe."
 
 ════════════════════════════════════════
 LIMITATIONS TO KNOW ABOUT

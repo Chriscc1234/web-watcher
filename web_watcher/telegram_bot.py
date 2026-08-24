@@ -52,6 +52,12 @@ _MSG_LIMIT      = 4096    # Telegram's hard per-message character cap
 _ERROR_BACKOFF  = 15.0    # pause after a transport error so we don't hammer the API
 _CHAT_TIMEOUT   = 180.0   # a local model turn can be slow; be patient before apologising
 
+# Proactive check-ins: even when nothing new turns up, ping each person on a cadence so they
+# know the Watcher is alive — and, when it's been quiet, OFFER to broaden the search or vet a
+# find. Suppressed whenever they were recently contacted (an alert, a reply, or a prior check-in).
+_HEARTBEAT_EVERY_S = 6 * 3600     # a quiet check-in at most this often, per person
+_HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
+
 
 class TelegramBridge:
     """Background poller that answers Telegram messages using the app's own assistant.
@@ -86,6 +92,11 @@ class TelegramBridge:
         # Destructive lifecycle actions (delete) held for a yes. Reversible ones (start/stop/
         # enable/disable) are applied immediately — no confirmation needed.
         self._pending_deletes: list[dict] | None = None
+        # Proactive check-in bookkeeping. Seed "last contact" at startup so we don't fire the
+        # moment the app launches; a real check-in is a full interval of quiet away.
+        self._start_ts = time.time()
+        self._last_heartbeat_scan = 0.0
+        self._heartbeat_sent: dict[str, float] = {}   # owner chat_id -> last check-in ts
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -140,6 +151,11 @@ class TelegramBridge:
             except Exception as exc:
                 log.warning("Telegram poll failed (%s) — retrying in %.0fs", exc, _ERROR_BACKOFF)
                 self._stop.wait(_ERROR_BACKOFF)
+            # Between polls, see if anyone is due a proactive check-in (never fatal).
+            try:
+                self._maybe_run_heartbeats()
+            except Exception as exc:
+                log.debug("Telegram: heartbeat scan failed: %s", exc)
 
     def _latest_offset(self) -> int | None:
         """The offset just past the newest pending update, so we ignore the offline backlog."""
@@ -333,6 +349,69 @@ class TelegramBridge:
             parts.append("⚠️ Couldn't: " + ", ".join(failed) + ".")
         return " ".join(parts)
 
+    # ------------------------------------------------------------------
+    # Proactive check-ins (heartbeats)
+    # ------------------------------------------------------------------
+
+    def _maybe_run_heartbeats(self) -> None:
+        now = time.time()
+        if now - self._last_heartbeat_scan < _HEARTBEAT_SCAN_S:
+            return
+        self._last_heartbeat_scan = now
+        self._run_heartbeats(now)
+
+    def _run_heartbeats(self, now: float) -> None:
+        """For each person, if it's been quiet for a while (no alert, no chat, no prior check-in),
+        send a reassuring note + an offer to broaden or vet. The main chat also covers unassigned
+        watches (the admin manages those); a buddy sees only their own."""
+        watches = self._fetch_watches()
+        if not watches:
+            return
+        for owner in sorted(self.allowed):
+            if owner == self.chat_id:
+                owned = [w for w in watches if str(w.get("owner") or "") in ("", str(owner))]
+            else:
+                owned = [w for w in watches if str(w.get("owner") or "") == str(owner)]
+            owned = [w for w in owned if w.get("enabled")]      # only what's actually watching
+            if not owned:
+                continue
+            last = self._owner_last_activity(owner, owned)
+            if now - last < _HEARTBEAT_EVERY_S:
+                continue                                        # recently in touch — stay quiet
+            self._send(_heartbeat_message(owned, now - last), owner)
+            self._heartbeat_sent[owner] = now
+            log.info("Telegram: sent a proactive check-in to %s", owner)
+
+    def _fetch_watches(self):
+        try:
+            r = httpx.get(f"{self.dashboard_url}/api/watches", timeout=15.0)
+            if r.status_code == 200 and isinstance(r.json(), list):
+                return r.json()
+        except Exception as exc:
+            log.debug("Telegram: could not fetch watches for heartbeat (%s)", exc)
+        return None
+
+    def _owner_last_activity(self, owner: str, owned: list) -> float:
+        """The most recent moment we were 'in touch' with this person: their last chat message,
+        their watches' last match, or the last check-in we sent (seeded at startup so we never
+        fire right after launch)."""
+        times = [self._heartbeat_sent.get(owner, self._start_ts), self._owner_last_chat_ts(owner)]
+        for w in owned:
+            times.append(_parse_iso((w.get("stats") or {}).get("last_match_at")))
+        return max([t for t in times if t] or [self._start_ts])
+
+    def _owner_last_chat_ts(self, owner: str) -> float:
+        try:
+            r = httpx.get(f"{self.dashboard_url}/api/oversight/chat/history",
+                          params={"owner": owner}, timeout=15.0)
+            if r.status_code == 200:
+                hist = r.json()
+                if isinstance(hist, list) and hist:
+                    return float(hist[-1].get("ts") or 0.0)
+        except Exception:
+            pass
+        return 0.0
+
     def _ask_watcher(self, text: str, owner: str = "", owner_name: str = "") -> dict:
         """Run the message through the app's OWN chat endpoint, so Telegram and the in-app dock
         share one brain. `owner` scopes the turn to this person — their own watches and their own
@@ -389,6 +468,30 @@ class TelegramBridge:
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-tested)
 # ---------------------------------------------------------------------------
+
+def _parse_iso(s) -> float:
+    """An ISO timestamp string → epoch seconds, or 0.0 if unparseable/empty."""
+    if not s:
+        return 0.0
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _heartbeat_message(owned: list, quiet_s: float) -> str:
+    """A quiet-period check-in: reassure that it's still watching, and offer to widen the net or
+    vet a find so the user can act. `owned` is the person's enabled watches."""
+    hrs = max(1, int(quiet_s // 3600))
+    names = [f"“{w.get('name')}”" for w in owned]
+    shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+    return (
+        f"🔭 Still on watch — keeping an eye on {shown}. Nothing new in about the last {hrs}h.\n\n"
+        f"Want me to widen the net? I can broaden the search terms, or vet a recent listing so you "
+        f"can decide fast. Just say “broaden <watch>”, or ask me anything."
+    )
+
 
 def _chunk(text: str, limit: int) -> list[str]:
     """Split a reply into Telegram-sized pieces, preferring a line break near the edge so a

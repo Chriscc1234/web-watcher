@@ -229,14 +229,17 @@ def _format_message(payload: NotificationPayload, html: bool = True) -> str:
     )
     confidence_color = {"HIGH": "#4ade80", "MEDIUM": "#fbbf24", "LOW": "#f87171"}.get(conf, "#e2e8f0")
 
+    # Escape dynamic fields for HTML (summaries are RAW now — the sender no longer pre-escapes).
+    watch_name_h = _html.escape(str(payload.watch_name or ""))
+    summary_h    = _html.escape(str(r.summary or "")).replace("\n", "<br>")
     return f"""\
 <html><body style="font-family:sans-serif;color:#e2e8f0;background:#1a1d27;padding:20px;">
   <h2 style="color:#60a5fa;">Web Watcher Alert</h2>
   <table style="border-collapse:collapse;">
     <tr><td style="padding:4px 12px 4px 0;color:#8892a4;">Watch</td>
-        <td style="padding:4px 0;"><b>{payload.watch_name}</b></td></tr>
+        <td style="padding:4px 0;"><b>{watch_name_h}</b></td></tr>
     <tr><td style="padding:4px 12px 4px 0;color:#8892a4;">Summary</td>
-        <td style="padding:4px 0;">{r.summary}</td></tr>
+        <td style="padding:4px 0;">{summary_h}</td></tr>
     <tr><td style="padding:4px 12px 4px 0;color:#8892a4;">Confidence</td>
         <td style="padding:4px 0;"><span style="color:{confidence_color};">{conf}</span></td></tr>
     <tr><td style="padding:4px 12px 4px 0;color:#8892a4;">Time</td>

@@ -46,7 +46,9 @@ import httpx
 from playwright.sync_api import Page, TimeoutError as PWTimeoutError
 
 from web_watcher import fb_safety
-from web_watcher.monitor import dismiss_popups, has_blocking_overlay, read_search_feedback
+from web_watcher.monitor import (
+    dismiss_popups, has_blocking_overlay, label_is_location_box, read_search_feedback,
+)
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +82,8 @@ You are a browser agent. You control a real web browser step by step to complete
       ON SCREEN   visible right now, can interact immediately
       BELOW FOLD  off-screen below the current view, must scroll down first
     >>> TEXT INPUT <<<  a text/search field you can type into — use 'type' with its index
+    >>> LOCATION INPUT <<<  a place/city/ZIP picker — type ONLY a place name here (e.g. the
+                        city named in the goal), NEVER topic or product keywords
     BUTTON              a clickable button
     LINK                a navigation link — use 'click', NOT 'type'
     CHECKBOX / RADIO    a toggleable option — use 'click' to check/uncheck
@@ -159,6 +163,11 @@ chose the action. A filled-in thought leads to better decisions.
     2. Use 'type' with that element's index and your search query as the text.
     3. The page will navigate to search results — wait for the next step.
     4. On the results page, read what is ON SCREEN. Do not scroll first.
+    NOTE: a >>> LOCATION INPUT <<< is NOT a keyword search — it is a city/place picker.
+    Type ONLY the place from the goal into it (e.g. "Seattle"), never your topic keywords.
+    If the goal is "severe weather in Seattle", type "Seattle" into a LOCATION INPUT, then
+    read the results — do NOT type "severe weather Seattle". If the box's autocomplete only
+    offers cities, treat it as a LOCATION INPUT even if it was tagged TEXT INPUT.
 
   Reading search results:
     1. The page text contains the listing titles, prices, and details.
@@ -189,7 +198,8 @@ chose the action. A filled-in thought leads to better decisions.
 
   - 'thought' is REQUIRED. Always describe what you currently see before choosing an action.
   - When the goal specifies a search term in quotes, type EXACTLY that text — do not
-    substitute, paraphrase, or use a different product name.
+    substitute, paraphrase, or use a different product name. EXCEPTION: into a
+    >>> LOCATION INPUT <<< type ONLY the place (city/ZIP) from the goal, never the topic.
   - element_index is REQUIRED for 'click', 'type', and 'select'. Always pick a real
     index from the numbered list. Never guess or invent an index.
   - DROPDOWN elements only respond to 'select' (with exact option text) — never
@@ -1440,6 +1450,20 @@ _NON_TEXT_INPUT_TYPES = frozenset(
     ("checkbox", "radio", "submit", "button", "hidden", "file", "image", "color", "range")
 )
 
+def _is_location_input(e: dict) -> bool:
+    """True when a text input is a place/geo picker (type only a city/ZIP here, not keywords).
+    Judged from the box's own label/placeholder via monitor.label_is_location_box — the
+    deterministic half of the location-box guard that keeps topic terms out of a city box.
+    (The weather-site fix: the box on a weather page is a CITY picker.)"""
+    tag = e.get("tag")
+    etype = (e.get("type") or "").lower()
+    if tag not in ("input", "textarea") or etype in _NON_TEXT_INPUT_TYPES:
+        return False
+    # Check the label AND the current value: some old-school boxes (weather.gov's main
+    # search) carry no aria-label/placeholder and put the hint text ("Enter location ...")
+    # in the value, with only a generic name like "inputstring" for the label.
+    return label_is_location_box(f"{e.get('label') or ''}  {e.get('value') or ''}")
+
 
 def _elements_text(elements: list[dict]) -> str:
     lines = []
@@ -1463,7 +1487,13 @@ def _elements_text(elements: list[dict]) -> str:
         elif tag in ("input", "textarea") and etype not in _NON_TEXT_INPUT_TYPES:
             # Prominently mark text fields — this is what the agent types into
             cur = f'  (current: {e["value"]!r})' if e.get("value") else ""
-            lines.append(f"  [{e['index']}] >>> TEXT INPUT <<<  \"{label}\"{cur}{focused}  (use type + this index)")
+            if _is_location_input(e):
+                # A place/geo picker — steer the agent to type ONLY the location, not keywords.
+                lines.append(f"  [{e['index']}] >>> LOCATION INPUT <<<  \"{label}\"{cur}{focused}  "
+                             "(place/city/ZIP picker — type ONLY the place from the goal here, "
+                             "e.g. a city name; NEVER topic or product keywords)")
+            else:
+                lines.append(f"  [{e['index']}] >>> TEXT INPUT <<<  \"{label}\"{cur}{focused}  (use type + this index)")
 
         elif tag == "button" or etype in ("submit", "button"):
             lines.append(f"  [{e['index']}] BUTTON  \"{label}\"{focused}")

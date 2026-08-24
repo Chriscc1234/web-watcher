@@ -5,8 +5,9 @@ Launch via:  python -m web_watcher.main
          or: start.bat (double-click)
 
 ── KEY LOCATIONS ─────────────────────────────────────────────────────────────
-  _setup_logging()   ~L22   Per-session log files in data/logs/web_watcher_YYYYMMDD_HHMMSS.log
-                             Keeps last _LOG_KEEP=30 files, prunes oldest on startup
+  _setup_logging()   ~L30   Per-session log files in data/logs/web_watcher_YYYYMMDD_HHMMSS.log
+                             Keeps last _LOG_KEEP=30 files, prunes oldest. Called FROM main()
+                             (never at import — see the note by its definition)
   main()             ~L60   Startup sequence: logging → services → scheduler → webview
 ──────────────────────────────────────────────────────────────────────────────
 """
@@ -72,7 +73,11 @@ def _setup_logging() -> None:
         except OSError:
             pass
 
-_setup_logging()
+# NOTE: _setup_logging() is called from main(), NOT at import. Wiring it at module scope
+# meant every *import* of this module (a probe, a tool, a test, `-m ... --version`) spun up
+# a fresh empty session log and hijacked the root logger, then exited having logged nothing
+# — which is why ~2/3 of the files in logs/ were 0 bytes and the "read the logs first"
+# diagnosis workflow ran at a fraction of real coverage. Logging now starts only on a real run.
 
 DASHBOARD_URL   = "http://127.0.0.1:7878"
 SERVER_TIMEOUT  = 10.0   # seconds to wait for uvicorn to accept connections
@@ -172,6 +177,8 @@ def _wait_for_server(timeout: float = SERVER_TIMEOUT) -> bool:
 
 
 def main() -> None:
+    _setup_logging()   # start logging only on a real run — see the note by _setup_logging
+
     import webview
     from web_watcher.services import ServiceManager
 

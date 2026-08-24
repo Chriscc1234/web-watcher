@@ -33,3 +33,7 @@ env/
 Thumbs.db
 Desktop.ini
 *~
+
+# A note about Chris's machine (the Claude Code sandbox faking %LOCALAPPDATA%
+# writes), not about this software. This repo is public; that note is not for it.
+SANDBOX-WARNING.md

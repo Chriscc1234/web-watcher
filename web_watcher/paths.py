@@ -18,6 +18,8 @@ so the originals remain as a backup, and drop a `.migrated` marker so it never r
 
 ── KEY LOCATIONS ─────────────────────────────────────────────────────────────
   data_dir            ~L60   Resolve + create the data root (runs migration once)
+  _warn_if_phantom_root ~L64 Loud in-session guard: shout if the root is the %LOCALAPPDATA%
+                             copy-on-write overlay and no $WW_DATA_DIR override is set
   config_path         ~L95   <root>/config.yaml
   db_path / screenshots_dir / log_dir / webview_dir   ~L100
   browser_state_path / profile_dir                    ~L120
@@ -31,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -61,6 +64,35 @@ def _default_root() -> Path:
     return Path.home() / ".web-watcher"
 
 
+def _warn_if_phantom_root(root: Path) -> None:
+    """Loud guard against the copy-on-write overlay trap.
+
+    Inside a Claude Code session (`CLAUDECODE` is set), writes to `%LOCALAPPDATA%` land in a
+    per-workspace overlay the real machine never sees — reads pass through, so a session's own
+    verification of an install or a data fix falsely PASSES while the disk is untouched. When we
+    resolve the data root to that zone from within a session AND no `$WW_DATA_DIR` override is
+    set, shout on both the logger and stderr so the phantom is impossible to miss. Set
+    `WW_DATA_DIR=C:/AI_Workspace/ww-scratch` to write somewhere real.
+
+    Harmless in the real app: an end user's machine (the buddy's) has no `CLAUDECODE`, so this
+    never fires there — the normal `%LOCALAPPDATA%\\WebWatcher` root is correct for them."""
+    if not os.environ.get("CLAUDECODE"):
+        return
+    if os.environ.get("WW_DATA_DIR", "").strip():
+        return
+    if not os.environ.get("LOCALAPPDATA", "").strip():
+        return
+    # No override + LOCALAPPDATA present ⇒ root is %LOCALAPPDATA%\WebWatcher: the overlay zone.
+    msg = (
+        f"data root resolves to {root} inside a Claude Code session with no $WW_DATA_DIR. "
+        "Writes here go to a copy-on-write overlay the real machine cannot see - any install "
+        "or data fix will self-verify but NOT persist to disk. Set "
+        "WW_DATA_DIR=C:/AI_Workspace/ww-scratch to write somewhere real."
+    )
+    log.warning("SANDBOX: %s", msg)
+    print("WEB WATCHER SANDBOX WARNING: " + msg, file=sys.stderr, flush=True)
+
+
 def data_dir() -> Path:
     """The resolved, existing user-data root. Creates it (and runs the one-time legacy
     migration) on first call, then caches the result for the rest of the process."""
@@ -69,6 +101,8 @@ def data_dir() -> Path:
         return _ROOT
     root = _default_root()
     root.mkdir(parents=True, exist_ok=True)
+    _warn_if_phantom_root(root)
+    log.info("Web Watcher data root: %s", root)
     try:
         _migrate_legacy(root)
     except Exception as exc:                       # never let migration block startup

@@ -764,6 +764,27 @@ def looks_like_location(text: str) -> bool:
     return False
 
 
+# A search box whose OWN label/placeholder marks it as a place/geo picker (a "City" or
+# "ZIP" box) rather than a keyword-item search. This judges the BOX (by its label), whereas
+# looks_like_location() judges a VALUE (is this string a place?). Word boundaries keep it
+# tight — \bplace\b does NOT fire on "marketplace". The weather-site fix depends on this:
+# the box on a weather page is a city picker, so "severe weather Seattle" must never be typed.
+_LOCATION_BOX_LABEL_RE = re.compile(
+    r"\b(city|cities|town|zip|zipcode|postal|postcode|"
+    r"location|locations|neighborho\w+|county|region|"
+    r"your\s+area|set\s+location|enter\s+location|search\s+location|"
+    r"place\s+name|where\s+are\s+you|where\s+to)\b",
+    re.I,
+)
+
+
+def label_is_location_box(label: str) -> bool:
+    """True when a search box's label/placeholder marks it a place/geo picker (type only a
+    city/ZIP here, never topic keywords). Shared by the agent's element rendering and the
+    deterministic humanized_search so both paths agree on what a location box is."""
+    return bool(_LOCATION_BOX_LABEL_RE.search(label or ""))
+
+
 def suggestions_are_locations(suggestions: list) -> bool:
     """True when most non-empty suggestions look like places (>=60%, min 2) — the tell that
     a 'search' box is really a location/geo picker, not a keyword search."""
@@ -874,6 +895,25 @@ def humanized_search(page: Page, url: str) -> bool:
             continue
     if box is None:
         return False
+
+    # Preventive location-box guard: if the box we matched is a place/city/ZIP picker (by its
+    # own label/placeholder), do NOT dump the keyword term into it — that's the weather-site
+    # bug ("severe weather Seattle" into a city box). Bail so the caller falls back instead.
+    if not looks_like_location(term):
+        try:
+            # Include the current value: some boxes (weather.gov) carry the hint ("Enter
+            # location ...") in the value with no aria-label/placeholder.
+            box_label = " ".join(filter(None, (
+                box.get_attribute("aria-label"), box.get_attribute("placeholder"),
+                box.get_attribute("name"), box.get_attribute("id"),
+                box.get_attribute("title"), box.input_value(),
+            )))
+        except Exception:
+            box_label = ""
+        if label_is_location_box(box_label):
+            log.warning("Search box on %s is a LOCATION picker (label=%r) — not typing keyword "
+                        "%r into it; falling back.", urlparse(url).netloc, box_label, term)
+            return False
 
     try:
         box.click(timeout=3_000)          # moves the mouse to the box and focuses it

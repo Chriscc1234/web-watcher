@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.44.0-alpha] — 2026-08-23 (Set up phone alerts in the app — and optional Claude)
+
+### New — a place to enter your keys: Settings → "Notifications & Keys"
+- **Telegram alerts are now set up inside the app.** Paste your bot token, click **Detect** to fill
+  in your chat ID automatically (just message your bot once first), then hit **Send test message**
+  and confirm your phone actually buzzes — no more editing a config file by hand.
+- **Email alerts** moved into the same page, so every credential lives in one place.
+- Your token, password, and key are **never shown back to you** once saved (only the last few
+  characters), and leaving a box blank keeps whatever you already had.
+
+### New — optionally let Claude rate your listings (off by default)
+- Web Watcher still runs **100% on your own computer by default** — nothing changes unless you
+  turn this on. If you have an Anthropic API key, you can now switch on **"Use Claude to rate
+  listings"**: the step that decides which finds are worth alerting you about becomes faster and
+  more accurate, so you get fewer junk alerts and catch the real ones sooner.
+- Billed to **your own key**, and the page shows what you've spent so far.
+- If the internet, the key, or the service is ever unavailable, it **automatically falls back to
+  your local model** — a hiccup can never stop your watches from running.
+
+---
+
 ## [0.43.0-alpha] — 2026-08-23 (Stops typing your search into the "city" box)
 
 ### Fixed — no more searching the wrong thing on location boxes

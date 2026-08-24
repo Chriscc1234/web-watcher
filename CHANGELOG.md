@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.43.0-alpha] — 2026-08-23 (Stops typing your search into the "city" box)
+
+### Fixed — no more searching the wrong thing on location boxes
+- On sites with a **city / location box** (like weather.gov), the Watcher was typing the whole
+  search — e.g. *"severe weather Seattle"* — into the box that only wants a **place name**. Now it
+  recognizes a city/ZIP/location box for what it is and types **only the place** (e.g. *Seattle*)
+  there, never your topic or product words. Verified live on weather.gov, including its main
+  search box (which hides its "Enter location" hint in an unusual spot that slipped past the
+  earlier check).
+- This makes location-based watches land on the **right place's results** instead of a dead-end
+  or a nonsense page.
+
+### Fixed — session logs actually capture the run now
+- Every launch writes a proper log again. A quirk meant most log files came out **empty**, which
+  made "Report a bug" logs and troubleshooting far less useful. Fixed at the source.
+
+### Behind the scenes
+- Added a development-only safeguard around where app data is stored, so internal test builds
+  can't silently write to a place that looks saved but isn't. No effect on your installed app.
+
+---
+
 ## [0.42.0-alpha] — 2026-07-14 (OfferUp shows YOUR area — and only local listings)
 
 ### Fixed — OfferUp finally shows the right location

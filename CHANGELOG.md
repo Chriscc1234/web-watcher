@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.47.0-alpha] — 2026-08-24 (Smarter about when to spend, steadier under load)
+
+### New — local-first chat, Claude only when it counts
+- Everyday chat — "how are my watches?", "status?", "yes" — now stays on your **fast local
+  model** (free, and quick on your machine). Only the **hard turns** — setting up or changing a
+  watch, a long or vague request — reach for Claude, and only if you've turned it on. Sharp where
+  it matters, near-zero cost the rest of the time. (Settings toggle relabelled to match; it still
+  respects your monthly cap.)
+
+### Fixed — it now understands "make it run all the time"
+- Asking to change a watch to run continuously ("always run", "run continuously", "keep it
+  running", "24/7") is now recognized as a real change request, instead of being brushed off as
+  "you didn't ask to change anything."
+
+### Fixed — sweeps no longer kill themselves under load
+- With several watches running at once, the local AI could get overwhelmed (two browsers plus
+  image-reading fighting for the graphics card) and a sweep would give up with repeated timeouts.
+  The app now runs the local AI **one call at a time** and waits longer before calling a call
+  dead — so busy runs stay steady instead of collapsing.
+
+---
+
 ## [0.46.0-alpha] — 2026-08-24 (Spend cap, a Chats console, and letting people in)
 
 ### New — the Chats console: watch every conversation in one place

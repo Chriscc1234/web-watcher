@@ -11,6 +11,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.49.0-alpha] — 2026-08-24 (When it says it's watching, it actually watches)
+
+### Fixed — "on watch" now really sweeps after a restart
+- After a restart the app could show *"I'm on watch"* while your always-on watches sat idle —
+  nothing was actually being checked, so nothing was ever found or alerted. Now, unless you've
+  paused it, the app starts watching your always-on watches the moment it launches. (If you find
+  it's ever idle, toggling Stop → Start also kicks it off.)
+
+---
+
 ## [0.48.0-alpha] — 2026-08-24 (One clear on/off, and start/stop from your phone)
 
 ### New — one master switch for the whole Watcher

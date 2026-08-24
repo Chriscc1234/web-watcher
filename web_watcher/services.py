@@ -130,7 +130,8 @@ class ServiceManager:
             if not getattr(tg, "two_way", False):
                 return
             bridge = TelegramBridge(tg.bot_token, tg.chat_id, f"http://127.0.0.1:{self.PORT}",
-                                    allowed_chat_ids=list(getattr(tg, "allowed_chat_ids", []) or []))
+                                    allowed_chat_ids=list(getattr(tg, "allowed_chat_ids", []) or []),
+                                    checkin_hours=float(getattr(tg, "checkin_hours", 12.0) or 0))
             if bridge.start():
                 self._telegram = bridge
         except Exception as exc:

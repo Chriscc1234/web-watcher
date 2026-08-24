@@ -11,6 +11,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.54.0-alpha] — 2026-08-24 (Vet from your phone + check-ins you control)
+
+### New — tap to vet a find, right in the alert
+- Every listing alert now carries a **🔍 Vet this listing** button. Tap it and The Watcher
+  opens the posting, reads the whole thing, and replies with a **deal rating, scam risk, and any
+  red flags** — so you can judge a find from your phone without opening the app.
+
+### New — you choose how often it checks in
+- The quiet-period check-in is now a setting (Settings → Notifications & Keys): **12 hours =
+  twice a day** (the new default), **6** = every few hours, **0** = never. Before it was fixed at
+  6 hours.
+
+### New — a real settings block, scoped to who's asking
+- Ask the bot **"settings"** and you get a clear readout: your check-in cadence, your watches
+  (and which are on), and where your alerts go — plus how to change each one. The **owner** also
+  gets a **Server settings** section: whether watching is on, total watches, who's allowed to use
+  the bot, which AI is in use, Claude spend vs. cap, and the version. Everyone else sees only their
+  own — they never learn about other people or the server.
+
+### New — the app groups watches by person
+- The Watches tab now groups by **who owns each watch**, with a per-person count of what's on vs.
+  off — so on the server you can see at a glance what each person has running.
+
+### Fixed — turned-off watches aren't counted as "being watched"
+- "Keeping an eye on 5 watches" counted deactivated ones. It now counts only what's actually
+  being watched, and notes any that are turned off separately.
+
+### New — change your own settings from the bot
+- Tell the bot **"check in every 6 hours"**, **"twice a day"**, or **"stop checking in"** and it
+  remembers *your* preference — each person has their own, so your buddy's cadence doesn't change
+  yours.
+
+### Fixed — "show me the matches" now shows the matches
+- Asking to see your finds returned a description instead of the list. The bot now sends a
+  scannable list (rating, title, price, tap to open). And a bare **"yes"** now answers the question
+  the bot just asked instead of being mistaken for "set up a new watch" — the bug that hijacked a
+  conversation into re-creating a watch.
+
+### Fixed — the owner sees everything from their phone
+- Questions like "how many watches are there?" from the owner's own chat only counted watches
+  explicitly assigned to them. The owner now sees and manages every watch from the bot, the same as
+  on the desktop; other people still see only their own.
+
+### Fixed — the bot no longer goes deaf for 15 seconds
+- Telegram's long-poll times out normally every so often. The app treated that as an error, logged
+  a warning, and slept 15 seconds — during which it wouldn't hear you. It now reconnects
+  immediately.
+
+---
+
 ## [0.53.0-alpha] — 2026-08-24 (No more out-of-state junk, cleaner alerts)
 
 ### Fixed — out-of-state listings no longer slip through

@@ -190,6 +190,11 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .advanced-section{display:none;margin-top:10px;padding:12px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)}
 .advanced-section.open{display:block}
 
+/* ---- Watches grouped by person (the server console view) ---- */
+.owner-group{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:16px;background:rgba(255,255,255,.015)}
+.owner-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;padding-bottom:7px;border-bottom:1px solid var(--border)}
+.owner-name{font-weight:700;font-size:14px}
+.owner-meta{font-size:12px;color:var(--dim)}
 /* ---- Chats admin console (per-person thread viewer) ---- */
 .chats-layout{display:flex;gap:14px;align-items:stretch}
 .chats-list{flex:0 0 260px;display:flex;flex-direction:column;gap:6px;max-height:66vh;overflow-y:auto}
@@ -391,6 +396,14 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
         another here so a second person (you <i>and</i> your buddy) can both talk to the bot.
         <b>Anyone not listed is ignored</b>, which matters because anyone who finds your bot can
         message it. To get someone's ID: have them message the bot, then press Detect.
+      </div>
+      <label style="display:block;font-size:12px;color:var(--dim);margin:12px 0 4px">Check in when it's quiet (hours)</label>
+      <input id="cred-tg-checkin" type="number" min="0" step="1" placeholder="12"
+             style="width:120px;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+      <div style="font-size:12px;color:var(--dim);margin-top:6px">
+        After this many hours with nothing new (and no chat), the bot sends a short "still on
+        watch" note and offers to broaden the search or vet a listing. <b>12</b> = twice a day,
+        <b>6</b> = every few hours, <b>0</b> = never check in.
       </div>
     </div>
 
@@ -1982,15 +1995,39 @@ async function loadWatches() {
       body.innerHTML = '<div class="empty-state">No watches configured. Click "+ Add Watch" to create one.</div>';
       return;
     }
-    // Active = enabled (on, will run / be driven). Inactive = disabled (kept, ignored).
-    // One click moves a watch between the two sections (setWatchActive → /enabled).
-    const active   = watches.filter(w => w.enabled);
-    const inactive = watches.filter(w => !w.enabled);
-    body.innerHTML =
-      renderWatchSection('Active', active, true,
+    // Grouped BY PERSON (this is the server console — you manage everyone's watches here), then
+    // Active / Inactive within each. Active = enabled (running / driven); Inactive = kept but
+    // ignored. One click moves a watch between them (setWatchActive → /enabled).
+    // With only unassigned watches (a solo setup) the owner headers are skipped entirely.
+    const owners = [...new Set(watches.map(w => String(w.owner || '')))];
+    const multi = owners.length > 1 || (owners.length === 1 && owners[0] !== '');
+    const sections = (list) =>
+      renderWatchSection('Active', list.filter(w => w.enabled), true,
         'Nothing active yet — activate an inactive watch below, or add one.') +
-      renderWatchSection('Inactive', inactive, false,
+      renderWatchSection('Inactive', list.filter(w => !w.enabled), false,
         'Nothing inactive. Watches you turn off are kept here, not running.');
+
+    if (!multi) {
+      body.innerHTML = sections(watches);
+    } else {
+      // Unassigned last; otherwise by who has the most watches.
+      owners.sort((a, b) => (a === '' ? 1 : b === '' ? -1 : 0)
+        || watches.filter(w => String(w.owner || '') === b).length
+         - watches.filter(w => String(w.owner || '') === a).length);
+      body.innerHTML = owners.map(o => {
+        const list = watches.filter(w => String(w.owner || '') === o);
+        const on = list.filter(w => w.enabled).length;
+        const named = list.find(w => w.owner_name);
+        const label = o ? ((named && named.owner_name) || `Telegram · ${o}`) : 'Unassigned (yours)';
+        return `<div class="owner-group">
+            <div class="owner-head">
+              <span class="owner-name">${escapeHtml(label)}</span>
+              <span class="owner-meta">${list.length} watch${list.length === 1 ? '' : 'es'} · ${on} on · ${list.length - on} off</span>
+            </div>
+            ${sections(list)}
+          </div>`;
+      }).join('');
+    }
   } catch(e) {
     body.innerHTML = `<div class="empty-state" style="color:var(--red)">Failed to load watches: ${e.message}</div>`;
   }
@@ -3255,6 +3292,8 @@ async function loadCredentials() {
   if (allowed) allowed.value = (tg.allowed_chat_ids || []).join(', ');
   const twchk = document.getElementById('cred-tg-twoway-chk');
   if (twchk) { twchk.checked = !!tg.two_way; _applyTwoWayToggle(!!tg.two_way); }
+  const chk = document.getElementById('cred-tg-checkin');
+  if (chk) chk.value = (tg.checkin_hours === undefined || tg.checkin_hours === null) ? '' : tg.checkin_hours;
   const cchk = document.getElementById('cred-an-chat-chk');
   if (cchk) { cchk.checked = !!an.chat_enabled; _applyChatToggle(!!an.chat_enabled); }
   const cm = document.getElementById('cred-an-chat-model');
@@ -3283,7 +3322,8 @@ async function saveCredentials(btn) {
     telegram: { chat_id: document.getElementById('cred-tg-chatid').value.trim(),
                 bot_token: document.getElementById('cred-tg-token').value.trim(),
                 two_way: document.getElementById('cred-tg-twoway-chk').checked,
-                allowed_chat_ids: document.getElementById('cred-tg-allowed').value },
+                allowed_chat_ids: document.getElementById('cred-tg-allowed').value,
+                checkin_hours: document.getElementById('cred-tg-checkin').value },
     anthropic: { api_key: document.getElementById('cred-an-key').value.trim(),
                  judge_enabled: document.getElementById('cred-an-judge-chk').checked,
                  chat_enabled: document.getElementById('cred-an-chat-chk').checked,

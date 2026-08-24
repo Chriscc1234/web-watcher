@@ -107,3 +107,41 @@ def test_watcher_status_endpoint():
                                            "driver_running": False, "continuous_running": []}
     client = TestClient(create_app(manager))
     assert client.get("/api/watcher/status").json()["running"] is True
+
+
+# ── per-person check-in cadence, set from the bot ────────────────────────────────
+
+def test_classify_checkin_parses_cadence():
+    assert S._classify_checkin("check in every 6 hours") == 6.0
+    assert S._classify_checkin("update me twice a day") == 12.0
+    assert S._classify_checkin("ping me once a day") == 24.0
+    assert S._classify_checkin("stop checking in") == 0.0
+    assert S._classify_checkin("no more check-ins") == 0.0
+    assert S._classify_checkin("how are my watches?") is None      # not a settings request
+
+
+def test_checkin_pref_is_per_person(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "_CHECKIN_PREFS_PATH", tmp_path / "checkin_prefs.json")
+    S._set_checkin_pref("111", 6.0)
+    S._set_checkin_pref("222", 0.0)
+    prefs = S._load_checkin_prefs()
+    assert prefs == {"111": 6.0, "222": 0.0}
+
+
+# ── a bare yes must not spawn a watch (the "show me the matches" hijack) ─────────
+
+def test_bare_confirmation_detection():
+    for yes in ("Yes", "no", "ok", "sure", "yep."):
+        assert S._is_bare_confirmation(yes) is True, yes
+    for not_bare in ("yes please show me the matches", "watch for trucks", "ok now find a boat"):
+        assert S._is_bare_confirmation(not_bare) is False, not_bare
+
+
+# ── the owner on their phone is an admin (sees every watch) ──────────────────────
+
+def test_admin_on_telegram_sees_all_watches():
+    cfg = _cfg_with("999", "")            # one owned by a buddy, one unassigned
+    assert len(S._watches_for_owner(cfg, "111")) == 2      # 111 == configured chat_id (admin)
+    assert len(S._watches_for_owner(cfg, "999")) == 1      # a buddy sees only their own
+    assert S._is_owned("W1", cfg, "111") is True           # admin may act on an unassigned watch
+    assert S._is_owned("W1", cfg, "999") is False

@@ -66,6 +66,10 @@ class TelegramConfig(BaseModel):
     # it — so only the IDs listed here plus chat_id are ever answered. Use this to let a second
     # person (e.g. you AND your buddy) drive the same watcher.
     allowed_chat_ids: list[str] = Field(default_factory=list)
+    # Quiet-period check-ins: how many hours of NO contact (no alert, no chat, no prior check-in)
+    # before the bot pings you with "still on watch" + an offer to broaden or vet. 12 = twice a
+    # day; 6 = every few hours. 0 turns proactive check-ins off entirely. See telegram_bot.py.
+    checkin_hours: float = 12.0
 
 
 class EmailConfig(BaseModel):

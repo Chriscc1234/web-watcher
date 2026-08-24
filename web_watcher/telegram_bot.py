@@ -55,8 +55,9 @@ _CHAT_TIMEOUT   = 180.0   # a local model turn can be slow; be patient before ap
 # Proactive check-ins: even when nothing new turns up, ping each person on a cadence so they
 # know the Watcher is alive — and, when it's been quiet, OFFER to broaden the search or vet a
 # find. Suppressed whenever they were recently contacted (an alert, a reply, or a prior check-in).
-_HEARTBEAT_EVERY_S = 6 * 3600     # a quiet check-in at most this often, per person
+_HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (config overrides)
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
+_VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 
 
 class TelegramBridge:
@@ -68,7 +69,8 @@ class TelegramBridge:
     """
 
     def __init__(self, bot_token: str, chat_id: str, dashboard_url: str,
-                 allowed_chat_ids: list[str] | None = None) -> None:
+                 allowed_chat_ids: list[str] | None = None,
+                 checkin_hours: float = 12.0) -> None:
         self.bot_token     = (bot_token or "").strip()
         self.chat_id       = str(chat_id or "").strip()
         self.dashboard_url = dashboard_url.rstrip("/")
@@ -97,6 +99,9 @@ class TelegramBridge:
         self._start_ts = time.time()
         self._last_heartbeat_scan = 0.0
         self._heartbeat_sent: dict[str, float] = {}   # owner chat_id -> last check-in ts
+        # Hours of quiet before a check-in (config: notifications.telegram.checkin_hours).
+        # 0 disables proactive check-ins entirely.
+        self.checkin_s = max(0.0, float(checkin_hours or 0)) * 3600.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -148,6 +153,12 @@ class TelegramBridge:
                         self._dispatch(update)
                     except Exception as exc:               # one bad message must not kill the loop
                         log.warning("Telegram: failed handling update: %s", exc)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                # A long poll that times out (or a transient 502/reset) is NORMAL — Telegram just
+                # held the request open with nothing to say. Reconnect straight away instead of
+                # logging a scary warning and sleeping, which left the bot deaf for 15s each time.
+                log.debug("Telegram poll reconnecting (%s)", exc)
+                self._stop.wait(1.0)
             except Exception as exc:
                 log.warning("Telegram poll failed (%s) — retrying in %.0fs", exc, _ERROR_BACKOFF)
                 self._stop.wait(_ERROR_BACKOFF)
@@ -179,6 +190,10 @@ class TelegramBridge:
         return updates
 
     def _dispatch(self, update: dict) -> None:
+        cb = update.get("callback_query")
+        if cb:
+            self._handle_callback(cb)
+            return
         msg  = update.get("message") or update.get("edited_message") or {}
         text = (msg.get("text") or "").strip()
         chat = (msg.get("chat") or {}).get("id")
@@ -236,6 +251,13 @@ class TelegramBridge:
             return
 
         reply = (result.get("message") or "").strip()
+
+        # "Show me the matches" — the assistant resolves a listing_query and returns rows; the
+        # dashboard renders them as cards. On a phone we render a compact scannable list, so the
+        # bot actually SHOWS finds instead of only talking about them.
+        listings = result.get("listings")
+        if isinstance(listings, list) and listings:
+            reply = (reply + "\n\n" + _format_listings(listings)).strip()
 
         # Lifecycle actions the assistant grounded + owner-scoped for us. Reversible ones apply
         # right away (snappy — no "are you sure?" for a start/stop); delete needs a yes.
@@ -350,6 +372,60 @@ class TelegramBridge:
         return " ".join(parts)
 
     # ------------------------------------------------------------------
+    # Tap-to-vet (the "🔍 Vet this listing" button on an alert)
+    # ------------------------------------------------------------------
+
+    def _handle_callback(self, cb: dict) -> None:
+        """A tapped inline button. Only 'vet:<token>' exists today: resolve the token back to the
+        listing URL and run Deep Inspect (deal rating + scam risk), then reply with the verdict."""
+        from web_watcher.notify import vet_url_for
+        data = str(cb.get("data") or "")
+        chat = ((cb.get("message") or {}).get("chat") or {}).get("id")
+        if not self._authorized(chat):
+            log.warning("Telegram: ignoring button from unauthorized chat %s", chat)
+            return
+        self._answer_callback(cb.get("id"), "Vetting…")
+        if not data.startswith("vet:"):
+            return
+        url = vet_url_for(data[4:])
+        if not url:
+            self._send("I couldn't find that listing to vet — it may be from an older alert.", str(chat))
+            return
+        self._typing(str(chat))
+        self._send(self._vet_listing(url), str(chat))
+
+    def _answer_callback(self, cb_id, text: str = "") -> None:
+        """Acknowledge the tap so Telegram stops the button's spinner."""
+        try:
+            httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/answerCallbackQuery",
+                       json={"callback_query_id": cb_id, "text": text}, timeout=10.0)
+        except Exception:
+            pass
+
+    def _vet_listing(self, url: str) -> str:
+        """Run the app's Deep Inspect on one listing and render its verdict for a phone."""
+        try:
+            httpx.post(f"{self.dashboard_url}/api/inspect", json={"url": url}, timeout=30.0)
+        except Exception as exc:
+            log.warning("Telegram: could not start inspect: %s", exc)
+            return "Sorry — I couldn't start vetting that one."
+        deadline = time.time() + _VET_TIMEOUT
+        while time.time() < deadline:
+            if self._stop.is_set():
+                return "Stopped."
+            time.sleep(3.0)
+            try:
+                r = httpx.get(f"{self.dashboard_url}/api/inspect", params={"url": url}, timeout=20.0)
+                st = r.json() or {}
+            except Exception:
+                continue
+            if st.get("status") == "done":
+                return _format_verdict(st.get("verdict") or {})
+            if st.get("status") == "error":
+                return f"Couldn't vet that listing: {st.get('error') or 'unknown error'}"
+        return "That one's taking a while to vet — check the app in a minute."
+
+    # ------------------------------------------------------------------
     # Proactive check-ins (heartbeats)
     # ------------------------------------------------------------------
 
@@ -364,9 +440,12 @@ class TelegramBridge:
         """For each person, if it's been quiet for a while (no alert, no chat, no prior check-in),
         send a reassuring note + an offer to broaden or vet. The main chat also covers unassigned
         watches (the admin manages those); a buddy sees only their own."""
+        if self.checkin_s <= 0:
+            return                                          # proactive check-ins turned off
         watches = self._fetch_watches()
         if not watches:
             return
+        prefs = self._fetch_checkin_prefs()      # each person's own cadence beats the default
         for owner in sorted(self.allowed):
             if owner == self.chat_id:
                 owned = [w for w in watches if str(w.get("owner") or "") in ("", str(owner))]
@@ -375,12 +454,28 @@ class TelegramBridge:
             owned = [w for w in owned if w.get("enabled")]      # only what's actually watching
             if not owned:
                 continue
+            # This person's own setting (set from the bot: "check in every 6 hours"), else default.
+            try:
+                every = float(prefs.get(str(owner), self.checkin_s / 3600.0)) * 3600.0
+            except (TypeError, ValueError):
+                every = self.checkin_s
+            if every <= 0:
+                continue                                        # this person turned check-ins off
             last = self._owner_last_activity(owner, owned)
-            if now - last < _HEARTBEAT_EVERY_S:
+            if now - last < every:
                 continue                                        # recently in touch — stay quiet
             self._send(_heartbeat_message(owned, now - last), owner)
             self._heartbeat_sent[owner] = now
             log.info("Telegram: sent a proactive check-in to %s", owner)
+
+    def _fetch_checkin_prefs(self) -> dict:
+        try:
+            r = httpx.get(f"{self.dashboard_url}/api/telegram/checkin-prefs", timeout=15.0)
+            if r.status_code == 200 and isinstance(r.json(), dict):
+                return r.json()
+        except Exception as exc:
+            log.debug("Telegram: could not fetch check-in prefs (%s)", exc)
+        return {}
 
     def _fetch_watches(self):
         try:
@@ -468,6 +563,55 @@ class TelegramBridge:
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-tested)
 # ---------------------------------------------------------------------------
+
+def _format_listings(rows: list, limit: int = 15) -> str:
+    """A compact, scannable list of finds for a phone: rating, title, price, tappable link.
+    Telegram HTML mode, so only <b>/<a> and escaped text."""
+    import html as _h
+    out = []
+    for r in rows[:limit]:
+        if not isinstance(r, dict):
+            continue
+        title = _h.escape(str(r.get("title") or "(listing)").strip())[:90]
+        price = _h.escape(str(r.get("price_text") or r.get("price") or "").strip())
+        try:
+            rating = int(r.get("rating") or 0)
+        except (TypeError, ValueError):
+            rating = 0
+        stars = ("★" * rating) if rating else ""
+        url = str(r.get("url") or "").strip()
+        head = f"{stars} " if stars else ""
+        line = f"{head}<b>{title}</b>" + (f" — {price}" if price else "")
+        if url.startswith("http"):
+            line += f'\n<a href="{_h.escape(url, quote=True)}">open</a>'
+        out.append(line)
+    if not out:
+        return ""
+    more = f"\n\n…and {len(rows) - limit} more." if len(rows) > limit else ""
+    return "\n\n".join(out) + more
+
+
+def _format_verdict(v: dict) -> str:
+    """Render a Deep Inspect verdict for a phone: deal stars, scam risk, why, and any red flags."""
+    if not v:
+        return "I couldn't read enough from that listing to judge it."
+    try:
+        dq = int(v.get("deal_quality", 3))
+    except (TypeError, ValueError):
+        dq = 3
+    risk = str(v.get("scam_risk", "low")).lower()
+    risk_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk, "🟡")
+    lines = [f"{'★' * dq}{'☆' * (5 - dq)} deal · {risk_icon} {risk} scam risk"]
+    for key in ("summary", "deal_reason"):
+        val = str(v.get(key) or "").strip()
+        if val:
+            lines += ["", val]
+            break
+    flags = v.get("red_flags") or []
+    if flags:
+        lines += ["", "⚠️ " + "; ".join(str(f) for f in flags[:4])]
+    return "\n".join(lines)
+
 
 def _parse_iso(s) -> float:
     """An ISO timestamp string → epoch seconds, or 0.0 if unparseable/empty."""

@@ -120,6 +120,8 @@ When the user asks what you can do, answer plainly from this list — don't inve
   • Start, stop, pause, enable, disable, or delete an individual watch.
   • Look up what a watch has found and share the links + a quick verdict.
   • Report Claude spend for the month (when cloud is on).
+  • Change how often YOU get quiet-period check-ins ("check in every 6 hours", "twice a day",
+    "stop checking in") — each person has their own setting.
 TWO LEVELS OF START/STOP — keep them straight:
   1. THE WHOLE WATCHER (a master switch): "pause everything" / "stop the whole Watcher" /
      "resume watching" pauses or resumes ALL watching for everyone. This is OWNER-ONLY.
@@ -571,6 +573,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
 
         cfg      = load()
         job_map  = {j["watch_name"]: j for j in manager.get_job_info()}
+        owner_names = _load_owner_names()      # chat_id -> the person's Telegram name
         result   = []
         for w in cfg.watches:
             last = get_last_run(w.name)
@@ -584,6 +587,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "name":             w.name,
                 "enabled":          w.enabled,
                 "owner":            w.owner,        # who owns it (a Telegram chat_id, "" = unassigned)
+                "owner_name":       owner_names.get(str(w.owner or ""), ""),   # for grouping in the UI
                 "urls":             w.urls,
                 "instruction":      w.instruction,
                 "interval_minutes": w.interval_minutes,
@@ -944,6 +948,18 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         if owner:
             _record_owner_name(owner, str(body.get("owner_name") or "").strip())
 
+        # "show me my settings" is answered directly from real state — no model call, so it's
+        # instant and can never be hallucinated. Scoped: everyone sees their own settings; the
+        # owner also gets the server-wide block. See _render_settings.
+        _latest = _latest_user_text(messages)
+        if _is_settings_request(_latest):
+            result = {"message": _render_settings(cfg, manager, owner),
+                      "watch_suggestion": None, "raw": None}
+            result["raw"] = result["message"]
+            _persist_chat_turn(messages, result, owner)
+            result.pop("raw", None)
+            return result
+
         try:
             snap = manager.oversight_snapshot(limit=14)
         except Exception:
@@ -975,31 +991,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 log.warning("could not %s the Watcher from chat: %s", prog, exc)
                 result["message"] = f"I couldn't {prog} the Watcher just now: {exc}"
 
-        # Persist the exchange on EVERY turn that had a user message — including degraded/error
-        # turns — so a transient model hiccup can't punch a permanent hole in the saved chat.
-        # (The old gate only saved when the turn fully succeeded and carried a private "raw", so
-        # any errored turn silently dropped BOTH the user's message and the reply — the "chat
-        # stopped logging" report.) Use "raw" (clean prose) when present, else the shown message.
-        last = messages[-1] if messages else None
-        if isinstance(last, dict) and last.get("role") == "user":
-            import time as _t
-            now = _t.time()
-            reply_text = result.get("raw") or result.get("message") or ""
-            n_sugg = len(result.get("watch_suggestions") or
-                         ([result["watch_suggestion"]] if result.get("watch_suggestion") else []))
-            log.info("Watcher chat turn: user=%r → reply %d char(s), %d suggestion(s)",
-                     str(last.get("content", ""))[:80], len(reply_text), n_sugg)
-            try:
-                history = _load_watcher_history(owner)
-                # Stamp both turns so the UI can show "when" dividers on scroll-back. Keep the
-                # client's own ts if it sent one (the user typed slightly before we replied).
-                user_msg = dict(last)
-                user_msg.setdefault("ts", now)
-                history.append(user_msg)
-                history.append({"role": "assistant", "content": reply_text, "ts": now})
-                _save_watcher_history(history[-200:], owner)
-            except Exception as exc:
-                log.warning("Watcher chat: could not persist turn: %s", exc)
+        _persist_chat_turn(messages, result, owner)
         result.pop("raw", None)
         return result
 
@@ -1119,7 +1111,11 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         errors = [r for r in recent if r.get("error")]
         return {
             "first_run": len(cfg.watches) == 0,
-            "watch_count": len(cfg.watches),
+            # watch_count = what it's ACTIVELY watching (deactivated ones are kept but ignored, so
+            # counting them overstated "watching N watches"). total_count keeps the full figure.
+            "watch_count": sum(1 for w in cfg.watches if w.enabled),
+            "total_count": len(cfg.watches),
+            "disabled_count": sum(1 for w in cfg.watches if not w.enabled),
             "enabled_count": sum(1 for w in cfg.watches if w.enabled),
             "running_count": sum(1 for w in watches if w["running"]),
             "total_matches": total_matches,
@@ -1208,7 +1204,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             "telegram": {"chat_id": tg.chat_id, "token_set": bool(tg.bot_token),
                          "token_hint": _mask(tg.bot_token),
                          "two_way": bool(getattr(tg, "two_way", False)),
-                         "allowed_chat_ids": list(getattr(tg, "allowed_chat_ids", []) or [])},
+                         "allowed_chat_ids": list(getattr(tg, "allowed_chat_ids", []) or []),
+                         "checkin_hours": getattr(tg, "checkin_hours", 12.0)},
             "email": {"smtp_server": em.smtp_server, "smtp_port": em.smtp_port,
                       "from_address": em.from_address, "to_address": em.to_address,
                       "password_set": bool(em.app_password)},
@@ -1239,6 +1236,12 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             cfg.notifications.telegram.bot_token = tg["bot_token"].strip()
         if "two_way" in tg:
             cfg.notifications.telegram.two_way = bool(tg["two_way"])
+        if "checkin_hours" in tg:
+            try:
+                v = str(tg.get("checkin_hours") or "").strip()
+                cfg.notifications.telegram.checkin_hours = max(0.0, float(v)) if v else 12.0
+            except (TypeError, ValueError):
+                pass
         if "allowed_chat_ids" in tg:
             # Accept a list or a comma/space-separated string from the UI field.
             raw = tg["allowed_chat_ids"]
@@ -1362,6 +1365,12 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             return {"ok": False}
         _record_access_request(cid, str(body.get("name") or "").strip())
         return {"ok": True}
+
+    @app.get("/api/telegram/checkin-prefs")
+    def telegram_checkin_prefs():
+        """Per-person check-in cadence (hours), keyed by chat_id. The bridge reads this so each
+        person's own setting wins over the config default."""
+        return _load_checkin_prefs()
 
     @app.get("/api/telegram/access-requests")
     def telegram_list_access_requests():
@@ -1843,6 +1852,34 @@ def _history_path(owner: str | None = None):
     return _WATCHER_HISTORY_PATH.with_name(f"watcher_history_{safe}.json")
 
 
+def _persist_chat_turn(messages: list, result: dict, owner: str | None) -> None:
+    """Save the exchange on EVERY turn that had a user message — including degraded/error turns —
+    so a transient model hiccup can't punch a permanent hole in the saved chat. (An older gate only
+    saved fully-successful turns, which silently dropped BOTH sides on any error — the "chat stopped
+    logging" report.) Uses "raw" (clean prose) when present, else the shown message."""
+    last = messages[-1] if messages else None
+    if not (isinstance(last, dict) and last.get("role") == "user"):
+        return
+    import time as _t
+    now = _t.time()
+    reply_text = result.get("raw") or result.get("message") or ""
+    n_sugg = len(result.get("watch_suggestions") or
+                 ([result["watch_suggestion"]] if result.get("watch_suggestion") else []))
+    log.info("Watcher chat turn: user=%r → reply %d char(s), %d suggestion(s)",
+             str(last.get("content", ""))[:80], len(reply_text), n_sugg)
+    try:
+        history = _load_watcher_history(owner)
+        # Stamp both turns so the UI can show "when" dividers on scroll-back. Keep the client's
+        # own ts if it sent one (the user typed slightly before we replied).
+        user_msg = dict(last)
+        user_msg.setdefault("ts", now)
+        history.append(user_msg)
+        history.append({"role": "assistant", "content": reply_text, "ts": now})
+        _save_watcher_history(history[-200:], owner)
+    except Exception as exc:
+        log.warning("Watcher chat: could not persist turn: %s", exc)
+
+
 def _load_watcher_history(owner: str | None = None) -> list:
     try:
         p = _history_path(owner)
@@ -1892,6 +1929,163 @@ def _record_owner_name(owner: str | None, name: str) -> None:
         _OWNER_NAMES_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log.warning("could not record owner name: %s", exc)
+
+
+# --- Per-person check-in preference (set from the bot: "check in every 6 hours") ---
+# Each person controls their OWN quiet-period check-in cadence; the config value is the default
+# for anyone who hasn't set one. Stored beside the other per-owner state.
+_CHECKIN_PREFS_PATH = _WATCHER_HISTORY_PATH.with_name("checkin_prefs.json")
+
+
+def _load_checkin_prefs() -> dict:
+    try:
+        if _CHECKIN_PREFS_PATH.exists():
+            d = json.loads(_CHECKIN_PREFS_PATH.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return {str(k): float(v) for k, v in d.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _set_checkin_pref(owner: str, hours: float) -> None:
+    owner = str(owner or "").strip()
+    if not owner:
+        return
+    try:
+        d = _load_checkin_prefs()
+        d[owner] = max(0.0, float(hours))
+        _CHECKIN_PREFS_PATH.write_text(json.dumps(d), encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not save check-in preference: %s", exc)
+
+
+# "check in every 6 hours" / "twice a day" / "stop checking in" → hours (0 = off), else None.
+_CHECKIN_RE = re.compile(
+    r"\b(check(?:ing)?[- ]?ins?|check on me|update me|ping me|notify me|status update)\b", re.I)
+_EVERY_HOURS_RE = re.compile(r"\bevery\s+(\d+(?:\.\d+)?)\s*(hours?|hrs?|h)\b", re.I)
+_EVERY_DAY_RE   = re.compile(r"\b(once|twice|(\d+)\s*times?)\s+(a|per)\s+day\b", re.I)
+_STOP_CHECKIN_RE = re.compile(r"\b(stop|don'?t|no more|disable|turn off|quit)\b", re.I)
+
+
+def _classify_checkin(text: str):
+    """Parse a check-in cadence request into hours (0 = turn them off), or None if the message
+    isn't about check-ins. Deterministic — a settings change shouldn't ride on the 14b."""
+    t = text or ""
+    if not _CHECKIN_RE.search(t):
+        return None
+    if _STOP_CHECKIN_RE.search(t):
+        return 0.0
+    m = _EVERY_HOURS_RE.search(t)
+    if m:
+        try:
+            return max(0.0, float(m.group(1)))
+        except ValueError:
+            return None
+    m = _EVERY_DAY_RE.search(t)
+    if m:
+        word = (m.group(1) or "").lower()
+        n = 1.0 if word.startswith("once") else 2.0 if word.startswith("twice") else None
+        if n is None:
+            try:
+                n = float(m.group(2))
+            except (TypeError, ValueError):
+                return None
+        return 24.0 / n if n > 0 else None
+    return None
+
+
+# --- The settings block ("show me my settings") ------------------------------------
+# Answered deterministically (no model call): it must be accurate, instant, and correctly
+# SCOPED — everyone sees their own settings; only the owner also sees server-wide ones.
+_SETTINGS_RE = re.compile(
+    r"\b(settings?|preferences?|options|configuration|config|my setup)\b", re.I)
+
+
+def _is_settings_request(text: str) -> bool:
+    t = text or ""
+    if not _SETTINGS_RE.search(t):
+        return False
+    # "change the settings for X" is a request to DO something; a bare ask is a request to SEE.
+    return not re.search(r"\b(change|set|update|edit|turn|make)\b", t, re.I)
+
+
+def _fmt_hours(h: float) -> str:
+    if not h:
+        return "off"
+    if abs(h - 24.0) < 0.01:
+        return "once a day"
+    if abs(h - 12.0) < 0.01:
+        return "twice a day"
+    return f"every {h:g}h"
+
+
+def _render_settings(cfg, manager, owner: str | None) -> str:
+    """The settings block. TWO LEVELS, deliberately separated:
+      • YOUR SETTINGS — what this person controls for themselves (their check-in cadence, their
+        watches, where their alerts go). Everyone gets this.
+      • SERVER SETTINGS — app-wide state (master switch, AI provider + spend, who may use the bot,
+        version). Only the OWNER sees this; a buddy never learns about other people or the key."""
+    from web_watcher.__version__ import __version__
+    admin = _is_admin_owner(owner, cfg)
+    # The personal block lists watches this person actually OWNS — even for the admin, who can
+    # SEE everything (that total belongs in the server block, not under "Your settings").
+    mine = ([w for w in cfg.watches if str(getattr(w, "owner", "") or "") == str(owner)]
+            if owner else list(cfg.watches))
+    lines = ["⚙️ <b>Your settings</b>"]
+
+    # Check-in cadence: this person's own preference, else the configured default.
+    default_h = float(getattr(cfg.notifications.telegram, "checkin_hours", 12.0) or 0)
+    hours = _load_checkin_prefs().get(str(owner), default_h) if owner else default_h
+    lines.append(f"• Quiet check-ins: <b>{_fmt_hours(float(hours))}</b>")
+    running = sum(1 for w in mine if getattr(w, "enabled", True))
+    lines.append(f"• Your watches: <b>{len(mine)}</b> ({running} on)")
+    for w in mine[:8]:
+        state = "on" if getattr(w, "enabled", True) else "off"
+        lines.append(f"   – {w.name} ({state})")
+    if len(mine) > 8:
+        lines.append(f"   – …and {len(mine) - 8} more")
+    lines.append("• Alerts: sent to this chat")
+    lines += ["", "<i>Change yours:</i> “check in every 6 hours”, “twice a day”, “stop checking "
+              "in”, “stop my watches”."]
+
+    if admin:
+        lines += ["", "🛠 <b>Server settings</b> (owner only)"]
+        try:
+            st = manager.watcher_status()
+            lines.append(f"• Watching: <b>{'ON' if st.get('running') else 'PAUSED'}</b>"
+                         + (f" — checking {st['current']}" if st.get("current") else ""))
+        except Exception:
+            pass
+        lines.append(f"• Watches on this server: <b>{len(cfg.watches)}</b>")
+        tg = cfg.notifications.telegram
+        people = 1 + len([c for c in (getattr(tg, "allowed_chat_ids", []) or []) if c])
+        lines.append(f"• People allowed to use the bot: <b>{people}</b>")
+        lines.append(f"• Two-way chat: <b>{'on' if getattr(tg, 'two_way', False) else 'off'}</b>"
+                     f" · default check-ins: <b>{_fmt_hours(default_h)}</b>")
+        # AI provider + spend
+        try:
+            from web_watcher import llm
+            roles = (cfg.models.cloud.roles or {})
+            chat_route = roles.get("chat")
+            cloud_chat = bool(chat_route and (chat_route.provider or "").lower() == "anthropic")
+            judge = roles.get("judge")
+            cloud_judge = bool(judge and (judge.provider or "").lower() == "anthropic")
+            lines.append(f"• AI: local <b>{cfg.models.text_model}</b> · Claude for chat: "
+                         f"<b>{'on' if cloud_chat else 'off'}</b> · for rating: "
+                         f"<b>{'on' if cloud_judge else 'off'}</b>")
+            b = llm.budget_state(cfg)
+            if b.get("cap"):
+                lines.append(f"• Claude spend: <b>${b['spent']:.2f}</b> of ${b['cap']:.2f} "
+                             f"(~${b['remaining']:.2f} left)")
+            elif b.get("spent"):
+                lines.append(f"• Claude spend this month: <b>${b['spent']:.2f}</b> (no cap set)")
+        except Exception:
+            pass
+        lines.append(f"• Version: <b>{__version__}</b>")
+        lines += ["", "<i>Owner controls:</i> “pause everything” / “resume watching”, and anything "
+                  "above can be changed in the app under Settings."]
+    return "\n".join(lines)
 
 
 # --- Telegram access requests (parked for one-click approval in the console) -------
@@ -2160,9 +2354,11 @@ def _cloud_spend_context(cfg) -> str:
 
 def _watches_for_owner(cfg, owner: str | None):
     """The watches an assistant turn may see/act on. owner=None (the desktop dashboard) → ALL.
-    owner set (a Telegram sender's chat_id) → ONLY that person's watches, so the buddy sees
-    just his. An empty-owner watch is unassigned and never shown to a specific Telegram user."""
-    if not owner:
+    The ADMIN on Telegram (owner == the configured main chat_id) also sees ALL — they own the app,
+    so "how many watches are there?" from the owner's phone must answer for everything, including
+    unassigned ones. Any OTHER Telegram person sees ONLY their own watches, so a buddy can't see
+    or touch anyone else's."""
+    if not owner or _is_admin_owner(owner, cfg):
         return list(cfg.watches)
     return [w for w in cfg.watches if str(getattr(w, "owner", "") or "") == str(owner)]
 
@@ -2389,6 +2585,13 @@ Your job here is only to UNDERSTAND and RESPOND:
   setting up that watch on Craigslist now." The build step handles the rest. NEVER ask the user
   to confirm an action they already asked for — "Do you want me to set it up?" is wrong when
   they just said "set up a … watch".
+- A BARE "yes" / "no" / "ok" ANSWERS THE QUESTION YOU JUST ASKED. Re-read your own previous
+  message and do THAT. If you just asked "want to see the matches?", a "yes" means SHOW THE
+  MATCHES — it does NOT mean create or re-confirm a watch. Never answer a bare yes with "I'll set
+  up that watch" unless the thing you just offered was setting up that watch.
+- SHOW, DON'T OFFER. When the user asks to SEE something they already have ("show me the
+  matches", "list the top 15", "what have you found"), just show it — don't reply with "would you
+  like me to show them?". They already asked.
 - BE HONEST ABOUT WHAT YOU CAN DO. Your tools are exactly: set up or change a watch, and
   start / stop / pause / enable / disable / delete watches. That's it. NEVER claim to do — or
   say you've already done — anything outside that set: you cannot "start the services", "clear
@@ -2748,6 +2951,17 @@ _HARD_CHAT_RE = re.compile(
     r"marketplace|always run|continuous\w*)\b", re.IGNORECASE)
 
 
+_BARE_CONFIRM_RE = re.compile(
+    r"^\s*(y|ye|yes|yep|yeah|yup|ok|okay|sure|sounds good|please|do it|go ahead|"
+    r"n|no|nope|nah|never ?mind)\b[\s.!,]*$", re.I)
+
+
+def _is_bare_confirmation(text: str) -> bool:
+    """True for a message that is ONLY a yes/no with no content of its own. Such a turn answers
+    the assistant's previous question — it can't be a request to watch something new."""
+    return bool(_BARE_CONFIRM_RE.match(text or ""))
+
+
 def _is_hard_chat_turn(messages: list, focus: str | None) -> bool:
     """Should this turn be allowed to use cloud? Everyday chat stays local; the hard turns —
     creating or changing a watch, or a long/complex ask — escalate when cloud chat is enabled.
@@ -2953,8 +3167,8 @@ def _is_owned(name: str, cfg, owner: str | None) -> bool:
     """True if this watch may be acted on in the current scope. owner=None (desktop) → any
     watch. owner set (a Telegram person) → only a watch whose owner is that same chat_id, so
     the buddy can never start/stop/edit/delete someone else's watch."""
-    if not owner:
-        return True
+    if not owner or _is_admin_owner(owner, cfg):
+        return True                       # desktop, or the owner on their phone: full control
     w = next((x for x in cfg.watches if x.name == name), None)
     return bool(w and str(getattr(w, "owner", "") or "") == str(owner))
 
@@ -3044,6 +3258,16 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # (the "2 edit cards I wasn't talking about" bug); an edit survives only when the user's
         # own latest message asks for a change AND points at that watch. Creates are untouched.
         suggestions = _ground_update_suggestions(suggestions, messages, focus)
+        # A BARE "yes"/"no"/"ok" answers the assistant's own last question — it can never name a
+        # new thing to watch. Without this, "show me the matches" → "want to see them?" → "Yes"
+        # came back as "I'll set up that watch", hijacking the conversation with a create card.
+        # The one exception is a create already mid-setup (PENDING_CREATE), where yes DOES confirm.
+        if focus != PENDING_CREATE and _is_bare_confirmation(latest_user):
+            dropped = [s for s in suggestions if (s.get("action") or "create") == "create"]
+            if dropped:
+                log.info("chat: dropped %d create card(s) on a bare yes/no — answering the "
+                         "question instead", len(dropped))
+            suggestions = [s for s in suggestions if (s.get("action") or "create") != "create"]
         # Ownership scope (Telegram): a person may only EDIT their own watches, and any watch
         # they CREATE is stamped as theirs so it shows up under them next time. Desktop
         # (owner=None) is unaffected.
@@ -3078,6 +3302,16 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         if all_terms:
             seen = set(); uniq = [t for t in all_terms if not (t in seen or seen.add(t))]
             message += "\n\nI'll search a few ways to catch more of these: " + ", ".join(uniq) + "."
+
+        # ── Per-person settings from chat: check-in cadence ("check in every 6 hours") ──
+        checkin_hours = _classify_checkin(latest_user)
+        if checkin_hours is not None and owner:
+            _set_checkin_pref(owner, checkin_hours)
+            message = ("Got it — I'll stop the quiet-period check-ins. You'll still get alerts "
+                       "for new finds." if checkin_hours == 0 else
+                       f"Got it — I'll check in about every {checkin_hours:g} hour"
+                       f"{'' if checkin_hours == 1 else 's'} when there's nothing new.")
+            suggestions, watch_actions = [], None
 
         # ── Master switch vs "my watches" (deterministic — too consequential for the 14b) ──
         # The whole-Watcher pause/resume is admin-only; a person's bare "stop" is scoped to their

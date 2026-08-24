@@ -159,7 +159,63 @@ def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     assert sent == ["Sure, boats instead."]
 
 
+# ── tap-to-vet button ────────────────────────────────────────────────────────────
+
+def test_vet_token_roundtrip_and_fits_callback_data(tmp_path, monkeypatch):
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    url = "https://offerup.com/item/detail/41b6e682-17bd-3b0a-a1cc-9b0da7882a27"
+    tok = notify.remember_vet_link(url)
+    assert notify.vet_url_for(tok) == url
+    assert len(f"vet:{tok}") <= 64          # Telegram's callback_data cap
+    assert notify.vet_url_for("nosuchtoken") == ""
+
+
+def test_vet_button_runs_inspect_and_replies(monkeypatch, tmp_path):
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    url = "https://offerup.com/item/detail/x"
+    tok = notify.remember_vet_link(url)
+
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
+    monkeypatch.setattr(b, "_vet_listing", lambda u: f"VERDICT for {u}")
+    b._handle_callback({"id": "1", "data": f"vet:{tok}",
+                        "message": {"chat": {"id": "111"}}})
+    assert sent == [f"VERDICT for {url}"]
+
+
+def test_vet_button_ignores_unauthorized_chat(monkeypatch):
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="": sent.append(t))
+    monkeypatch.setattr(b, "_vet_listing", lambda u: pytest.fail("must not vet for a stranger"))
+    b._handle_callback({"id": "1", "data": "vet:abc", "message": {"chat": {"id": "99999"}}})
+    assert sent == []
+
+
+def test_format_verdict_renders_stars_risk_and_flags():
+    from web_watcher.telegram_bot import _format_verdict
+    out = _format_verdict({"deal_quality": 2, "scam_risk": "high",
+                           "deal_reason": "Above comps.", "red_flags": ["no photos"]})
+    assert "★★☆☆☆" in out and "high scam risk" in out and "no photos" in out
+
+
 # ── proactive check-ins (heartbeats) ─────────────────────────────────────────────
+
+def test_checkin_hours_configures_the_interval():
+    assert TelegramBridge("t", "1", "u", checkin_hours=12).checkin_s == 12 * 3600
+    assert TelegramBridge("t", "1", "u", checkin_hours=0).checkin_s == 0     # disabled
+
+
+def test_heartbeat_disabled_when_checkin_hours_zero(monkeypatch):
+    b = TelegramBridge("t", "111", "u", checkin_hours=0)
+    monkeypatch.setattr(b, "_fetch_watches", lambda: pytest.fail("must not even look"))
+    b._run_heartbeats(now=10_000_000)          # returns immediately, no send
+
 
 def test_heartbeat_fires_when_quiet_and_offers_help(monkeypatch):
     b = _bridge("111")

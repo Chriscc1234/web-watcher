@@ -266,14 +266,24 @@ class OversightAgent:
                        "I'm on watch — but there's nothing to watch yet. Tell me what to look "
                        "for over in the assistant and I'll start keeping an eye out.")
             return
-        running = sum(1 for w in state if w["running"])
-        total = sum(w["matches"] for w in state)
+        # Count only what it's ACTUALLY watching — a deactivated watch is kept but ignored, so
+        # including it made "keeping an eye on 5 watches" overstate the truth.
+        active = [w for w in state if w.get("enabled", True)]
+        off = len(state) - len(active)
+        running = sum(1 for w in active if w["running"])
+        total = sum(w["matches"] for w in active)
+        if not active:
+            self._emit("status",
+                       f"I'm on watch, but all {len(state)} watch"
+                       f"{'es are' if len(state) != 1 else ' is'} turned off right now.")
+            return
         self._emit(
             "status",
-            f"I'm on watch. Keeping an eye on {len(state)} "
-            f"watch{'es' if len(state) != 1 else ''}"
+            f"I'm on watch. Keeping an eye on {len(active)} "
+            f"watch{'es' if len(active) != 1 else ''}"
             + (f", {running} running right now" if running else " (none running yet)")
-            + (f". {total} matches found so far." if total else "."),
+            + (f". {total} matches found so far." if total else ".")
+            + (f" ({off} turned off.)" if off else ""),
         )
 
     def _narrate_deltas(self, state: list[dict]) -> None:

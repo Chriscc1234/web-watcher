@@ -70,17 +70,19 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
 
     text = _format_telegram(payload)
 
+    # Tap-to-vet: a button on the alert runs Deep Inspect on this listing (deal + scam risk) and
+    # replies with the verdict, so a find can be judged from the phone without opening the app.
+    body: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if payload.result.link:
+        tok = remember_vet_link(payload.result.link)
+        body["reply_markup"] = {"inline_keyboard": [[
+            {"text": "🔍 Vet this listing", "callback_data": f"{_VET_PREFIX}{tok}"}
+        ]]}
+
     try:
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
             # Send text message first
-            r = client.post(
-                f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage",
-                json={
-                    "chat_id":    chat_id,
-                    "text":       text,
-                    "parse_mode": "HTML",
-                },
-            )
+            r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage", json=body)
             r.raise_for_status()
 
             # Attach screenshot if present
@@ -183,6 +185,57 @@ def send_notifications(
 # ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------
+
+# --- "Vet this listing" buttons -------------------------------------------------
+# An alert carries a tap-to-vet button. Telegram caps callback_data at 64 bytes, so we send a
+# short token and keep token -> URL in a small file the bridge reads back when the button is
+# tapped (survives a restart; capped so it can't grow forever). See telegram_bot._handle_callback.
+_VET_PREFIX = "vet:"
+
+
+def _vet_store_path():
+    from web_watcher import paths
+    return paths.data_dir() / "vet_links.json"
+
+
+def vet_token(url: str) -> str:
+    """A short, stable token for this listing URL."""
+    import hashlib
+    return hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:16]
+
+
+def remember_vet_link(url: str) -> str:
+    """Record url under its token so a tapped button can be resolved later. Returns the token."""
+    tok = vet_token(url)
+    try:
+        import json
+        p = _vet_store_path()
+        data = {}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8")) or {}
+            except Exception:
+                data = {}
+        data[tok] = url
+        if len(data) > 500:                      # keep the newest ~500 only
+            data = dict(list(data.items())[-500:])
+        p.write_text(json.dumps(data), encoding="utf-8")
+    except Exception as exc:
+        log.debug("could not record vet link: %s", exc)
+    return tok
+
+
+def vet_url_for(token: str) -> str:
+    """The listing URL behind a vet token, or "" if unknown."""
+    try:
+        import json
+        p = _vet_store_path()
+        if p.exists():
+            return str((json.loads(p.read_text(encoding="utf-8")) or {}).get(token, "") or "")
+    except Exception:
+        pass
+    return ""
+
 
 def _tg(s, quote: bool = False) -> str:
     """Escape text for Telegram's HTML parse mode (only &, <, > matter; quote for href)."""

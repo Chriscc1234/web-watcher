@@ -5,6 +5,8 @@ See web_watcher/telegram_bot.py."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from web_watcher.telegram_bot import (
@@ -59,7 +61,7 @@ def test_dispatch_ignores_unauthorized_and_empty(monkeypatch):
 def test_notify_access_request_alerts_admin_once(monkeypatch):
     b = _bridge("12345")
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append((chat_id, t)))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append((chat_id, t)))
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda *a, **k: None)
     b._notify_access_request("99999", "Stranger")
     b._notify_access_request("99999", "Stranger")          # same knocker again — no second alert
@@ -125,7 +127,7 @@ def test_affirmative_and_negative_detection():
 def test_yes_applies_the_pending_change(monkeypatch):
     b = _bridge()
     sent, applied = [], []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: applied.append(p) or "✅ Done.")
     monkeypatch.setattr(b, "_ask_watcher", lambda t, o="", n="": pytest.fail("a yes must not re-ask the model"))
@@ -139,7 +141,7 @@ def test_yes_applies_the_pending_change(monkeypatch):
 def test_no_cancels_without_applying(monkeypatch):
     b = _bridge()
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply on 'no'"))
     b._pending = [{"name": "Trucks"}]
@@ -150,7 +152,7 @@ def test_no_cancels_without_applying(monkeypatch):
 def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     b = _bridge()
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply"))
     monkeypatch.setattr(b, "_ask_watcher", lambda t, o="", n="": {"message": "Sure, boats instead."})
@@ -179,19 +181,20 @@ def test_vet_button_runs_inspect_and_replies(monkeypatch, tmp_path):
 
     b = _bridge("111")
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
     monkeypatch.setattr(b, "_vet_listing", lambda u: f"VERDICT for {u}")
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     b._handle_callback({"id": "1", "data": f"vet:{tok}",
                         "message": {"chat": {"id": "111"}}})
-    assert sent == [f"VERDICT for {url}"]
+    assert sent and f"VERDICT for {url}" in sent[0]
 
 
 def test_vet_button_ignores_unauthorized_chat(monkeypatch):
     b = _bridge("111")
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_vet_listing", lambda u: pytest.fail("must not vet for a stranger"))
     b._handle_callback({"id": "1", "data": "vet:abc", "message": {"chat": {"id": "99999"}}})
     assert sent == []
@@ -220,7 +223,7 @@ def test_heartbeat_disabled_when_checkin_hours_zero(monkeypatch):
 def test_heartbeat_fires_when_quiet_and_offers_help(monkeypatch):
     b = _bridge("111")
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append((chat_id, t)))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append((chat_id, t)))
     monkeypatch.setattr(b, "_fetch_watches",
                         lambda: [{"name": "Manual Cars", "owner": "111", "enabled": True,
                                   "stats": {"last_match_at": None}}])
@@ -234,7 +237,7 @@ def test_heartbeat_fires_when_quiet_and_offers_help(monkeypatch):
 def test_heartbeat_stays_quiet_when_recently_in_touch(monkeypatch):
     b = _bridge("111")
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_fetch_watches",
                         lambda: [{"name": "Manual Cars", "owner": "111", "enabled": True,
                                   "stats": {}}])
@@ -247,7 +250,7 @@ def test_heartbeat_stays_quiet_when_recently_in_touch(monkeypatch):
 def test_heartbeat_skips_owner_with_no_enabled_watches(monkeypatch):
     b = _bridge("111")
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_fetch_watches",
                         lambda: [{"name": "Off", "owner": "111", "enabled": False, "stats": {}}])
     monkeypatch.setattr(b, "_owner_last_chat_ts", lambda owner: 0.0)
@@ -260,7 +263,7 @@ def test_reversible_action_applies_immediately(monkeypatch):
     # "stop my truck watch" → the server grounds+scopes it; the bridge carries it out at once.
     b = _bridge()
     posted, sent = [], []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_ask_watcher",
                         lambda t, o="", n="": {"message": "On it.",
@@ -280,7 +283,7 @@ def test_reversible_action_applies_immediately(monkeypatch):
 def test_delete_waits_for_a_yes(monkeypatch):
     b = _bridge()
     posted, sent = [], []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append(t))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_ask_watcher",
                         lambda t, o="", n="": {"message": "",
@@ -302,7 +305,7 @@ def test_delete_waits_for_a_yes(monkeypatch):
 
 def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
     b = _bridge()
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: None)
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_ask_watcher",
                         lambda t, o="", n="": {"message": "Here's what I'd set up.",
@@ -334,7 +337,7 @@ def test_html_blocks_are_sent_with_parse_mode(monkeypatch):
 def test_settings_reply_is_sent_as_html(monkeypatch):
     b = _bridge()
     sent = []
-    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False: sent.append((t, html)))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append((t, html)))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_ask_watcher",
                         lambda t, o="", n="": {"message": "⚙️ <b>Your settings</b>", "html": True})
@@ -346,3 +349,37 @@ def test_no_literal_markdown_asterisks_in_prompts():
     from web_watcher.telegram_bot import _describe_suggestions
     out = _describe_suggestions({"watch_suggestion": {"name": "Trucks"}})
     assert "*" not in out                          # asterisks print literally without markdown mode
+
+
+# ── chat stays responsive (a slow vet must not freeze the bot) ───────────────────
+
+def test_updates_are_handled_off_the_poll_loop(monkeypatch):
+    """A chat turn or a vet can take minutes on a local model. Handling them inline froze the
+    bot — a message sent during a vet sat unanswered until it finished."""
+    b = _bridge()
+    started = []
+    monkeypatch.setattr(b, "_get_updates", lambda: [{"message": {"text": "hi", "chat": {"id": "12345"}}}])
+    monkeypatch.setattr(b, "_latest_offset", lambda: None)
+    monkeypatch.setattr(b, "_maybe_run_heartbeats", lambda: None)
+
+    class _T:
+        def __init__(self, target=None, args=(), name=None, daemon=None):
+            started.append(name)
+        def start(self): b._stop.set()          # one pass then exit the loop
+    monkeypatch.setattr("web_watcher.telegram_bot.threading.Thread", _T)
+    b._loop()
+    assert "telegram-update" in started          # dispatched on its own thread, loop kept reading
+
+
+def test_typing_is_refreshed_until_the_reply_is_ready(monkeypatch):
+    """Telegram expires 'typing' after ~5s, so one call left the chat looking idle mid-think."""
+    b = _bridge()
+    beats = []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": beats.append(chat_id))
+    monkeypatch.setattr("web_watcher.telegram_bot._TYPING_REFRESH_S", 0.02)
+    with b._typing_until_sent("111"):
+        time.sleep(0.12)
+    assert len(beats) >= 2 and beats[0] == "111"  # kept alive, not a single shot
+    n = len(beats)
+    time.sleep(0.08)
+    assert len(beats) == n                        # and stopped once the reply was ready

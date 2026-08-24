@@ -11,6 +11,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.58.0-alpha] — 2026-08-24 (Chat comes first, and better alert buttons)
+
+### New — your messages jump the queue
+- Everything the AI does locally shares one graphics card, so a message could sit behind the
+  background searching and take a while to answer. **Chat now takes priority** — your message goes
+  next, and background work waits its turn.
+- **A slow job no longer freezes the bot.** Vetting a listing can take a minute or two; anything
+  you sent during it used to go unanswered until it finished. Messages are now handled
+  independently, so the bot always replies.
+- **"Typing…" stays up** until the reply is actually on its way, instead of disappearing after a
+  few seconds and looking like nothing is happening.
+
+### New — matching buttons on alerts, and self-contained verdicts
+- Alerts now carry two matching buttons: **🔗 Open listing** and **🔍 Vet this listing**.
+- A vetting result now **restates what it judged** — the listing's title, the verdict, and the link
+  again with its own Open button — so it makes sense even when the original alert has scrolled far
+  up the chat.
+
+---
+
 ## [0.57.0-alpha] — 2026-08-24 (Only one copy can ever run)
 
 ### New — a hard one-copy-only guarantee

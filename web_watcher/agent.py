@@ -63,7 +63,7 @@ OLLAMA_TIMEOUT  = 120.0
 # local call across all sweep threads — including the judge/chat calls in llm._ollama_chat, which
 # share THIS SAME lock — so each runs at full speed and finishes inside the timeout. Held only for
 # the inference call itself, so browsers still interleave freely.
-from web_watcher.llm import GPU_LOCK as _GPU_LOCK
+from web_watcher.llm import gpu_slot as _gpu_slot
 # Vision models tokenize a screenshot into image tokens that scale with resolution.
 # At a large window (e.g. 2560x1440) a single screenshot can exceed qwen2.5vl's
 # default 4096 context → Ollama returns HTTP 400 ("exceeds the available context
@@ -848,7 +848,7 @@ def _convene_council(
             "stream": False,
             "format": "json",
         }
-        with _GPU_LOCK, httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+        with _gpu_slot(), httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
             r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             r.raise_for_status()
         raw = r.json()["message"]["content"]
@@ -1615,7 +1615,7 @@ def _query_llm(
                 "stream": False,
                 "options": {"num_ctx": _VISION_NUM_CTX},
             }
-            with _GPU_LOCK, httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+            with _gpu_slot(), httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
                 r = client.post(f"{OLLAMA_URL}/api/chat", json=ocr_payload)
                 r.raise_for_status()
             ocr_text = r.json()["message"]["content"].strip()
@@ -1686,7 +1686,7 @@ def _query_llm(
         "format": "json",
     }
 
-    with _GPU_LOCK, httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+    with _gpu_slot(), httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
         r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
         r.raise_for_status()
 
@@ -2090,7 +2090,7 @@ def _describe_page(page: Page, vision_model: str) -> str:
             "stream": False,
             "options": {"num_ctx": _VISION_NUM_CTX},
         }
-        with _GPU_LOCK, httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
+        with _gpu_slot(), httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
             r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             r.raise_for_status()
         description = r.json()["message"]["content"].strip()

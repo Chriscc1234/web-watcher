@@ -34,6 +34,7 @@ Design notes
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import threading
@@ -58,6 +59,7 @@ _CHAT_TIMEOUT   = 180.0   # a local model turn can be slow; be patient before ap
 _HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (config overrides)
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
+_TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
 
 
 class TelegramBridge:
@@ -149,8 +151,13 @@ class TelegramBridge:
                 for update in self._get_updates():
                     if self._stop.is_set():
                         break
+                    # Handle each update on its OWN thread so the poll loop keeps reading. A chat
+                    # turn or a vet can take minutes on a local model; doing them inline froze the
+                    # bot — a message sent during a vet just sat unanswered until it finished.
                     try:
-                        self._dispatch(update)
+                        t = threading.Thread(target=self._dispatch_safe, args=(update,),
+                                             name="telegram-update", daemon=True)
+                        t.start()
                     except Exception as exc:               # one bad message must not kill the loop
                         log.warning("Telegram: failed handling update: %s", exc)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -188,6 +195,13 @@ class TelegramBridge:
         if updates:
             self._offset = updates[-1]["update_id"] + 1      # ack: never re-deliver these
         return updates
+
+    def _dispatch_safe(self, update: dict) -> None:
+        """Thread entry point: one update, never raising out of the thread."""
+        try:
+            self._dispatch(update)
+        except Exception as exc:
+            log.warning("Telegram: failed handling update: %s", exc)
 
     def _dispatch(self, update: dict) -> None:
         cb = update.get("callback_query")
@@ -242,9 +256,9 @@ class TelegramBridge:
                 return
             # Anything else: not an answer to the question — fall through and just chat.
 
-        self._typing(to)
         try:
-            result = self._ask_watcher(text, owner, sender_name)
+            with self._typing_until_sent(to):      # keep "typing" up for the whole wait
+                result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)
             self._send("Sorry — I couldn't think that through just now. Try again in a moment.", to)
@@ -384,7 +398,7 @@ class TelegramBridge:
     def _handle_callback(self, cb: dict) -> None:
         """A tapped inline button. Only 'vet:<token>' exists today: resolve the token back to the
         listing URL and run Deep Inspect (deal rating + scam risk), then reply with the verdict."""
-        from web_watcher.notify import vet_url_for
+        from web_watcher.notify import vet_entry_for
         data = str(cb.get("data") or "")
         chat = ((cb.get("message") or {}).get("chat") or {}).get("id")
         if not self._authorized(chat):
@@ -393,12 +407,21 @@ class TelegramBridge:
         self._answer_callback(cb.get("id"), "Vetting…")
         if not data.startswith("vet:"):
             return
-        url = vet_url_for(data[4:])
+        entry = vet_entry_for(data[4:])
+        url, title = entry.get("url", ""), entry.get("title", "")
         if not url:
             self._send("I couldn't find that listing to vet — it may be from an older alert.", str(chat))
             return
-        self._typing(str(chat))
-        self._send(self._vet_listing(url), str(chat))
+        with self._typing_until_sent(str(chat)):   # vetting can take a minute+ — keep it visible
+            verdict = self._vet_listing(url)
+        # RESTATE what was judged: the verdict can land long after the alert scrolled away, so a
+        # bare rating is meaningless on its own. Lead with the title, then the verdict, then the
+        # link again — with the same Open button, so it's self-contained.
+        import html as _h
+        head = f"🔍 <b>{_h.escape(title)}</b>\n\n" if title else "🔍 <b>Vetted</b>\n\n"
+        body = head + _h.escape(verdict) + f'\n\n<a href="{_h.escape(url, quote=True)}">{_h.escape(url)}</a>'
+        self._send(body, str(chat), html=True,
+                   buttons=[[{"text": "🔗 Open listing", "url": url}]])
 
     def _answer_callback(self, cb_id, text: str = "") -> None:
         """Acknowledge the tap so Telegram stops the button's spinner."""
@@ -545,6 +568,25 @@ class TelegramBridge:
     # Outbound helpers
     # ------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _typing_until_sent(self, chat_id: str = ""):
+        """Hold Telegram's "…is typing" for the WHOLE wait, not just the first few seconds.
+        Telegram expires a typing action after ~5s, so a single call left the chat looking idle
+        while a local model was still thinking. Re-send it on a heartbeat until the reply is ready."""
+        stop = threading.Event()
+
+        def _beat():
+            while not stop.is_set():
+                self._typing(chat_id)
+                stop.wait(_TYPING_REFRESH_S)
+
+        t = threading.Thread(target=_beat, name="telegram-typing", daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            stop.set()
+
     def _typing(self, chat_id: str = "") -> None:
         """Show Telegram's '…is typing' while the model thinks — a local turn isn't instant and
         silence reads as broken. Defaults to the alert chat when no target is given."""
@@ -554,17 +596,21 @@ class TelegramBridge:
         except Exception:
             pass
 
-    def _send(self, text: str, chat_id: str = "", html: bool = False) -> None:
+    def _send(self, text: str, chat_id: str = "", html: bool = False,
+              buttons: list | None = None) -> None:
         """Send a reply. html=True enables Telegram's HTML parse mode — ONLY for text WE built
         (the settings block, a listing list), where every dynamic value is already escaped. Model
         prose is sent as plain text: it can contain < & > that would break the parser (or be eaten),
         and without parse_mode our own tags would print literally — which is what happened to the
         settings block's <i>…</i>."""
         target = chat_id or self.chat_id       # reply to the sender; fall back to the alert chat
-        for chunk in _chunk(text, _MSG_LIMIT):
+        chunks = _chunk(text, _MSG_LIMIT)
+        for i, chunk in enumerate(chunks):
             body = {"chat_id": target, "text": chunk, "disable_web_page_preview": True}
             if html:
                 body["parse_mode"] = "HTML"
+            if buttons and i == len(chunks) - 1:     # attach controls to the final chunk
+                body["reply_markup"] = {"inline_keyboard": buttons}
             try:
                 httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendMessage",
                            json=body, timeout=20.0)

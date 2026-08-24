@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html as _html
 import logging
+import re
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -74,9 +75,12 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
     # replies with the verdict, so a find can be judged from the phone without opening the app.
     body: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if payload.result.link:
-        tok = remember_vet_link(payload.result.link)
+        tok = remember_vet_link(payload.result.link, _listing_title(payload))
+        # Two matching buttons: open it, or have The Watcher vet it. A url button looks and taps
+        # the same as the callback one, so the pair reads as one control strip.
         body["reply_markup"] = {"inline_keyboard": [[
-            {"text": "🔍 Vet this listing", "callback_data": f"{_VET_PREFIX}{tok}"}
+            {"text": "🔗 Open listing", "url": payload.result.link},
+            {"text": "🔍 Vet this listing", "callback_data": f"{_VET_PREFIX}{tok}"},
         ]]}
 
     try:
@@ -204,8 +208,10 @@ def vet_token(url: str) -> str:
     return hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:16]
 
 
-def remember_vet_link(url: str) -> str:
-    """Record url under its token so a tapped button can be resolved later. Returns the token."""
+def remember_vet_link(url: str, title: str = "") -> str:
+    """Record url (and what it was called) under its token so a tapped button can be resolved
+    later. The TITLE matters: a verdict may arrive long after the alert has scrolled away, so the
+    reply restates what it's judging instead of a bare rating. Returns the token."""
     tok = vet_token(url)
     try:
         import json
@@ -216,7 +222,7 @@ def remember_vet_link(url: str) -> str:
                 data = json.loads(p.read_text(encoding="utf-8")) or {}
             except Exception:
                 data = {}
-        data[tok] = url
+        data[tok] = {"url": url, "title": title} if title else url
         if len(data) > 500:                      # keep the newest ~500 only
             data = dict(list(data.items())[-500:])
         p.write_text(json.dumps(data), encoding="utf-8")
@@ -225,21 +231,40 @@ def remember_vet_link(url: str) -> str:
     return tok
 
 
-def vet_url_for(token: str) -> str:
-    """The listing URL behind a vet token, or "" if unknown."""
+def vet_entry_for(token: str) -> dict:
+    """{"url", "title"} behind a vet token ({} if unknown). Tolerates the older bare-string
+    form so buttons from alerts sent before titles were stored still work."""
     try:
         import json
         p = _vet_store_path()
         if p.exists():
-            return str((json.loads(p.read_text(encoding="utf-8")) or {}).get(token, "") or "")
+            v = (json.loads(p.read_text(encoding="utf-8")) or {}).get(token)
+            if isinstance(v, dict):
+                return {"url": str(v.get("url") or ""), "title": str(v.get("title") or "")}
+            if isinstance(v, str) and v:
+                return {"url": v, "title": ""}
     except Exception:
         pass
-    return ""
+    return {}
+
+
+def vet_url_for(token: str) -> str:
+    """The listing URL behind a vet token, or "" if unknown."""
+    return vet_entry_for(token).get("url", "")
 
 
 def _tg(s, quote: bool = False) -> str:
     """Escape text for Telegram's HTML parse mode (only &, <, > matter; quote for href)."""
     return _html.escape(str(s or ""), quote=quote)
+
+
+def _listing_title(payload: NotificationPayload) -> str:
+    """The human name of the find, pulled off the alert summary ("★★★☆☆ New match: <title> — $x").
+    Used so a vet verdict can restate WHAT it judged, since the alert may have scrolled away."""
+    first = (str(getattr(payload.result, "summary", "") or "").strip().splitlines() or [""])[0]
+    first = re.sub(r"^[★☆\s]+", "", first)
+    first = re.sub(r"^New match:\s*", "", first, flags=re.I)
+    return first.strip()[:120]
 
 
 def _format_telegram(payload: NotificationPayload) -> str:

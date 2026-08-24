@@ -31,11 +31,13 @@ Design rules (non-negotiable)
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import threading
+import time
 from typing import Optional
 
 import httpx
@@ -50,6 +52,38 @@ OLLAMA_BASE = "http://localhost:11434"
 # agent.py (which import this same lock) — acquires it, so local inference runs one-at-a-time at
 # full speed. Held only for the inference HTTP call, so browsers still interleave. Cloud is exempt.
 GPU_LOCK = threading.Lock()
+
+# CHAT GOES FIRST. Sweeps run local inference constantly (vision + judging), so a person's message
+# could sit behind a queue of background work and take a long time to answer. A chat turn raises a
+# flag; background callers wait for it to clear before taking the GPU, so the human gets the next
+# slot instead of the sweep. Bounded so background work can never be starved indefinitely.
+_gpu_priority_waiting = 0
+_gpu_cv = threading.Condition()
+_GPU_YIELD_MAX_S = 45.0        # longest a background call will stand aside for chat
+
+
+@contextlib.contextmanager
+def gpu_slot(priority: bool = False):
+    """Serialize local inference on the one GPU, letting interactive work jump the queue."""
+    global _gpu_priority_waiting
+    if priority:
+        with _gpu_cv:
+            _gpu_priority_waiting += 1
+        try:
+            with GPU_LOCK:
+                yield
+        finally:
+            with _gpu_cv:
+                _gpu_priority_waiting -= 1
+                _gpu_cv.notify_all()
+        return
+    # Background work: stand aside while a person is waiting on a reply.
+    deadline = time.monotonic() + _GPU_YIELD_MAX_S
+    with _gpu_cv:
+        while _gpu_priority_waiting > 0 and time.monotonic() < deadline:
+            _gpu_cv.wait(0.25)
+    with GPU_LOCK:
+        yield
 
 # Cloud model a role defaults to when it is routed to Anthropic without an explicit model.
 # Chosen for the plan's cost/latency tiers: Haiku for the hot/cheap roles, Sonnet for chat,
@@ -179,7 +213,9 @@ def chat(
                        f"Anthropic call failed for role {role!r} ({type(exc).__name__}: {exc}) — "
                        "falling back to the local model.")
 
-    raw = _ollama_chat(messages, local_model, format_json=format_json, images=images, timeout=timeout)
+    # A person is waiting on the "chat" role — let it jump the GPU queue ahead of sweep work.
+    raw = _ollama_chat(messages, local_model, format_json=format_json, images=images,
+                       timeout=timeout, priority=(role == "chat"))
     return _extract_json_text(raw) if format_json else raw
 
 
@@ -216,17 +252,18 @@ def _anthropic_chat(system_text: str, user_messages: list[dict], model: str, key
 # ---------------------------------------------------------------------------
 
 def _ollama_chat(messages: list[dict], model: str, *, format_json: bool,
-                 images: Optional[list[str]], timeout: float, base_url: str = OLLAMA_BASE) -> str:
+                 images: Optional[list[str]], timeout: float, base_url: str = OLLAMA_BASE,
+                 priority: bool = False) -> str:
     msgs = [dict(m) for m in messages]
     if images and msgs:
         msgs[-1]["images"] = images
     payload: dict = {"model": model, "messages": msgs, "stream": False}
     if format_json:
         payload["format"] = "json"
-    # Serialize on the shared GPU lock so the judge/chat here never runs a local inference at the
-    # same time as a browsing agent's vision call — one local GPU does one call at a time; two at
-    # once just thrash and time out. See GPU_LOCK. Cloud calls never reach here, so they're free.
-    with GPU_LOCK, httpx.Client(timeout=timeout) as client:
+    # Serialize on the shared GPU slot so this never runs a local inference at the same time as a
+    # browsing agent's vision call — one local GPU does one call at a time; two at once just thrash
+    # and time out. priority=True (a person is waiting on a reply) jumps ahead of sweep work.
+    with gpu_slot(priority=priority), httpx.Client(timeout=timeout) as client:
         r = client.post(f"{base_url.rstrip('/')}/api/chat", json=payload)
         r.raise_for_status()
         return r.json()["message"]["content"]

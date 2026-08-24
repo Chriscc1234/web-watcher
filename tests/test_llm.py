@@ -57,7 +57,7 @@ def test_unlisted_role_is_local():
 
 def test_chat_local_path_calls_ollama(monkeypatch):
     seen = {}
-    def fake_ollama(messages, model, *, format_json, images, timeout, base_url=llm.OLLAMA_BASE):
+    def fake_ollama(messages, model, *, format_json, images, timeout, base_url=llm.OLLAMA_BASE, priority=False):
         seen.update(model=model, fmt=format_json)
         return '{"ratings": []}'
     monkeypatch.setattr(llm, "_ollama_chat", fake_ollama)

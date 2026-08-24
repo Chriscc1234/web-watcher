@@ -574,6 +574,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "goal_state":       goal_state,   # {available, note} for a goal watch, else None
                 "name":             w.name,
                 "enabled":          w.enabled,
+                "owner":            w.owner,        # who owns it (a Telegram chat_id, "" = unassigned)
                 "urls":             w.urls,
                 "instruction":      w.instruction,
                 "interval_minutes": w.interval_minutes,
@@ -2379,6 +2380,13 @@ Your job here is only to UNDERSTAND and RESPOND:
   setting up that watch on Craigslist now." The build step handles the rest. NEVER ask the user
   to confirm an action they already asked for — "Do you want me to set it up?" is wrong when
   they just said "set up a … watch".
+- BE HONEST ABOUT WHAT YOU CAN DO. Your tools are exactly: set up or change a watch, and
+  start / stop / pause / enable / disable / delete watches. That's it. NEVER claim to do — or
+  say you've already done — anything outside that set: you cannot "start the services", "clear
+  everything", run commands, or change the computer. If the user asks for something you can't do,
+  say so plainly and offer the closest thing you actually can (e.g. "I can't start the app's
+  services, but I can start your watches"). And never report an action as already finished — a
+  separate step applies it; say what you WILL do, not that it's done.
 - Use the details the user ALREADY gave (what to watch, price, which sites). Do NOT ask them
   to repeat something they've already said. For an optional detail they did NOT give (a price
   cap, extra sites), just pick a sensible default and mention it in passing ("no price limit

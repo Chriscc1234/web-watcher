@@ -123,6 +123,36 @@ def test_telegram_sends_message_on_success(respx_mock=None):
     assert "sendMessage" in call_kwargs[0][0]
 
 
+def test_owner_override_routes_alert_to_the_owner():
+    # A watch owned by a friend (a chat_id) alerts THEM, not the main chat.
+    cfg = _cfg(email=False)                    # main chat_id = "chat456"
+    mock_response = MagicMock(); mock_response.raise_for_status = MagicMock()
+    with patch("web_watcher.notify.httpx.Client") as mock_client_cls:
+        instance = mock_client_cls.return_value.__enter__.return_value
+        instance.post.return_value = mock_response
+        ok = send_telegram(_payload(), cfg, chat_id_override="999buddy")
+    assert ok is True
+    assert instance.post.call_args.kwargs["json"]["chat_id"] == "999buddy"
+
+
+def test_blank_owner_override_falls_back_to_main_chat():
+    cfg = _cfg(email=False)
+    mock_response = MagicMock(); mock_response.raise_for_status = MagicMock()
+    with patch("web_watcher.notify.httpx.Client") as mock_client_cls:
+        instance = mock_client_cls.return_value.__enter__.return_value
+        instance.post.return_value = mock_response
+        send_telegram(_payload(), cfg, chat_id_override="")
+    assert instance.post.call_args.kwargs["json"]["chat_id"] == "chat456"
+
+
+def test_send_notifications_passes_owner_through():
+    cfg = _cfg()
+    with patch("web_watcher.notify.send_telegram", return_value=True) as mt, \
+         patch("web_watcher.notify.send_email", return_value=True):
+        send_notifications(_payload(), cfg, owner_chat_id="999buddy")
+    assert mt.call_args.kwargs["chat_id_override"] == "999buddy"
+
+
 def test_telegram_sends_screenshot_when_present():
     cfg = _cfg(email=False)
     mock_response = MagicMock()

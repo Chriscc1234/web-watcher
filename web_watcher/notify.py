@@ -51,13 +51,19 @@ class NotificationPayload:
 # Public send functions
 # ---------------------------------------------------------------------------
 
-def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig) -> bool:
+def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
+                  chat_id_override: str = "") -> bool:
     """
     Send a Telegram message via the Bot API.
     Returns True on success, False on any failure (logs the error).
+
+    chat_id_override: when a watch has an OWNER (a Telegram chat_id), the alert goes to THAT
+    person, not the main chat — so a friend gets their own watch's finds. Falls back to the
+    configured chat when empty.
     """
     t = cfg.telegram
-    if not t.bot_token or not t.chat_id:
+    chat_id = str(chat_id_override or "").strip() or t.chat_id
+    if not t.bot_token or not chat_id:
         log.warning("Telegram not configured — skipping notification for %r", payload.watch_name)
         return False
 
@@ -69,7 +75,7 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig) -> boo
             r = client.post(
                 f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage",
                 json={
-                    "chat_id":    t.chat_id,
+                    "chat_id":    chat_id,
                     "text":       text,
                     "parse_mode": "HTML",
                 },
@@ -80,7 +86,7 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig) -> boo
             if payload.screenshot_bytes:
                 img_r = client.post(
                     f"{TELEGRAM_API}/bot{t.bot_token}/sendPhoto",
-                    data={"chat_id": t.chat_id, "caption": f"Screenshot: {payload.watch_name}"},
+                    data={"chat_id": chat_id, "caption": f"Screenshot: {payload.watch_name}"},
                     files={"photo": ("screenshot.png", payload.screenshot_bytes, "image/png")},
                 )
                 img_r.raise_for_status()
@@ -152,16 +158,20 @@ def send_notifications(
     cfg:         NotificationsConfig,
     use_telegram: bool = True,
     use_email:    bool = True,
+    owner_chat_id: str = "",
 ) -> dict[str, bool]:
     """
     Fire all enabled notification channels.
     Each channel is attempted independently; a failure in one never blocks the other.
     Returns a dict of channel -> success for the run history log.
+
+    owner_chat_id: if the watch belongs to a specific person (a Telegram chat_id), their
+    alerts go to them instead of the main chat. Empty = the main configured chat.
     """
     results: dict[str, bool] = {}
 
     if use_telegram:
-        results["telegram"] = send_telegram(payload, cfg)
+        results["telegram"] = send_telegram(payload, cfg, chat_id_override=owner_chat_id)
 
     if use_email:
         results["email"] = send_email(payload, cfg)

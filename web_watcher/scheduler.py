@@ -1521,6 +1521,7 @@ def _alert_new_listings(
             send_notifications(
                 payload, cfg.notifications,
                 use_telegram=watch.notify.telegram, use_email=watch.notify.email,
+                owner_chat_id=getattr(watch, "owner", "") or "",
             )
             _mark_seen(l)   # only after a send attempt that didn't raise
             sent += 1
@@ -1536,6 +1537,7 @@ def _alert_new_listings(
             send_notifications(
                 payload, cfg.notifications,
                 use_telegram=watch.notify.telegram, use_email=watch.notify.email,
+                owner_chat_id=getattr(watch, "owner", "") or "",
             )
             # Overflow items were surfaced via the summary — record them so they don't
             # re-summarise every sweep.
@@ -1590,7 +1592,8 @@ def _handle_fb_checkpoint(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Op
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=_dt.fromisoformat(run_ts))
         try:
             send_notifications(payload, cfg.notifications,
-                               use_telegram=watch.notify.telegram, use_email=watch.notify.email)
+                               use_telegram=watch.notify.telegram, use_email=watch.notify.email,
+                               owner_chat_id=getattr(watch, "owner", "") or "")
         except Exception as exc:
             log.warning("Checkpoint notification failed for %r: %s", watch.name, exc)
 
@@ -1616,7 +1619,8 @@ def _handle_login_wall(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Optio
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=_dt.fromisoformat(run_ts))
         try:
             send_notifications(payload, cfg.notifications,
-                               use_telegram=watch.notify.telegram, use_email=watch.notify.email)
+                               use_telegram=watch.notify.telegram, use_email=watch.notify.email,
+                               owner_chat_id=getattr(watch, "owner", "") or "")
         except Exception as exc:
             log.warning("Login-wall notification failed for %r: %s", watch.name, exc)
 
@@ -1709,7 +1713,8 @@ def _run_goal_check(
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=run_ts)
         try:
             send_notifications(payload, cfg.notifications,
-                               use_telegram=watch.notify.telegram, use_email=watch.notify.email)
+                               use_telegram=watch.notify.telegram, use_email=watch.notify.email,
+                               owner_chat_id=getattr(watch, "owner", "") or "")
         except Exception as exc:
             log.warning("Restock alert send failed for %r (%s)", watch.name, exc)
 
@@ -1822,6 +1827,7 @@ def _run_pipeline(
                 payload, cfg.notifications,
                 use_telegram=notify_cfg.telegram,
                 use_email=notify_cfg.email,
+                owner_chat_id=getattr(watch, "owner", "") or "",
             )
 
         # 6. Storage

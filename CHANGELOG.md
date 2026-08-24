@@ -11,6 +11,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.50.0-alpha] — 2026-08-24 (Owners kept straight, and honest replies)
+
+### Fixed — a watch's owner is no longer lost
+- Watches assigned to a person (via the Telegram bot) kept their owner internally, but the
+  desktop watch list never showed it — so editing that watch on the desktop silently wiped the
+  owner. The owner is now shown and preserved through edits.
+
+### New — each person gets their OWN alerts
+- When a watch belongs to someone (their Telegram chat), its finds are now sent to **them**, not
+  to the main account. Hand a friend a watch and the matches go straight to their phone.
+
+### Fixed — the bot no longer over-promises
+- The assistant used to say things like "I'm starting the services" or "I'll clear everything" —
+  actions it couldn't actually take. It now sticks to what it can really do (set up / change
+  watches, and start/stop/pause/enable/disable/delete them) and says so plainly when something is
+  outside its reach, instead of claiming it's done.
+
+---
+
 ## [0.49.0-alpha] — 2026-08-24 (When it says it's watching, it actually watches)
 
 ### Fixed — "on watch" now really sweeps after a restart

@@ -1597,6 +1597,22 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             manager.restart_telegram()
         except Exception as exc:
             log.debug("could not restart the Telegram bridge: %s", exc)
+        # Tell them they're in — otherwise approval is silent and they're left wondering whether
+        # the bot works. Sent AFTER the bridge restart so the allow-list is already live if they
+        # reply right away. Best-effort: a failed welcome must never fail the approval.
+        try:
+            from web_watcher import notify
+            first = (name.split() or [""])[0]
+            hi = f"You're in{', ' + first if first else ''}! 👋\n\n"
+            notify.send_plain_telegram(
+                hi + "I'm your Web Watcher. Tell me what to keep an eye on and I'll watch for it "
+                "and message you when something matches — for example:\n\n"
+                "  • “Watch craigslist for a manual pickup under $10k near Anacortes”\n"
+                "  • “Let me know about aluminum boats under 20 feet”\n\n"
+                "You can ask me “what am I watching?” anytime, or “show me the latest match”.",
+                cfg.notifications, chat_id_override=cid)
+        except Exception as exc:
+            log.debug("could not send the welcome message to %s: %s", cid, exc)
         return {"ok": True}
 
     @app.post("/api/telegram/access-requests/dismiss")

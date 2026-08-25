@@ -47,6 +47,31 @@ def test_access_request_records_dedupes_and_removes(isolated):
     assert {r["chat_id"] for r in S._load_access_requests()} == {"888"}
 
 
+def test_approving_a_request_adds_to_allowlist_and_welcomes_them(isolated, monkeypatch):
+    """Approval must (a) put them on the allow-list and (b) tell them they're in — a silent
+    approval leaves a new person wondering whether the bot even works."""
+    from web_watcher import config as _config, notify
+    cfg = AppConfig(notifications=NotificationsConfig(
+        telegram=TelegramConfig(bot_token="111:TOK", chat_id="12345", allowed_chat_ids=[])))
+    saved = {}
+    monkeypatch.setattr(_config, "load", lambda: cfg)
+    monkeypatch.setattr(_config, "save",
+                        lambda c: saved.update(allowed=list(c.notifications.telegram.allowed_chat_ids)))
+    sent = {}
+    monkeypatch.setattr(notify, "send_plain_telegram",
+                        lambda text, ncfg, chat_id_override="": sent.update(text=text, chat=chat_id_override))
+    S._record_access_request("555", "Dave")
+
+    client = TestClient(create_app(MagicMock()))
+    r = client.post("/api/telegram/access-requests/allow", json={"chat_id": "555", "name": "Dave"})
+
+    assert r.json().get("ok") is True
+    assert "555" in saved.get("allowed", [])                              # now allowed
+    assert sent.get("chat") == "555"                                     # welcomed on THEIR chat
+    assert "you're in" in sent.get("text", "").lower() and "Dave" in sent.get("text", "")
+    assert "555" not in {x["chat_id"] for x in S._load_access_requests()}  # pending cleared
+
+
 # ── the conversation index ───────────────────────────────────────────────────────
 
 def test_thread_index_lists_desktop_first_then_people(isolated):

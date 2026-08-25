@@ -889,6 +889,15 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         report = (manager.review_status().get("report")) or _review.latest_report()
         return _review.render_report(report or {})
 
+    @app.post("/api/browser/clear-hidden")
+    def clear_hidden_postings(body: dict | None = None):
+        """Forget any listings a site was told to hide. Craigslist keeps hidden postings in
+        localStorage, which is reloaded into every sweep — so one stray click on "hide posting"
+        would remove that listing from everything the watch ever sees again."""
+        from web_watcher.browser import clear_site_local_storage
+        site = str((body or {}).get("site") or "craigslist").strip()
+        return clear_site_local_storage(site)
+
     @app.get("/api/cloud/escalations")
     def cloud_escalations(limit: int = 50):
         """Every call that needed Claude, with both answers and what it cost — the audit trail

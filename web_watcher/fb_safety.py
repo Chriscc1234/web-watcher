@@ -221,3 +221,59 @@ def clear_halt(data_dir: Path | None = None) -> bool:
     except Exception as exc:
         log.error("could not clear the Facebook halt: %s", exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# The site-agnostic read-only rule
+# ---------------------------------------------------------------------------
+#
+# Facebook's guard was written first because the stakes there are an account ban, but the
+# principle isn't Facebook's: A WATCH ONLY EVER READS. Every other site was left unguarded, and
+# craigslist showed why — the agent clicked "hide posting", which removes a listing from the feed.
+# A watch that can hide its own results quietly shrinks what it will ever find, and "favourite",
+# "flag" and "delete" are all sitting on the same card.
+#
+# Deliberately narrower than the Facebook list: no social graph, no reactions — just the controls
+# that CHANGE something. Anything that merely reveals more of the page stays allowed, because
+# over-blocking here would stop the agent browsing at all.
+_MUTATING_ACTION_RE = re.compile(
+    r"\b("
+    r"hide|unhide|restore\s*(this|post)|banish|"                  # craigslist hide/restore
+    r"flag(ged)?(\s*as)?|report\b|block\b|"                       # flagging/reporting
+    r"favou?rite|add\s*to\s*(favou?rites?|list|cart|watchlist)|save\s*(this|post|search|item)|"
+    r"delete|remove\s*(this|post|listing|item)|renew|repost|edit\s*(this|post|listing)|"
+    r"buy(\s*(it\s*)?now)?|check\s*out|place\s*(an?\s*)?(order|bid)|bid\b|make\s*(an?\s*)?offer|"
+    r"contact\s*(the\s*)?(seller|poster)|reply\b|send\s*(a\s*)?(message|email)|message\b|"
+    r"subscribe|sign\s*up|register|create\s*(an?\s*)?account|"
+    r"post\s*(an?\s*)?(ad|listing)|publish"
+    r")\b",
+    re.I,
+)
+
+# Controls that contain a blocked word but only reveal more of the page. Checked first.
+_READONLY_ALLOW_RE = re.compile(
+    r"\b("
+    r"see\s*more|show\s*more|view\s*more|load\s*more|see\s*all|view\s*all|next\s*page|"
+    r"saved\s*searches?|show\s*hidden|hidden\s*posts?|"     # navigating TO saved/hidden, not saving
+    # NB: no bare "search" here — it rescued "save this search", which creates a saved search on
+    # the account. Labels that are only a search box carry no mutating word and need no rescue.
+    r"search\s*(results?|craigslist|for)|filter|sort|price|newest|nearest|relevance|distance|"
+    r"condition|category|categories|"
+    r"gallery|list\s*view|map\s*view|thumb|photos?"
+    r")\b",
+    re.I,
+)
+
+
+def is_mutating_action(label: str) -> bool:
+    """True if a control with this visible label would CHANGE something rather than just show it.
+
+    Applies on every site. A watch reads; it does not hide, flag, favourite, save, delete, buy,
+    bid, message, or post. Navigation that merely contains a keyword ('Show more', 'Sort',
+    'Saved searches') is allowed — a guard that stops the agent browsing is worse than no guard."""
+    if not label:
+        return False
+    text = " ".join(label.split()).strip()
+    if _READONLY_ALLOW_RE.search(text):
+        return False
+    return bool(_MUTATING_ACTION_RE.search(text))

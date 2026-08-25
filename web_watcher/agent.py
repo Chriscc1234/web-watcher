@@ -416,20 +416,27 @@ def run_agent(
             _detail = f" el={action.element_index} option={(action.text or '')[:30]!r}"
         log.info("Agent action: %s%s  (thought: %s)", action.action, _detail, action.thought[:80])
 
-        # ── Facebook read-only guard ──────────────────────────────────────────
-        # On Facebook the agent may only browse — never message/offer/buy/like/comment/
-        # post/save/follow. Reject a click on any such control BEFORE it happens; this is
-        # the hard rule that keeps an account from being flagged for automated activity.
-        if action.action == "click" and action.element_index is not None and fb_safety.is_facebook(page.url):
+        # ── Read-only guard ───────────────────────────────────────────────────
+        # A WATCH ONLY EVER READS. Facebook has the harshest penalty (an account ban) and was
+        # guarded first, but the rule isn't Facebook's — on craigslist the agent clicked "hide
+        # posting", which removes a listing from the feed. A watch that can hide its own results
+        # quietly shrinks what it will ever find, and "flag", "favourite" and "delete" sit on the
+        # same card. Both lists run: the site-agnostic one everywhere, Facebook's stricter one on
+        # top of it there.
+        if action.action == "click" and action.element_index is not None:
             _tgt = next((e for e in elements if e["index"] == action.element_index), None)
-            if _tgt and fb_safety.is_blocked_action(_tgt.get("label", "")):
-                log.warning("Agent tried a blocked Facebook action %r — refusing (read-only)",
-                            _tgt.get("label", "")[:40])
+            _label = (_tgt or {}).get("label", "")
+            _on_fb = fb_safety.is_facebook(page.url)
+            _blocked = bool(_tgt) and (
+                fb_safety.is_mutating_action(_label)
+                or (_on_fb and fb_safety.is_blocked_action(_label)))
+            if _blocked:
+                log.warning("Agent tried to click %r — refusing (a watch only reads)", _label[:40])
                 action.outcome = (
-                    f"REFUSED: '{_tgt.get('label','')[:40]}' takes a social/transactional action "
-                    "on Facebook. This watch is READ-ONLY — only scroll, search, sort, filter, "
-                    "and open listings to read them. Never message, offer, buy, like, comment, "
-                    "post, save, or follow. Choose a browsing action instead."
+                    f"REFUSED: '{_label[:40]}' would CHANGE something rather than show it. "
+                    "This watch is READ-ONLY — only scroll, search, sort, filter, page, and open "
+                    "listings to read them. Never hide, flag, favourite, save, delete, buy, bid, "
+                    "message, or post. Choose a browsing action instead."
                 )
                 _human_pause(*ACTION_PAUSE)
                 continue

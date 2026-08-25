@@ -722,3 +722,40 @@ def _locator(page: Page, target: str | None):
     if target.startswith("role="):
         return page.get_by_role(target[5:])
     return page.locator(target)
+
+
+def clear_site_local_storage(host_substring: str, state_path=None) -> dict:
+    """Drop a site's saved localStorage from the browser-state snapshot, keeping its cookies.
+
+    Craigslist remembers hidden postings in localStorage, and that snapshot is reloaded into
+    every sweep — so a single stray click on "hide posting" would quietly remove that listing
+    from everything the watch ever sees again. The agent can no longer make that click, but a
+    snapshot taken before the guard existed still carries the damage.
+
+    Cookies are deliberately kept: they're what makes us look like a returning visitor rather
+    than a fresh one on every sweep. Returns {"cleared": n, "origins": [...]}. Never raises.
+    """
+    import json as _json
+    path = Path(state_path) if state_path else _BROWSER_STATE
+    out = {"cleared": 0, "origins": []}
+    try:
+        if not path.exists():
+            return out
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        origins = data.get("origins") or []
+        kept = []
+        for o in origins:
+            origin = str(o.get("origin") or "")
+            if host_substring.lower() in origin.lower() and (o.get("localStorage") or []):
+                out["cleared"] += len(o.get("localStorage") or [])
+                out["origins"].append(origin)
+                continue                      # drop this origin's localStorage entirely
+            kept.append(o)
+        if out["cleared"]:
+            data["origins"] = kept
+            path.write_text(_json.dumps(data), encoding="utf-8")
+            log.info("Cleared %d saved localStorage item(s) for %r from the browser state",
+                     out["cleared"], host_substring)
+    except Exception as exc:
+        log.warning("could not clear saved local storage for %r: %s", host_substring, exc)
+    return out

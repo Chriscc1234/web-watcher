@@ -542,3 +542,102 @@ def test_a_disabled_watch_is_never_described_as_running():
     ctx = _ctx([_off("Boats")])
     boats = [ln for ln in ctx.splitlines() if "health:" in ln][0]
     assert "OFF" in boats and "watching now" not in boats
+
+
+# ── a watch-status question never carries listings ───────────────────────────────
+# "What watches are running?" is about the WATCHES, not the finds — so no matches ride along,
+# even when the model attaches a perfectly scoped query. Distinct from "show me the matches".
+
+def test_watch_status_questions_are_recognised():
+    for t in ("what watches are running", "are there any watches running",
+              "what's on my watchlist", "what watches do I have", "list my watches",
+              "how many watches do I have", "status of my watches"):
+        assert S._is_watch_status_request(t) is True, t
+
+
+def test_listing_requests_are_not_watch_status():
+    for t in ("show me the matches", "anything on the boats?", "show me the top 10",
+              "show me the boat matches"):
+        assert S._is_watch_status_request(t) is False, t
+
+
+def test_a_status_question_drops_even_a_scoped_model_query(monkeypatch):
+    """The model may attach a valid, watch-scoped query — a status answer still shows no listings."""
+    cfg = _two_watches()
+    ran = _lookup_ran(monkeypatch, "what watches are running?",
+                      {"watch": "Anacortes Under 30' Motor Boats Watch",
+                       "matched_only": True, "limit": 10}, cfg)
+    assert ran["called"] is False        # prose only, no wall of matches
+
+
+def test_a_status_question_with_one_watch_still_shows_no_listings(monkeypatch):
+    """Even with a sole watch (where a real lookup would auto-scope), status shows none."""
+    cfg = AppConfig(watches=[_on("Boats")])
+    ran = _lookup_ran(monkeypatch, "list my watches", {}, cfg)
+    assert ran["called"] is False
+
+
+def test_a_real_lookup_is_untouched_by_the_status_guard(monkeypatch):
+    cfg = _two_watches()
+    ran = _lookup_ran(monkeypatch, "show me the matches for boats", {}, cfg)
+    assert ran["called"] is True
+    assert ran["params"]["watch"] == "Anacortes Under 30' Motor Boats Watch"
+
+
+# ── watch-status answers are rendered cleanly, deterministically ──────────────────
+# The model ran the titles together in one paragraph and mis-stated run-state. Status questions
+# are now answered from real state with each watch on its own bolded block, blank line between.
+
+def _status(watches, paused=False, running=None):
+    from unittest.mock import MagicMock
+    mgr = MagicMock()
+    mgr.is_paused.return_value = paused
+    mgr.get_job_info.return_value = [{"watch_name": n, "continuous_running": True}
+                                     for n in (running or [])]
+    return S._render_watch_status(AppConfig(watches=watches), mgr, None)
+
+
+def test_each_watch_is_its_own_bolded_block():
+    out = _status([_off("Boats"), _off("Cars")])
+    assert "<b>Boats</b>" in out and "<b>Cars</b>" in out
+    assert out.count("\n\n") == 2           # header + two watches, blank line between each
+
+
+def test_all_off_status_reads_nothing_running():
+    out = _status([_off("Boats"), _off("Cars")])
+    assert "Nothing is running" in out and "all turned off" in out
+
+
+def test_some_on_status_counts_them():
+    out = _status([_on("Boats"), _off("Cars")], running=["Boats"])
+    assert "1 of 2 watch(es) running" in out
+
+
+def test_paused_status_says_paused():
+    out = _status([_on("Boats")], paused=True, running=["Boats"])
+    assert "paused" in out.lower()
+
+
+def test_no_watches_gives_a_helpful_nudge():
+    out = _status([])
+    assert "don't have any watches" in out
+
+
+def test_a_status_question_short_circuits_to_the_renderer(monkeypatch):
+    """No model call, no listings — the clean block is returned directly."""
+    from unittest.mock import MagicMock
+    from fastapi.testclient import TestClient
+    from web_watcher.dashboard.server import create_app
+    import web_watcher.config as C
+    cfg = _two_watches()
+    monkeypatch.setattr(C, "load", lambda: cfg)
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    monkeypatch.setattr(S, "_complete_assistant_turn",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("model must not run")))
+    mgr = MagicMock(); mgr.is_paused.return_value = False; mgr.get_job_info.return_value = []
+    client = TestClient(create_app(mgr))
+    r = client.post("/api/oversight/chat",
+                    json={"messages": [{"role": "user", "content": "what watches are running?"}]}).json()
+    assert r.get("html") is True
+    assert r.get("listings") in (None, [])          # never a wall of matches
+    assert "Motor Boats Watch" in r["message"]

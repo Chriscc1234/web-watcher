@@ -1139,6 +1139,17 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             result.pop("raw", None)
             return result
 
+        # "what watches do I have / what's running" is answered directly from real state too — a
+        # clean, well-spaced block instead of the model running the titles together in a paragraph
+        # (and mis-reporting run-state). A lookup ("show me the matches") is NOT caught here.
+        if _is_watch_status_request(_latest) and not _is_lookup_request(_latest):
+            result = {"message": _render_watch_status(cfg, manager, owner),
+                      "watch_suggestion": None, "html": True, "raw": None}
+            result["raw"] = result["message"]
+            _persist_chat_turn(messages, result, owner)
+            result.pop("raw", None)
+            return result
+
         try:
             snap = manager.oversight_snapshot(limit=14)
         except Exception:
@@ -2374,6 +2385,26 @@ def _watch_named_in(text: str, cfg, owner) -> str:
     return hits[0] if len(hits) == 1 else ""
 
 
+# A question ABOUT the watches themselves — which exist, which are on, what's on the watchlist.
+# This is never a request to see listings, whatever the model decides to attach. Distinct from a
+# lookup ("show me the matches"), which asks to see what was FOUND.
+_WATCH_STATUS_RE = re.compile(
+    r"\b("
+    r"what\s+watches|which\s+watches|any\s+watches|"
+    r"watches?\s+(are\s+)?(running|active|on|off|going|set\s*up|do\s+i\s+have)|"
+    r"watch\s*list|watchlist|"
+    r"(running|active)\s+watches|"
+    r"list\s+(my\s+|the\s+)?watches|my\s+watches\b|"
+    r"how\s+many\s+watches|status\s+of\s+(my\s+)?watches"
+    r")\b", re.I)
+
+
+def _is_watch_status_request(text: str) -> bool:
+    """True when the person is asking about the WATCHES (which exist / are running), not to see
+    the listings a watch has found. A status answer must never drag a wall of matches with it."""
+    return bool(_WATCH_STATUS_RE.search(text or ""))
+
+
 def _lookup_limit(text: str, default: int = 10) -> int:
     """'top 20' / 'show me 5' → that many. Bounded so a stray number can't dump the whole DB."""
     m = re.search(r"\b(?:top|first|best|show me)\s+(\d{1,6})\b", text or "", re.I)
@@ -2393,6 +2424,62 @@ def _fmt_hours(h: float) -> str:
     if abs(h - 12.0) < 0.01:
         return "twice a day"
     return f"every {h:g}h"
+
+
+def _render_watch_status(cfg, manager, owner: str | None) -> str:
+    """A clean, well-spaced answer to "what watches do I have / what's running".
+
+    Built here rather than left to the model: it kept running them together in one paragraph and
+    mis-stating run-state. Each watch is its own block with a blank line between, led by a status
+    dot, so the titles stand apart on a phone. HTML — the Telegram bridge sends it with parse mode
+    and the desktop renders it too."""
+    import html as _h
+    mine = _watches_for_owner(cfg, owner)
+    if not mine:
+        return ("You don't have any watches yet. Tell me what to look for — e.g. “watch "
+                "craigslist for manual pickup trucks under $10k near Anacortes”.")
+
+    paused = False
+    try:
+        paused = manager.is_paused()
+    except Exception:
+        pass
+    try:
+        job_map = {j["watch_name"]: j for j in manager.get_job_info()}
+    except Exception:
+        job_map = {}
+
+    def _state(w):
+        if paused:
+            return ("⏸", "paused (master switch is off)")
+        if not getattr(w, "enabled", True):
+            return ("⚪", "off — not watching")
+        if getattr(w, "mode", "") == "continuous" and not job_map.get(w.name, {}).get("continuous_running"):
+            return ("🟢", "on — watching (between sweeps)")
+        return ("🟢", "on — watching now")
+
+    on = sum(1 for w in mine if getattr(w, "enabled", True)) if not paused else 0
+    if paused:
+        head = f"⏸ <b>Watching is paused.</b> You have {len(mine)} watch(es), none running:"
+    elif on == 0:
+        head = f"⚪ <b>Nothing is running.</b> You have {len(mine)} watch(es), all turned off:"
+    else:
+        head = f"🟢 <b>{on} of {len(mine)} watch(es) running:</b>"
+
+    blocks = [head]
+    from web_watcher.storage import watch_stats
+    for w in mine:
+        dot, label = _state(w)
+        line = [f"{dot} <b>{_h.escape(w.name)}</b>", f"   {label}"]
+        try:
+            st = watch_stats(w.id or w.name, w.name)
+            line.append(f"   {st['matches']} matched of {st['observations']} seen")
+        except Exception:
+            pass
+        blocks.append("\n".join(line))
+
+    # A blank line between each block is what makes the titles stand apart.
+    return "\n\n".join(blocks)
 
 
 def _render_settings(cfg, manager, owner: str | None) -> str:
@@ -3642,7 +3729,15 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # the model answered it with an unscoped, uncapped query that dumped 200 rows of
         # everything. Whatever produced the query, it leaves this block scoped to a watch and
         # capped — or dropped.
-        is_lookup = _is_lookup_request(latest := _latest_user_text(conv))
+        latest = _latest_user_text(conv)
+        # A question about the WATCHES ("what watches are running?", "what's on my watchlist?") is
+        # answered in prose, never with listings — so drop any query the model attached, whatever
+        # it named. This wins over the lookup/scoping logic below.
+        if _is_watch_status_request(latest) and not _is_lookup_request(latest):
+            if isinstance(lq, dict):
+                log.info("chat: dropped a listing query on a watch-status question")
+            lq = None
+        is_lookup = _is_lookup_request(latest)
         if is_lookup or isinstance(lq, dict):
             target = focus if (focus and focus != PENDING_CREATE) else ""
             if not target:

@@ -237,3 +237,47 @@ def test_report_is_not_ready_unless_every_run_check_passed():
 
 def test_render_report_handles_no_drill_yet():
     assert "No drill" in D.render_report({})
+
+
+# ── finding a section link when the site punctuates it differently ───────────────
+# The live miss: craigslist labels the category "cars + trucks"; we looked for "cars & trucks"
+# and "cars+trucks" and found neither — while a person would have spotted it instantly. Exact
+# hints are tried first, then significant WORDS, whatever punctuation sits between them.
+
+class WordPage(FakePage):
+    """A page whose only link is labelled with the site's own punctuation."""
+    def __init__(self, label, **kw):
+        super().__init__(**kw)
+        self.label = label
+
+    def locator(self, sel):
+        # Exact-hint selectors find nothing; the fallback's indexed lookup finds the link.
+        if sel in ("a,[role=link]",):
+            return FakeLoc(self, sel, text=self.label)
+        return FakeLoc(self, sel, present=False)
+
+    def evaluate(self, js):
+        return [{"i": 0, "t": self.label}]
+
+
+def _nth(self, i):
+    return self
+FakeLoc.nth = _nth
+
+
+def test_section_is_found_despite_different_punctuation():
+    page = WordPage("cars + trucks", url="https://seattle.craigslist.org/")
+    loc, text = D._find_section_link(page, ["cars & trucks"], "cars & trucks")
+    assert loc is not None and text == "cars + trucks"
+
+
+def test_word_fallback_does_not_match_an_unrelated_link():
+    page = WordPage("real estate for sale", url="https://seattle.craigslist.org/")
+    loc, _ = D._find_section_link(page, ["cars & trucks"], "cars & trucks")
+    assert loc is None                      # "cars"/"trucks" absent — no false match
+
+
+def test_word_fallback_still_refuses_blocked_facebook_controls():
+    page = WordPage("Message the seller", url="https://www.facebook.com/marketplace/")
+    loc, _ = D._find_section_link(page, ["nope"], "message seller")
+    assert loc is None

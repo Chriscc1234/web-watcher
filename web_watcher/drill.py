@@ -72,7 +72,7 @@ DRILLS: dict[str, dict] = {
         # live run and the drill happily reported success on the wrong section — which is exactly
         # the silent wrong-page failure this whole file exists to catch.
         "section": "cars & trucks",
-        "section_hints": ["cars & trucks", "cars+trucks"],
+        "section_hints": ["cars + trucks", "cars & trucks"],
         "question": "What is the title and price of the first listing shown?",
         "expect_login": False,
         "read_only": False,
@@ -219,11 +219,26 @@ def _step_comprehend(page, cfg) -> dict:
                  nav_links=(struct.get("nav_links") or [])[:25])
 
 
-def _find_section_link(page, labels: list[str]):
-    """The section's own link, found by the text a PERSON would look for. Tries an exact-ish
-    match first, then a contains match, and skips anything fb_safety says not to touch."""
+def _find_section_link(page, labels: list[str], section: str = ""):
+    """The section's own link, found by the text a PERSON would look for.
+
+    Punctuation is the trap here. Craigslist labels its category "cars + trucks"; we looked for
+    "cars & trucks" and "cars+trucks" and found neither, because a person reading the page would
+    have spotted it instantly and a literal selector doesn't. So after the exact hints fail we
+    fall back to WORD matching — a link whose text contains every significant word of the section,
+    whatever sits between them. Anything fb_safety says not to touch is skipped throughout."""
     from web_watcher import fb_safety
     is_fb = fb_safety.is_facebook(page.url)
+
+    def usable(loc, text):
+        if is_fb and fb_safety.is_blocked_action(text):
+            log.info("drill: refusing to click %r — blocked action on Facebook", text)
+            return False
+        try:
+            return bool(loc.is_visible())
+        except Exception:
+            return False
+
     for label in labels:
         for sel in (f'a:has-text("{label}")', f'[role=link]:has-text("{label}")',
                     f'[aria-label*="{label}" i]', f'span:has-text("{label}")'):
@@ -235,13 +250,35 @@ def _find_section_link(page, labels: list[str]):
                     text = (loc.inner_text(timeout=1_500) or "")[:80]
                 except Exception:
                     text = label
-                if is_fb and fb_safety.is_blocked_action(text):
-                    log.info("drill: refusing to click %r — blocked action on Facebook", text)
-                    continue
-                if loc.is_visible():
+                if usable(loc, text):
                     return loc, text
             except Exception:
                 continue
+
+    # Word-match fallback: find a link whose visible text carries every significant word of the
+    # section name, ignoring whatever punctuation the site chose ("cars + trucks").
+    words = [w for w in re.split(r"[^a-z0-9]+", _norm(section)) if len(w) > 2]
+    if not words:
+        return None, ""
+    try:
+        cands = page.evaluate(
+            """() => Array.from(document.querySelectorAll('a,[role=link]'))
+                      .map((a, i) => ({i, t: (a.innerText || a.getAttribute('aria-label') || '').trim()}))
+                      .filter(x => x.t && x.t.length < 60)""") or []
+    except Exception:
+        return None, ""
+    for c in cands:
+        text = c.get("t") or ""
+        low = _norm(text)
+        if not all(w in low for w in words):
+            continue
+        try:
+            loc = page.locator("a,[role=link]").nth(int(c["i"]))
+            if usable(loc, text):
+                log.info("drill: matched section by words → %r", text)
+                return loc, text
+        except Exception:
+            continue
     return None, ""
 
 
@@ -253,7 +290,7 @@ def _step_navigate(page, spec: dict) -> dict:
 
     section = spec.get("section") or ""
     labels = spec.get("section_hints") or ([section] if section else [])
-    loc, text = _find_section_link(page, labels)
+    loc, text = _find_section_link(page, labels, section)
     if loc is None:
         return _step("navigate", False,
                      f"could not find a link for {section!r} on the page — the section's control "

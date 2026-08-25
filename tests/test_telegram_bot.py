@@ -344,6 +344,117 @@ def test_no_nudge_without_the_opt_in(monkeypatch):
     assert sent == []
 
 
+# ── applying a proposed watch: "already exists" is not an error ──────────────────
+
+def test_already_exists_reads_as_friendly_not_a_failure(monkeypatch):
+    """A create for a watch that's already there should reassure, not throw a red warning — the
+    thing the user asked for exists."""
+    b = _bridge()
+
+    class _R:
+        status_code = 409
+        def json(self): return {"detail": "Watch 'Boats' already exists"}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda *a, **k: _R())
+    out = b._apply_pending([{"action": "create", "name": "Boats", "urls": ["https://x"]}])
+    assert "already set up" in out
+    assert "Couldn't" not in out and "⚠️" not in out
+
+
+def test_a_real_apply_failure_still_warns(monkeypatch):
+    b = _bridge()
+
+    class _R:
+        status_code = 400
+        def json(self): return {"detail": "bad field"}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda *a, **k: _R())
+    out = b._apply_pending([{"action": "create", "name": "Boats", "urls": ["https://x"]}])
+    assert "Couldn't apply" in out and "bad field" in out
+
+
+def _get_returning(rows):
+    class _R:
+        def json(self): return rows
+    return lambda *a, **k: _R()
+
+
+def test_watch_diff_flags_a_changed_instruction(monkeypatch):
+    b = _bridge()
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.get",
+                        _get_returning([{"name": "Boats", "instruction": "old", "urls": ["https://x"]}]))
+    diff = b._watch_diff("Boats", {"instruction": "new", "urls": ["https://x"]})
+    assert diff and "what to look for" in diff[0]
+
+
+def test_watch_diff_is_empty_when_effectively_the_same(monkeypatch):
+    b = _bridge()
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.get",
+                        _get_returning([{"name": "Boats", "instruction": "same", "urls": ["https://x"]}]))
+    assert b._watch_diff("Boats", {"instruction": "same", "urls": ["https://x"]}) == []
+
+
+def test_a_differing_collision_offers_update_replace_leave(monkeypatch):
+    b = _bridge()
+
+    class _Post:
+        status_code = 409
+        def json(self): return {"detail": "Watch 'Boats' already exists"}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda *a, **k: _Post())
+    monkeypatch.setattr(b, "_watch_diff", lambda name, body: ["what to look for: “old” → “new”"])
+    out = b._apply_pending([{"action": "create", "name": "Boats",
+                             "instruction": "new", "urls": ["https://x"]}])
+    assert "already exists, but the new one is different" in out
+    assert "update" in out and "replace" in out and "leave" in out
+    assert b._pending_conflict and b._pending_conflict["name"] == "Boats"
+
+
+def test_conflict_update_puts_the_new_settings(monkeypatch):
+    b = _bridge()
+    b._pending_conflict = {"name": "Boats", "body": {"instruction": "new", "urls": ["https://x"]}}
+    calls, sent = {}, []
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.put",
+                        lambda url, **k: calls.update(put=url) or type("R", (), {"status_code": 200})())
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    b._resolve_conflict("update", "111")
+    assert "put" in calls and "Updated" in sent[0] and b._pending_conflict is None
+
+
+def test_conflict_replace_deletes_then_recreates(monkeypatch):
+    b = _bridge()
+    b._pending_conflict = {"name": "Boats", "body": {"urls": ["https://x"]}}
+    seq, sent = [], []
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.delete",
+                        lambda url, **k: seq.append("del") or type("R", (), {"status_code": 200})())
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: seq.append("post") or type("R", (), {"status_code": 201})())
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    b._resolve_conflict("replace", "111")
+    assert seq == ["del", "post"] and "Replaced" in sent[0]
+
+
+def test_conflict_leave_changes_nothing(monkeypatch):
+    b = _bridge()
+    b._pending_conflict = {"name": "Boats", "body": {}}
+    sent = []
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.put",
+                        lambda *a, **k: pytest.fail("leave must not modify the watch"))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    b._resolve_conflict("leave", "111")
+    assert "kept" in sent[0].lower() and b._pending_conflict is None
+
+
+def test_an_unclear_conflict_answer_re_asks_and_holds(monkeypatch):
+    b = _bridge()
+    b._pending_conflict = {"name": "Boats", "body": {}}
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    b._resolve_conflict("what do you mean", "111")
+    assert b._pending_conflict is not None                 # still held for a real answer
+    assert "update" in sent[0] and "replace" in sent[0] and "leave" in sent[0]
+
+
 # ── proactive check-ins (heartbeats) ─────────────────────────────────────────────
 
 def test_checkin_hours_configures_the_interval():

@@ -97,6 +97,9 @@ class TelegramBridge:
         # Destructive lifecycle actions (delete) held for a yes. Reversible ones (start/stop/
         # enable/disable) are applied immediately — no confirmation needed.
         self._pending_deletes: list[dict] | None = None
+        # A create that collided with an existing watch of the same name, whose settings DIFFER.
+        # Held for the user to choose update / replace / leave. {"name", "body"}.
+        self._pending_conflict: dict | None = None
         # Proactive check-in bookkeeping. Seed "last contact" at startup so we don't fire the
         # moment the app launches; a real check-in is a full interval of quiet away.
         self._start_ts = time.time()
@@ -238,6 +241,13 @@ class TelegramBridge:
         owner = sender or self.chat_id      # scope this turn to the person who sent it
         to = sender or self.chat_id         # ...and reply to THEM, not always the alert chat
 
+        # A name collision we surfaced is waiting on update / replace / leave — that answer is
+        # about the existing watch, not a new request, so handle it before anything else.
+        if self._pending_conflict:
+            self._typing(to)
+            self._resolve_conflict(text, to)
+            return
+
         # A yes to a proposal we're holding APPLIES it — that's how a watch gets created, edited,
         # or deleted from the phone, standing in for the dashboard's confirm button.
         if self._pending or self._pending_deletes:
@@ -304,7 +314,8 @@ class TelegramBridge:
     def _apply_pending(self, pending: list[dict]) -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the
         dashboard's confirm button uses), and report what happened in plain words."""
-        done, failed = [], []
+        done, already, failed = [], [], []
+        conflicts: list[tuple[str, dict, list]] = []      # (name, proposed_body, human diffs)
         for s in pending:
             name = str(s.get("name") or "").strip()
             body = {k: v for k, v in s.items() if k != "action"}
@@ -322,11 +333,22 @@ class TelegramBridge:
                         detail = str((r.json() or {}).get("detail", ""))[:120]
                     except Exception:
                         pass
-                    # LOG it — a 4xx here (a bad field in a model-built body) used to vanish, so a
-                    # watch that "didn't work" left no trace in the activity log to diagnose from.
-                    log.warning("Telegram: could not apply %r (HTTP %s): %s",
-                                name, r.status_code, detail or "(no detail)")
-                    failed.append(f"{name or 'watch'}{f' ({detail})' if detail else ''}")
+                    # "Already exists" is not a failure. If the proposed watch is the SAME as the
+                    # existing one, say so plainly. If it DIFFERS, surface the differences and let
+                    # the user choose to update it, replace it, or leave it — a name collision is
+                    # usually "I want to change this" or "I forgot I already made it".
+                    if r.status_code == 409 or "already exists" in detail.lower():
+                        diff = self._watch_diff(name, body)
+                        if diff:
+                            conflicts.append((name, body, diff))
+                        else:
+                            already.append(name or "watch")
+                    else:
+                        # LOG a real 4xx — a bad field in a model-built body used to vanish, so a
+                        # watch that "didn't work" left no trace in the activity log to diagnose.
+                        log.warning("Telegram: could not apply %r (HTTP %s): %s",
+                                    name, r.status_code, detail or "(no detail)")
+                        failed.append(f"{name or 'watch'}{f' ({detail})' if detail else ''}")
             except Exception as exc:
                 log.warning("Telegram: applying %r failed: %s", name, exc)
                 failed.append(f"{name or 'watch'} ({exc})")
@@ -334,9 +356,79 @@ class TelegramBridge:
         parts = []
         if done:
             parts.append("✅ Done — " + ", ".join(f"“{n}”" for n in done) + ".")
+        if already:
+            parts.append("👍 " + ", ".join(f"“{n}”" for n in already)
+                         + (" is" if len(already) == 1 else " are")
+                         + " already set up and watching — nothing to change.")
+        if conflicts:
+            # Hold the first one for a follow-up choice (a turn almost always carries one watch).
+            name, body, diff = conflicts[0]
+            self._pending_conflict = {"name": name, "body": body}
+            bullets = "\n".join(f"  • {d}" for d in diff)
+            parts.append(
+                f"“{name}” already exists, but the new one is different:\n{bullets}\n\n"
+                "Reply “update” to change the existing watch to these new settings, “replace” to "
+                "delete it and start fresh (its match history is wiped), or “leave” to keep the "
+                "current one.")
         if failed:
             parts.append("⚠️ Couldn't apply " + ", ".join(f"“{n}”" for n in failed) + ".")
         return " ".join(parts) or "Nothing to apply."
+
+    def _watch_diff(self, name: str, body: dict) -> list:
+        """Human-readable differences between a proposed watch `body` and the EXISTING watch of
+        the same name — [] when they're effectively the same (or the existing one can't be read).
+        Compares the fields that define what a watch DOES: where it looks (urls, which carry the
+        location + price filters) and what it looks for (instruction)."""
+        try:
+            r = httpx.get(f"{self.dashboard_url}/api/watches", timeout=15.0)
+            data = r.json()
+            watches = data if isinstance(data, list) else (data.get("watches") or [])
+        except Exception:
+            return []
+        low = name.strip().lower()
+        existing = next((w for w in watches
+                         if str(w.get("name", "")).strip().lower() == low), None)
+        if not existing:
+            return []
+        diffs = []
+        pi, ei = str(body.get("instruction") or "").strip(), str(existing.get("instruction") or "").strip()
+        if pi and pi != ei:
+            diffs.append(f"what to look for: “{ei or '(none)'}” → “{pi}”")
+        pu = {str(u).strip() for u in (body.get("urls") or []) if str(u).strip()}
+        eu = {str(u).strip() for u in (existing.get("urls") or []) if str(u).strip()}
+        if pu and pu != eu:
+            diffs.append("the site(s), location or price filters it searches")
+        return diffs
+
+    def _resolve_conflict(self, text: str, chat_id: str) -> None:
+        """Act on the user's choice for a name collision (update / replace / leave)."""
+        conflict, self._pending_conflict = self._pending_conflict, None
+        name, body = conflict["name"], conflict["body"]
+        low = (text or "").strip().lower()
+        if any(w in low for w in ("update", "change", "modify", "edit", "yes", "keep the history")):
+            try:
+                r = httpx.put(f"{self.dashboard_url}/api/watches/{quote(name)}", json=body, timeout=30.0)
+                ok = r.status_code < 300
+            except Exception as exc:
+                log.warning("Telegram: conflict update of %r failed: %s", name, exc); ok = False
+            self._send(f"✅ Updated “{name}” to the new settings — its match history is kept."
+                       if ok else f"⚠️ Couldn't update “{name}”.", chat_id)
+        elif any(w in low for w in ("replace", "wipe", "start over", "fresh", "overwrite", "delete")):
+            try:
+                httpx.delete(f"{self.dashboard_url}/api/watches/{quote(name)}", timeout=30.0)
+                r = httpx.post(f"{self.dashboard_url}/api/watches", json=body, timeout=30.0)
+                ok = r.status_code < 300
+            except Exception as exc:
+                log.warning("Telegram: conflict replace of %r failed: %s", name, exc); ok = False
+            self._send(f"✅ Replaced “{name}” with a fresh watch on the new settings."
+                       if ok else f"⚠️ Couldn't replace “{name}”.", chat_id)
+        elif any(w in low for w in ("leave", "keep", "no", "cancel", "never mind", "nevermind")):
+            self._send(f"Okay — kept “{name}” exactly as it was.", chat_id)
+        else:
+            # Unclear answer: hold the choice open and ask once more, plainly.
+            self._pending_conflict = conflict
+            self._send("Sorry — “update” to change the existing watch, “replace” to start fresh, "
+                       "or “leave” to keep it as is?", chat_id)
 
     def _notify_access_request(self, chat_id: str, name: str) -> None:
         """A stranger messaged the bot. We DON'T let them in — but we alert the owner on their

@@ -14,7 +14,9 @@ detect an already-running instance and adopt it without killing it.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -24,6 +26,16 @@ from typing import Optional
 import httpx
 
 log = logging.getLogger(__name__)
+
+def _anthropic_installed() -> bool:
+    """True when the cloud SDK is importable. A tiny module function so the self-heal is testable
+    without actually (un)installing the package."""
+    try:
+        import anthropic  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 
 OLLAMA_URL     = "http://localhost:11434"
 # How long the scheduled self-audit will wait for watching to go quiet before running anyway.
@@ -114,6 +126,8 @@ class ServiceManager:
                 log.warning("start_all: could not start the driver: %s", exc)
         self._start_update_checker()
         self._start_telegram()  # last: the bridge talks to the server we just started
+        # If cloud is configured but its SDK never got installed, install it in the background.
+        threading.Thread(target=self._ensure_cloud_deps, daemon=True, name="ww-cloud-deps").start()
 
     def stop_all(self) -> None:
         self._update_stop.set()
@@ -175,6 +189,38 @@ class ServiceManager:
         self._stop_telegram()
         self._start_telegram()
         return getattr(self, "_telegram", None) is not None
+
+    # ------------------------------------------------------------------
+    # Cloud SDK self-heal
+    # ------------------------------------------------------------------
+
+    def _ensure_cloud_deps(self) -> None:
+        """Install the `anthropic` SDK when the user has set a cloud key but the package is
+        missing. Without it EVERY cloud escalation dies on ImportError and silently falls back to
+        local — so the user's loaded credits can never be spent, with no visible reason. The
+        install runs in the app's OWN process (the real interpreter, real disk), so it actually
+        persists; it's best-effort and never fatal — a failure just leaves us local-only, exactly
+        as before. Guarded on a configured key so a purely-local install never runs pip."""
+        try:
+            from web_watcher.config import load as load_config
+            cloud = load_config().models.cloud
+            key = (getattr(cloud, "anthropic_api_key", "") or "").strip() or \
+                os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not key or _anthropic_installed():
+                return
+            log.info("Cloud key is set but the 'anthropic' SDK is missing — installing it now")
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                 "anthropic>=1.0"],
+                capture_output=True, text=True, timeout=300,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if r.returncode == 0:
+                log.info("Installed the 'anthropic' SDK — cloud escalation is available now")
+            else:
+                log.warning("Could not install 'anthropic' (exit %s) — staying local-only: %s",
+                            r.returncode, (r.stderr or "")[-300:])
+        except Exception as exc:
+            log.debug("cloud-deps self-heal skipped (%s)", exc)
 
     # ------------------------------------------------------------------
     # Auto-update (checks GitHub Releases; stages in the background; the UI

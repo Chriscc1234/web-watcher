@@ -624,7 +624,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         if isinstance(body.get("urls"), list):
             body["urls"], _ = _normalize_marketplace_urls(
                 body["urls"], body.get("instruction") or body.get("name") or "")
-        body = _backfill_schedule(body)
+        body = _coerce_watch_numbers(_backfill_schedule(body))
         try:
             new_watch = Watch.model_validate(body)
         except ValidationError as exc:
@@ -664,6 +664,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         if isinstance(body.get("urls"), list):
             body["urls"], _ = _normalize_marketplace_urls(
                 body["urls"], body.get("instruction") or body.get("name") or watch_name or "")
+        body = _coerce_watch_numbers(body)
 
         cfg = load()
         watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
@@ -1928,6 +1929,41 @@ def _validation_detail(exc) -> list[dict]:
         {"loc": list(e.get("loc") or ()), "msg": str(e.get("msg", "")), "type": str(e.get("type", ""))}
         for e in exc.errors()
     ]
+
+
+_WATCH_INT_FIELDS = ("min_rating", "interval_minutes", "continuous_max_alerts",
+                     "max_agent_steps", "continuous_scroll_passes", "continuous_idle_seconds")
+
+
+def _coerce_watch_numbers(body: dict) -> dict:
+    """The chat model sometimes hands an integer field a value as TEXT — "3 stars", "3.0",
+    "every 6 hours" — which Pydantic rejects, so the whole create/edit fails with a validation
+    error the user can do nothing about (the live 'min_rating: Input should be a valid integer'
+    that lost a MacGregor sailboat watch). Pull the first integer out of such a value; DROP a
+    field we can't read so its model default applies rather than blocking the watch. min_rating
+    is clamped to its 1-5 range so an over-eager '10' can't fail the range validator either."""
+    if not isinstance(body, dict):
+        return body
+    out = dict(body)
+    for f in _WATCH_INT_FIELDS:
+        if f not in out:
+            continue
+        v = out[f]
+        if isinstance(v, bool):            # bool is an int subclass — treat as unset
+            out.pop(f)
+            continue
+        if isinstance(v, int):
+            n = v
+        elif isinstance(v, float):
+            n = int(v)
+        else:
+            m = re.search(r"-?\d+", str(v))
+            if not m:
+                out.pop(f)                             # unreadable → fall back to the default
+                continue
+            n = int(m.group())
+        out[f] = max(1, min(5, n)) if f == "min_rating" else n
+    return out
 
 
 def _backfill_schedule(body: dict) -> dict:

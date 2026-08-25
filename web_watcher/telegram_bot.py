@@ -319,6 +319,10 @@ class TelegramBridge:
                         detail = str((r.json() or {}).get("detail", ""))[:120]
                     except Exception:
                         pass
+                    # LOG it — a 4xx here (a bad field in a model-built body) used to vanish, so a
+                    # watch that "didn't work" left no trace in the activity log to diagnose from.
+                    log.warning("Telegram: could not apply %r (HTTP %s): %s",
+                                name, r.status_code, detail or "(no detail)")
                     failed.append(f"{name or 'watch'}{f' ({detail})' if detail else ''}")
             except Exception as exc:
                 log.warning("Telegram: applying %r failed: %s", name, exc)

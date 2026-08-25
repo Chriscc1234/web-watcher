@@ -72,6 +72,36 @@ def test_approving_a_request_adds_to_allowlist_and_welcomes_them(isolated, monke
     assert "555" not in {x["chat_id"] for x in S._load_access_requests()}  # pending cleared
 
 
+# ── model-built watch bodies: coerce loose numbers so a create never 400s on a string ──
+
+def test_coerce_watch_numbers_reads_loose_values():
+    c = S._coerce_watch_numbers
+    assert c({"min_rating": "3 stars"})["min_rating"] == 3       # digits pulled from text
+    assert c({"min_rating": 3.0})["min_rating"] == 3             # float → int
+    assert c({"min_rating": 10})["min_rating"] == 5             # clamped into 1-5
+    assert c({"min_rating": 0})["min_rating"] == 1
+    assert c({"interval_minutes": "every 30"})["interval_minutes"] == 30
+    assert "min_rating" not in c({"min_rating": "high"})         # unreadable → model default
+    assert "min_rating" not in c({"min_rating": True})          # bool → unset
+    assert c({"min_rating": 4})["min_rating"] == 4             # a good int is untouched
+
+
+def test_creating_a_watch_survives_a_stringy_min_rating(isolated, monkeypatch):
+    """The live failure that lost a MacGregor sailboat watch: the 14b emitted min_rating as text
+    ('3 stars') and Pydantic 400'd the whole create."""
+    from web_watcher import config as _config
+    cfg = AppConfig(watches=[])
+    saved = {}
+    monkeypatch.setattr(_config, "load", lambda: cfg)
+    monkeypatch.setattr(_config, "save", lambda c: saved.update(names=[w.name for w in c.watches]))
+    client = TestClient(create_app(MagicMock()))
+    r = client.post("/api/watches", json={
+        "name": "MacGregor Sailboats", "urls": ["https://skagit.craigslist.org/search/boo"],
+        "instruction": "macgregor sailboats", "min_rating": "3 stars", "interval_minutes": 360})
+    assert r.status_code == 201, r.text
+    assert "MacGregor Sailboats" in saved.get("names", [])
+
+
 # ── the conversation index ───────────────────────────────────────────────────────
 
 def test_thread_index_lists_desktop_first_then_people(isolated):

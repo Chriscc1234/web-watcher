@@ -210,3 +210,50 @@ def test_lookup_limit_reads_the_number_asked_for():
     assert S._lookup_limit("show me 5") == 5
     assert S._lookup_limit("show me the matches") == 10        # default
     assert S._lookup_limit("top 9999") == 30                   # bounded — no whole-DB dump
+
+
+# ── a vague lookup gets completed, not obeyed literally ──────────────────────────
+# Live: the model DID produce a listing_query for "show me the matches from the boats watch",
+# but with no watch, no matched-only and no limit — so it returned 200 rows of everything ever
+# seen, Brooklyn sofas included. Filling only a MISSING query wasn't enough.
+
+def _lookup_turn(monkeypatch, text, model_lq, cfg, owner=None, focus=None):
+    """Run one turn with the extractor stubbed, and report the query that actually ran."""
+    ran = {}
+    monkeypatch.setattr(S, "_chat_reply_natural", lambda *a, **k: ("ok", 0, 0, 0))
+    monkeypatch.setattr(S, "_extract_watch_action",
+                        lambda *a, **k: ({"listing_query": model_lq} if model_lq else {}))
+    monkeypatch.setattr(S, "_run_listing_query", lambda p, **k: ran.update(p) or [])
+    monkeypatch.setattr(S, "_persist_chat_turn", lambda *a, **k: None)
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    S._complete_assistant_turn("sys", [{"role": "user", "content": text}], cfg, "m", owner=owner)
+    return ran
+
+
+def _one_watch_cfg():
+    return AppConfig(watches=[Watch(name="Boats Watch", urls=["https://x"], instruction="boats",
+                                    interval_minutes=30, owner="")])
+
+
+def test_an_unscoped_model_lookup_is_scoped_and_capped(monkeypatch):
+    ran = _lookup_turn(monkeypatch, "show me the matches from the boats watch",
+                       {"text": "boats"}, _one_watch_cfg())
+    assert ran["watch"] == "Boats Watch"        # was missing — the sofas came from this
+    assert ran["matched_only"] is True          # "the matches" means the matches
+    assert ran["limit"] == 10                   # not the 200-row default
+
+
+def test_a_missing_lookup_is_created(monkeypatch):
+    ran = _lookup_turn(monkeypatch, "show me the one match", None, _one_watch_cfg())
+    assert ran["watch"] == "Boats Watch" and ran["matched_only"] is True
+
+
+def test_what_the_model_did_decide_is_respected(monkeypatch):
+    ran = _lookup_turn(monkeypatch, "show me the top 20",
+                       {"watch": "Boats Watch", "matched_only": False, "limit": 20},
+                       _one_watch_cfg())
+    assert ran["matched_only"] is False and ran["limit"] == 20   # not overridden
+
+
+def test_ordinary_chat_does_not_trigger_a_lookup(monkeypatch):
+    assert _lookup_turn(monkeypatch, "thanks!", None, _one_watch_cfg()) == {}

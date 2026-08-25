@@ -3483,20 +3483,32 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
 
         listings = None
         lq = data.get("listing_query")
-        # Safety net: the person plainly asked to SEE what was found and the extractor didn't
-        # produce a lookup. Build one ourselves, aimed at the watch under discussion (the focus),
-        # so "show me the one match" returns the actual listing instead of a description of the
-        # search. Only fills a GAP — a lookup the model did produce is left alone.
-        if not isinstance(lq, dict) and _is_lookup_request(latest := _latest_user_text(conv)):
+        # When the person plainly asked to SEE what was found, make sure the lookup is one that
+        # actually answers them. Two failures showed up live and both are fixed here:
+        #   • no lookup at all → the reply described the watch's CRITERIA back ("it's an under
+        #     30-foot motor boat…"), which is what was asked FOR, not what was found;
+        #   • an UNSCOPED lookup → 200 rows of everything ever seen, Brooklyn sofas included,
+        #     because the model omitted the watch, the matched-only flag and the limit.
+        # So we fill a missing query AND complete a vague one, without overriding anything the
+        # model actually decided.
+        if _is_lookup_request(latest := _latest_user_text(conv)):
             target = focus if (focus and focus != PENDING_CREATE) else ""
             if not target:
                 mine = _watches_for_owner(cfg, owner)
                 if len(mine) == 1:
                     target = mine[0].name           # only one watch — no ambiguity to resolve
-            if target:
-                lq = {"watch": target, "matched_only": True, "limit": _lookup_limit(latest)}
-                log.info("chat: no lookup from the model but the user asked to see finds — "
-                         "querying %r", target)
+            if not isinstance(lq, dict):
+                lq = {}
+                log.info("chat: the user asked to see finds but the model produced no lookup")
+            if not (lq.get("watch") or "").strip() and target:
+                lq["watch"] = target
+            if lq.get("matched_only") is None:
+                lq["matched_only"] = True           # "show me the matches" means the MATCHES
+            if not lq.get("limit"):
+                lq["limit"] = _lookup_limit(latest)
+            if lq.get("watch"):
+                log.info("chat: listing lookup scoped to %r (matched_only=%s, limit=%s)",
+                         lq["watch"], lq["matched_only"], lq["limit"])
         if isinstance(lq, dict):
             # Scope a Telegram person's "what have you found" to THEIR watches: a lookup must
             # name a watch they own, otherwise it could surface everyone's finds. Desktop is open.

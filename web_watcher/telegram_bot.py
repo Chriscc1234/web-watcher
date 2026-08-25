@@ -60,7 +60,8 @@ _HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (conf
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 _TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
-_SLOW_TURN_S       = 8.0          # after this long, a hard turn says "hang on" instead of sitting silent
+_SLOW_TURN_S       = 12.0         # after this long a hard turn says "hang on"; each further nudge is
+                                  # one more _SLOW_TURN_S of silence, so #1 at 12s, #2 at 24s, …
 
 
 class TelegramBridge:
@@ -268,9 +269,11 @@ class TelegramBridge:
             # Anything else: not an answer to the question — fall through and just chat.
 
         try:
-            # Keep "typing" up for the whole wait, and if it runs long, say so once.
-            with self._typing_until_sent(to, slow_nudge="Hang on — this one's a bit trickier, "
-                                         "thinking it through…"):
+            # Keep "typing" up for the whole wait, and if it runs long, say so — once at ~12s and,
+            # only if it's STILL going at ~30s (uncommon), again — so a hard turn never sits silent.
+            with self._typing_until_sent(to, slow_nudges=[
+                    (_SLOW_TURN_S, "Hang on — this one's a bit trickier. Thinking it through…"),
+                    (30.0, "Still working on it — hang tight…")]):
                 result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)
@@ -366,19 +369,22 @@ class TelegramBridge:
             self._pending_conflict = {"name": name, "body": body}
             bullets = "\n".join(f"  • {d}" for d in diff)
             parts.append(
-                f"“{name}” already exists, but the new one is different:\n{bullets}\n\n"
-                "Reply “update” to change the existing watch to these new settings, “replace” to "
-                "delete it and start fresh (its match history is wiped), or “leave” to keep the "
-                "current one.")
+                f"You already have a watch called “{name}”. Here's what would change:\n\n"
+                f"{bullets}\n\n"
+                "What should I do?\n"
+                "  • “update” — change the existing watch to the new settings (keeps its finds so far)\n"
+                "  • “replace” — delete it and start fresh (clears its finds)\n"
+                "  • “leave” — keep it exactly as it is")
         if failed:
             parts.append("⚠️ Couldn't apply " + ", ".join(f"“{n}”" for n in failed) + ".")
         return " ".join(parts) or "Nothing to apply."
 
     def _watch_diff(self, name: str, body: dict) -> list:
-        """Human-readable differences between a proposed watch `body` and the EXISTING watch of
-        the same name — [] when they're effectively the same (or the existing one can't be read).
-        Compares the fields that define what a watch DOES: where it looks (urls, which carry the
-        location + price filters) and what it looks for (instruction)."""
+        """CONCRETE, labelled differences between a proposed watch `body` and the EXISTING watch of
+        the same name — each a plain "Label: old → new" line, so the user can see exactly what
+        would change. [] when they're effectively the same (or the existing one can't be read).
+        Reads what the watch API exposes (urls + instruction) and derives the human-facing knobs
+        the URLs actually encode: price cap, search radius, and which sites."""
         try:
             r = httpx.get(f"{self.dashboard_url}/api/watches", timeout=15.0)
             data = r.json()
@@ -390,14 +396,57 @@ class TelegramBridge:
                          if str(w.get("name", "")).strip().lower() == low), None)
         if not existing:
             return []
+
+        from urllib.parse import urlparse
+        try:
+            from web_watcher.cl_geo import watch_price_cap, url_radius
+        except Exception:
+            watch_price_cap = url_radius = None
+        try:
+            from web_watcher.notify import source_label
+        except Exception:
+            def source_label(s):
+                return s
+        pu = [str(u).strip() for u in (body.get("urls") or []) if str(u).strip()]
+        eu = [str(u).strip() for u in (existing.get("urls") or []) if str(u).strip()]
+        pi = str(body.get("instruction") or "").strip()
+        ei = str(existing.get("instruction") or "").strip()
+
+        def _money(n):
+            return f"${int(n):,}" if n else "any price"
+
+        def _miles(n):
+            return f"{int(n)} mi" if n else "any distance"
+
+        def _sites(urls):
+            hosts = []
+            for u in urls:
+                h = (urlparse(u).hostname or "").replace("www.", "")
+                base = ".".join(h.split(".")[-2:]) if h else ""      # skagit.craigslist.org → craigslist.org
+                label = source_label(base) or base
+                if label and label not in hosts:
+                    hosts.append(label)
+            return ", ".join(hosts) or "—"
+
         diffs = []
-        pi, ei = str(body.get("instruction") or "").strip(), str(existing.get("instruction") or "").strip()
         if pi and pi != ei:
-            diffs.append(f"what to look for: “{ei or '(none)'}” → “{pi}”")
-        pu = {str(u).strip() for u in (body.get("urls") or []) if str(u).strip()}
-        eu = {str(u).strip() for u in (existing.get("urls") or []) if str(u).strip()}
-        if pu and pu != eu:
-            diffs.append("the site(s), location or price filters it searches")
+            diffs.append(f"Looking for: “{ei or '—'}” → “{pi}”")
+        if watch_price_cap:
+            pc, ec = watch_price_cap(pu, pi), watch_price_cap(eu, ei)
+            if pc != ec:
+                diffs.append(f"Max price: {_money(ec)} → {_money(pc)}")
+        if url_radius:
+            pr = next((url_radius(u) for u in pu if url_radius(u)), None)
+            er = next((url_radius(u) for u in eu if url_radius(u)), None)
+            if pr != er:
+                diffs.append(f"Search radius: {_miles(er)} → {_miles(pr)}")
+        ps, es = _sites(pu), _sites(eu)
+        if pu and ps != es:
+            diffs.append(f"Sites: {es} → {ps}")
+        # URLs differ in some way none of the labels captured (a category/sort tweak) — say so
+        # rather than silently reporting "no differences" and looking like nothing changed.
+        if not diffs and set(pu) != set(eu):
+            diffs.append("Some search settings changed")
         return diffs
 
     def _resolve_conflict(self, text: str, chat_id: str) -> None:
@@ -771,30 +820,35 @@ class TelegramBridge:
     # ------------------------------------------------------------------
 
     @contextlib.contextmanager
-    def _typing_until_sent(self, chat_id: str = "", slow_nudge: str = ""):
+    def _typing_until_sent(self, chat_id: str = "", slow_nudges: list | None = None):
         """Hold Telegram's "…is typing" for the WHOLE wait, not just the first few seconds.
         Telegram expires a typing action after ~5s, so a single call left the chat looking idle
         while a local model was still thinking. Re-send it on a heartbeat until the reply is ready.
 
-        slow_nudge: if set, send this ONE message once the wait crosses _SLOW_TURN_S — so a
-        genuinely hard turn (a big local turn, or one escalating to Claude) says "hang on" instead
-        of just sitting silent. Fast turns finish first and never nudge. Triggered on elapsed time,
-        not on escalation, because we only learn a turn escalated ~a second before the answer —
-        too late to be worth a message — whereas "it's taking a while" is knowable as it happens."""
+        slow_nudges: a list of (after_seconds, message) — each message is sent once the wait has
+        gone that many seconds without an answer. A hard turn (a big local turn, or one escalating
+        to Claude) then says "hang on" at ~12s and, only if it's STILL going at ~30s (uncommon),
+        "still on it" — instead of sitting silent. Fast turns finish first and never nudge.
+        Triggered on elapsed time, not on escalation: we only learn a turn escalated ~a second
+        before the answer (too late to be worth a message), whereas "it's taking a while" is
+        knowable as it happens."""
         stop = threading.Event()
         start = time.monotonic()
-        nudged = False
+        nudges = sorted(((float(s), m) for (s, m) in (slow_nudges or []) if m),
+                        key=lambda x: x[0])
+        sent = 0
 
         def _beat():
-            nonlocal nudged
+            nonlocal sent
             while not stop.is_set():
                 self._typing(chat_id)
-                if slow_nudge and not nudged and (time.monotonic() - start) >= _SLOW_TURN_S:
-                    nudged = True
+                elapsed = time.monotonic() - start
+                while sent < len(nudges) and elapsed >= nudges[sent][0]:
                     try:
-                        self._send(slow_nudge, chat_id)
+                        self._send(nudges[sent][1], chat_id)
                     except Exception:
                         pass
+                    sent += 1
                 stop.wait(_TYPING_REFRESH_S)
 
         t = threading.Thread(target=_beat, name="telegram-typing", daemon=True)

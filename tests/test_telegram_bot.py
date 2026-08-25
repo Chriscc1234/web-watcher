@@ -306,29 +306,39 @@ def test_top_request_sends_a_header_then_one_card_per_listing(monkeypatch, tmp_p
 
 # ── the "hang on, this is a hard one" slow-turn nudge ────────────────────────────
 
-def test_a_slow_turn_gets_one_hang_on_nudge(monkeypatch):
+def test_a_slow_turn_nudges_in_order_at_its_times(monkeypatch):
     import web_watcher.telegram_bot as TB
     b = _bridge()
     sent = []
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    monkeypatch.setattr(TB, "_SLOW_TURN_S", 0.02)
     monkeypatch.setattr(TB, "_TYPING_REFRESH_S", 0.01)
-    with b._typing_until_sent("111", slow_nudge="hang on"):
-        time.sleep(0.12)                       # long enough to cross the threshold
-    assert sent.count("hang on") == 1          # said once, never repeated
+    with b._typing_until_sent("111", slow_nudges=[(0.02, "hang on"), (0.06, "still on it")]):
+        time.sleep(0.16)                       # long enough to cross both thresholds
+    assert sent == ["hang on", "still on it"]   # in order, each once
 
 
 def test_a_fast_turn_does_not_nudge(monkeypatch):
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    with b._typing_until_sent("111", slow_nudges=[(5.0, "hang on")]):
+        pass                                   # replies immediately
+    assert "hang on" not in sent
+
+
+def test_the_second_nudge_holds_until_its_own_time(monkeypatch):
+    """The first nudge fires; the later one must NOT fire yet if the reply lands between them."""
     import web_watcher.telegram_bot as TB
     b = _bridge()
     sent = []
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    monkeypatch.setattr(TB, "_SLOW_TURN_S", 5.0)
-    with b._typing_until_sent("111", slow_nudge="hang on"):
-        pass                                   # replies immediately
-    assert "hang on" not in sent
+    monkeypatch.setattr(TB, "_TYPING_REFRESH_S", 0.01)
+    with b._typing_until_sent("111", slow_nudges=[(0.02, "hang on"), (5.0, "still on it")]):
+        time.sleep(0.08)                       # past #1, nowhere near #2
+    assert sent == ["hang on"]
 
 
 def test_no_nudge_without_the_opt_in(monkeypatch):
@@ -337,9 +347,8 @@ def test_no_nudge_without_the_opt_in(monkeypatch):
     sent = []
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    monkeypatch.setattr(TB, "_SLOW_TURN_S", 0.01)
     monkeypatch.setattr(TB, "_TYPING_REFRESH_S", 0.01)
-    with b._typing_until_sent("111"):          # no slow_nudge → never sends anything
+    with b._typing_until_sent("111"):          # no slow_nudges → never sends anything
         time.sleep(0.05)
     assert sent == []
 
@@ -384,7 +393,20 @@ def test_watch_diff_flags_a_changed_instruction(monkeypatch):
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.get",
                         _get_returning([{"name": "Boats", "instruction": "old", "urls": ["https://x"]}]))
     diff = b._watch_diff("Boats", {"instruction": "new", "urls": ["https://x"]})
-    assert diff and "what to look for" in diff[0]
+    assert diff and "Looking for" in diff[0] and "old" in diff[0] and "new" in diff[0]
+
+
+def test_watch_diff_shows_concrete_price_and_radius_labels(monkeypatch):
+    """The diff must say WHAT changed, in plain money/miles — not a vague 'filters changed'."""
+    b = _bridge()
+    existing = [{"name": "Boats", "instruction": "boats",
+                 "urls": ["https://skagit.craigslist.org/search/boo?max_price=15000&search_distance=150&postal=98221"]}]
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.get", _get_returning(existing))
+    diff = b._watch_diff("Boats", {"instruction": "boats",
+        "urls": ["https://skagit.craigslist.org/search/boo?max_price=20000&search_distance=300&postal=98221"]})
+    joined = " | ".join(diff)
+    assert "Max price: $15,000 → $20,000" in joined
+    assert "Search radius: 150 mi → 300 mi" in joined
 
 
 def test_watch_diff_is_empty_when_effectively_the_same(monkeypatch):
@@ -402,10 +424,11 @@ def test_a_differing_collision_offers_update_replace_leave(monkeypatch):
         def json(self): return {"detail": "Watch 'Boats' already exists"}
 
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda *a, **k: _Post())
-    monkeypatch.setattr(b, "_watch_diff", lambda name, body: ["what to look for: “old” → “new”"])
+    monkeypatch.setattr(b, "_watch_diff", lambda name, body: ["Looking for: “old” → “new”"])
     out = b._apply_pending([{"action": "create", "name": "Boats",
                              "instruction": "new", "urls": ["https://x"]}])
-    assert "already exists, but the new one is different" in out
+    assert "You already have a watch called" in out and "what would change" in out.lower()
+    assert "Looking for" in out
     assert "update" in out and "replace" in out and "leave" in out
     assert b._pending_conflict and b._pending_conflict["name"] == "Boats"
 

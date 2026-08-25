@@ -304,6 +304,33 @@ def test_top_request_sends_a_header_then_one_card_per_listing(monkeypatch, tmp_p
     assert [r["title"] for r in cards] == ["Boat 0", "Boat 1", "Boat 2"]
 
 
+# ── the "Show top N" buttons debounce rapid taps ─────────────────────────────────
+
+def test_top_buttons_debounce_rapid_taps(monkeypatch):
+    """Tapping top-10 then top-20 back to back must not fire two overlapping card bursts."""
+    b = _bridge("111")
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
+    ran = []
+    monkeypatch.setattr(b, "_handle_top_request", lambda payload, chat: ran.append(payload))
+    cb = lambda n: {"id": str(n), "data": f"top:tok:{n}", "message": {"chat": {"id": "111"}}}
+    b._handle_callback(cb(10))
+    b._handle_callback(cb(20))          # immediately after → swallowed by the cooldown
+    assert ran == ["tok:10"]
+
+
+def test_top_buttons_allow_a_later_tap(monkeypatch):
+    import web_watcher.telegram_bot as TB
+    b = _bridge("111")
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
+    monkeypatch.setattr(TB, "_TOP_COOLDOWN_S", 0.0)     # no cooldown → a later tap is honoured
+    ran = []
+    monkeypatch.setattr(b, "_handle_top_request", lambda payload, chat: ran.append(payload))
+    cb = lambda n: {"id": str(n), "data": f"top:tok:{n}", "message": {"chat": {"id": "111"}}}
+    b._handle_callback(cb(10))
+    b._handle_callback(cb(20))
+    assert ran == ["tok:10", "tok:20"]
+
+
 # ── the "hang on, this is a hard one" slow-turn nudge ────────────────────────────
 
 def test_a_slow_turn_nudges_in_order_at_its_times(monkeypatch):

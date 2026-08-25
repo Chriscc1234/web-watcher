@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import httpx
@@ -32,6 +33,24 @@ log = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434"
 _MAX_TERMS = 6
+
+# A "search term" that's really a LOCATION, DISTANCE or QUALIFIER fragment, not the item — the
+# model keeps slicing these out of an instruction ("MacGregor sailboats … within a 300-mile radius
+# of Anacortes" → "any model", "within 300 miles", "near Anacortes"). Searched literally, they pull
+# in every random boat that merely mentions "Anacortes" or "300 miles", so they must never become a
+# search URL. Dropped on BOTH generation and cache-read, so a watch already carrying junk self-heals.
+_JUNK_TERM_RE = re.compile(
+    r"\b(?:miles?|radius|within|near(?:by)?|around|nearest|budget|"
+    r"any\s+(?:model|make|type|price|year|color|colour|size|condition)|"
+    r"no\s+(?:price|limit|max)|price\s+(?:limit|range|cap))\b"
+    r"|(?:under|over)\s*\$?\d",          # numeric constraints end in a digit — no trailing \b
+    re.I)
+
+
+def _is_junk_term(term: str) -> bool:
+    """True for a 'term' that describes WHERE or a CONSTRAINT, not WHAT — it would poison the feed."""
+    t = (term or "").strip()
+    return len(t) < 2 or bool(_JUNK_TERM_RE.search(t))
 
 _SYSTEM = """\
 You expand a shopper's request into the EXACT search terms they should type into a
@@ -70,8 +89,11 @@ def expand_search_terms(intent: str, model: str, db_path=None,
     if not force:
         cached = get_term_expansion(intent, db_path)
         if cached:
-            log.info("Search terms for %r served from learning cache (%d)", intent[:50], len(cached))
-            return cached[:_MAX_TERMS]
+            cached = [t for t in cached if not _is_junk_term(t)]   # scrub junk from old caches too
+            if cached:
+                log.info("Search terms for %r served from learning cache (%d)",
+                         intent[:50], len(cached))
+                return cached[:_MAX_TERMS]
 
     avoid = [t for t in (avoid or []) if t and t.strip()]
     user_msg = f"Request: {intent}\n"
@@ -104,9 +126,12 @@ def expand_search_terms(intent: str, model: str, db_path=None,
         except json.JSONDecodeError:
             data = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
         terms = [str(t).strip() for t in (data.get("terms") or []) if str(t).strip()]
-        # de-dup, cap
+        # de-dup, drop location/qualifier junk, cap
         seen, clean = set(), []
         for t in terms:
+            if _is_junk_term(t):
+                log.info("Dropping junk search term %r (a place/constraint, not the item)", t)
+                continue
             k = t.lower()
             if k not in seen:
                 seen.add(k); clean.append(t)

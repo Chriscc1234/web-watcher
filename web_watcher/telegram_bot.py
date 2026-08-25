@@ -62,6 +62,7 @@ _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is 
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 _TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
 _SLOW_TURN_S       = 12.0         # a hard turn says "hang on" at ~12s, and (if still going) again at 30s
+_TOP_COOLDOWN_S    = 25.0         # ignore a second "Show top N" tap within this long (a burst takes a bit)
 
 # A pool for each stage so the reassurance never reads the same twice in a row. The first fires at
 # ~12s ("this is taking a moment"); the second, rarely, at ~30s ("still at it").
@@ -121,6 +122,9 @@ class TelegramBridge:
         # A create that collided with an existing watch of the same name, whose settings DIFFER.
         # Held for the user to choose update / replace / leave. {"name", "body"}.
         self._pending_conflict: dict | None = None
+        # Debounce the "Show top N" buttons: a top-20 sends 20 cards over several seconds, so
+        # tapping 10 then 20 (or double-tapping) would spam two overlapping bursts. chat_id -> ts.
+        self._top_cooldown: dict[str, float] = {}
         # Proactive check-in bookkeeping. Seed "last contact" at startup so we don't fire the
         # moment the app launches; a real check-in is a full interval of quiet away.
         self._start_ts = time.time()
@@ -575,6 +579,13 @@ class TelegramBridge:
             return
         # "Show top N" from a baseline briefing — the backlog we deliberately didn't alert on.
         if data.startswith("top:"):
+            # Debounce: one burst at a time. A second tap while a burst is still going (or right
+            # after) is swallowed with a toast, not answered with another 10-20 cards.
+            now = time.monotonic()
+            if now - self._top_cooldown.get(str(chat), 0.0) < _TOP_COOLDOWN_S:
+                self._answer_callback(cb.get("id"), "Already sending those — give it a moment.")
+                return
+            self._top_cooldown[str(chat)] = now
             self._answer_callback(cb.get("id"), "Fetching…")
             self._handle_top_request(data[4:], str(chat))
             return

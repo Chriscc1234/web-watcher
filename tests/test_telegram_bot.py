@@ -304,6 +304,46 @@ def test_top_request_sends_a_header_then_one_card_per_listing(monkeypatch, tmp_p
     assert [r["title"] for r in cards] == ["Boat 0", "Boat 1", "Boat 2"]
 
 
+# ── the "hang on, this is a hard one" slow-turn nudge ────────────────────────────
+
+def test_a_slow_turn_gets_one_hang_on_nudge(monkeypatch):
+    import web_watcher.telegram_bot as TB
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    monkeypatch.setattr(TB, "_SLOW_TURN_S", 0.02)
+    monkeypatch.setattr(TB, "_TYPING_REFRESH_S", 0.01)
+    with b._typing_until_sent("111", slow_nudge="hang on"):
+        time.sleep(0.12)                       # long enough to cross the threshold
+    assert sent.count("hang on") == 1          # said once, never repeated
+
+
+def test_a_fast_turn_does_not_nudge(monkeypatch):
+    import web_watcher.telegram_bot as TB
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    monkeypatch.setattr(TB, "_SLOW_TURN_S", 5.0)
+    with b._typing_until_sent("111", slow_nudge="hang on"):
+        pass                                   # replies immediately
+    assert "hang on" not in sent
+
+
+def test_no_nudge_without_the_opt_in(monkeypatch):
+    import web_watcher.telegram_bot as TB
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    monkeypatch.setattr(TB, "_SLOW_TURN_S", 0.01)
+    monkeypatch.setattr(TB, "_TYPING_REFRESH_S", 0.01)
+    with b._typing_until_sent("111"):          # no slow_nudge → never sends anything
+        time.sleep(0.05)
+    assert sent == []
+
+
 # ── proactive check-ins (heartbeats) ─────────────────────────────────────────────
 
 def test_checkin_hours_configures_the_interval():

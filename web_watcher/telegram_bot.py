@@ -60,6 +60,7 @@ _HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (conf
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 _TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
+_SLOW_TURN_S       = 8.0          # after this long, a hard turn says "hang on" instead of sitting silent
 
 
 class TelegramBridge:
@@ -257,7 +258,9 @@ class TelegramBridge:
             # Anything else: not an answer to the question — fall through and just chat.
 
         try:
-            with self._typing_until_sent(to):      # keep "typing" up for the whole wait
+            # Keep "typing" up for the whole wait, and if it runs long, say so once.
+            with self._typing_until_sent(to, slow_nudge="Hang on — this one's a bit trickier, "
+                                         "thinking it through…"):
                 result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)
@@ -676,15 +679,30 @@ class TelegramBridge:
     # ------------------------------------------------------------------
 
     @contextlib.contextmanager
-    def _typing_until_sent(self, chat_id: str = ""):
+    def _typing_until_sent(self, chat_id: str = "", slow_nudge: str = ""):
         """Hold Telegram's "…is typing" for the WHOLE wait, not just the first few seconds.
         Telegram expires a typing action after ~5s, so a single call left the chat looking idle
-        while a local model was still thinking. Re-send it on a heartbeat until the reply is ready."""
+        while a local model was still thinking. Re-send it on a heartbeat until the reply is ready.
+
+        slow_nudge: if set, send this ONE message once the wait crosses _SLOW_TURN_S — so a
+        genuinely hard turn (a big local turn, or one escalating to Claude) says "hang on" instead
+        of just sitting silent. Fast turns finish first and never nudge. Triggered on elapsed time,
+        not on escalation, because we only learn a turn escalated ~a second before the answer —
+        too late to be worth a message — whereas "it's taking a while" is knowable as it happens."""
         stop = threading.Event()
+        start = time.monotonic()
+        nudged = False
 
         def _beat():
+            nonlocal nudged
             while not stop.is_set():
                 self._typing(chat_id)
+                if slow_nudge and not nudged and (time.monotonic() - start) >= _SLOW_TURN_S:
+                    nudged = True
+                    try:
+                        self._send(slow_nudge, chat_id)
+                    except Exception:
+                        pass
                 stop.wait(_TYPING_REFRESH_S)
 
         t = threading.Thread(target=_beat, name="telegram-typing", daemon=True)

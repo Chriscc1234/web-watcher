@@ -57,7 +57,8 @@ def test_unlisted_role_is_local():
 
 def test_chat_local_path_calls_ollama(monkeypatch):
     seen = {}
-    def fake_ollama(messages, model, *, format_json, images, timeout, base_url=llm.OLLAMA_BASE, priority=False):
+    def fake_ollama(messages, model, *, format_json, images, timeout,
+                    base_url=llm.OLLAMA_BASE, priority=False, num_ctx=0):
         seen.update(model=model, fmt=format_json)
         return '{"ratings": []}'
     monkeypatch.setattr(llm, "_ollama_chat", fake_ollama)
@@ -171,3 +172,34 @@ def test_chat_falls_back_to_local_when_over_budget(monkeypatch):
     out = llm.chat([{"role": "user", "content": "hi"}], role="chat",
                    local_model="qwen2.5:14b", cfg=cfg)
     assert out == "LOCAL"
+
+
+# ── context window ───────────────────────────────────────────────────────────────
+# Ollama defaults to a SMALL window and silently truncates a longer prompt from the front, so a
+# "read all of this" call can quietly become "read the tail of this". Callers must be able to
+# state the window they need — and everyone else must keep Ollama's default untouched.
+
+def test_num_ctx_is_sent_only_when_asked_for(monkeypatch):
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": "ok"}}
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None):
+            sent.clear(); sent.update(json or {})
+            return _Resp()
+
+    monkeypatch.setattr(llm.httpx, "Client", _Client)
+
+    llm._ollama_chat([{"role": "user", "content": "x"}], "m",
+                     format_json=False, images=None, timeout=5.0)
+    assert "options" not in sent                      # default behaviour unchanged
+
+    llm._ollama_chat([{"role": "user", "content": "x"}], "m",
+                     format_json=False, images=None, timeout=5.0, num_ctx=8192)
+    assert sent["options"] == {"num_ctx": 8192}

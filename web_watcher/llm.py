@@ -167,6 +167,7 @@ def chat(
     cache_system: bool = False,
     max_tokens:  int = 4096,
     force_local: bool = False,
+    num_ctx:     int = 0,
 ) -> str:
     """Run one chat completion for `role`, returning the assistant text.
 
@@ -180,6 +181,9 @@ def chat(
     force_local: run on the local model even when the role is routed to cloud. Used for
       smart escalation — the caller keeps easy/short turns local (fast + free) and only lets
       the hard ones reach cloud. A no-op when the role is already local.
+    num_ctx: local-only context window override. Ollama defaults to a SMALL window (4096) and
+      silently truncates anything longer, so any caller handing over a long document must say
+      how much it needs to be read. 0 = leave Ollama's default alone.
     """
     if cfg is None:
         try:
@@ -215,7 +219,7 @@ def chat(
 
     # A person is waiting on the "chat" role — let it jump the GPU queue ahead of sweep work.
     raw = _ollama_chat(messages, local_model, format_json=format_json, images=images,
-                       timeout=timeout, priority=(role == "chat"))
+                       timeout=timeout, priority=(role == "chat"), num_ctx=num_ctx)
     return _extract_json_text(raw) if format_json else raw
 
 
@@ -253,13 +257,19 @@ def _anthropic_chat(system_text: str, user_messages: list[dict], model: str, key
 
 def _ollama_chat(messages: list[dict], model: str, *, format_json: bool,
                  images: Optional[list[str]], timeout: float, base_url: str = OLLAMA_BASE,
-                 priority: bool = False) -> str:
+                 priority: bool = False, num_ctx: int = 0) -> str:
     msgs = [dict(m) for m in messages]
     if images and msgs:
         msgs[-1]["images"] = images
     payload: dict = {"model": model, "messages": msgs, "stream": False}
     if format_json:
         payload["format"] = "json"
+    # Ollama's DEFAULT context window is small (4096); a longer prompt is silently truncated
+    # from the FRONT, so a big document read looks like it worked while the model only ever saw
+    # the tail. Callers that hand over a lot of text (the chat reviewer) must state the window
+    # they need. Left unset for everyone else so existing behaviour is unchanged.
+    if num_ctx > 0:
+        payload["options"] = {"num_ctx": int(num_ctx)}
     # Serialize on the shared GPU slot so this never runs a local inference at the same time as a
     # browsing agent's vision call — one local GPU does one call at a time; two at once just thrash
     # and time out. priority=True (a person is waiting on a reply) jumps ahead of sweep work.

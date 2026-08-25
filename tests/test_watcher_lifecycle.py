@@ -176,3 +176,71 @@ def test_restart_arms_a_hard_exit(monkeypatch):
     monkeypatch.setattr("threading.Timer", _T)
     m._force_exit_soon(grace=5.0)
     assert armed.get("started") is True and armed.get("delay") == 5.0
+
+
+# ── level 3: ONE PERSON'S whole set, from the server console ──────────────────────
+#
+# The server app groups watches by user and gives each group a start/stop button. The lever is
+# `enabled` (not the running loops) because when the orchestrator is driving it services every
+# ENABLED continuous watch — stopping a loop alone would be undone on its next pass.
+
+@pytest.fixture()
+def group_app(monkeypatch, tmp_path):
+    """A client whose config lives in a temp file, so the endpoint's save() is real but isolated."""
+    cfg = AppConfig(watches=[
+        Watch(name="Buddy A", urls=["https://a"], instruction="a", interval_minutes=30,
+              mode="continuous", owner="555", enabled=True),
+        Watch(name="Buddy B", urls=["https://b"], instruction="b", interval_minutes=30,
+              mode="continuous", owner="555", enabled=False),     # deliberately OFF
+        Watch(name="Mine", urls=["https://c"], instruction="c", interval_minutes=30,
+              owner="", enabled=True),
+    ])
+    monkeypatch.setattr(S, "_SUSPENDED_PATH", tmp_path / "owner_suspended.json")
+    import web_watcher.config as C
+    monkeypatch.setattr(C, "load", lambda: cfg)
+    monkeypatch.setattr(C, "save", lambda c: None)
+    return TestClient(create_app(MagicMock())), cfg
+
+
+def _by(cfg, name):
+    return next(w for w in cfg.watches if w.name == name)
+
+
+def test_group_stop_turns_off_only_that_persons_watches(group_app):
+    client, cfg = group_app
+    r = client.post("/api/owners/action", json={"owner": "555", "action": "stop"}).json()
+    assert r["changed"] == 1 and r["names"] == ["Buddy A"]     # B was already off
+    assert _by(cfg, "Buddy A").enabled is False
+    assert _by(cfg, "Mine").enabled is True                    # someone else's group untouched
+
+
+def test_group_start_restores_only_what_the_stop_turned_off(group_app):
+    """The whole point of remembering: a watch the person deactivated on purpose must NOT come
+    back just because the group was stopped and started."""
+    client, cfg = group_app
+    client.post("/api/owners/action", json={"owner": "555", "action": "stop"})
+    r = client.post("/api/owners/action", json={"owner": "555", "action": "start"}).json()
+    assert r["changed"] == 1
+    assert _by(cfg, "Buddy A").enabled is True
+    assert _by(cfg, "Buddy B").enabled is False                # stayed off, as intended
+
+
+def test_group_start_with_nothing_remembered_enables_the_whole_group(group_app):
+    client, cfg = group_app
+    _by(cfg, "Buddy A").enabled = False
+    r = client.post("/api/owners/action", json={"owner": "555", "action": "start"}).json()
+    assert r["changed"] == 2                                   # explicit "Start all" on a visible group
+    assert _by(cfg, "Buddy A").enabled and _by(cfg, "Buddy B").enabled
+
+
+def test_group_action_reports_the_master_switch(group_app):
+    client, _ = group_app
+    r = client.post("/api/owners/action", json={"owner": "555", "action": "start"}).json()
+    assert "paused" in r          # so the UI can warn that nothing sweeps while paused
+
+
+def test_unknown_group_action_and_unknown_owner(group_app):
+    client, _ = group_app
+    assert client.post("/api/owners/action", json={"owner": "555", "action": "nope"}).status_code == 400
+    r = client.post("/api/owners/action", json={"owner": "nobody", "action": "stop"}).json()
+    assert r["ok"] is True and r["changed"] == 0

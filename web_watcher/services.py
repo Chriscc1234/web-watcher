@@ -765,6 +765,100 @@ class ServiceManager:
             return dict(self._inspections.get("comprehend:" + url) or {"status": "unknown", "url": url})
 
     # ------------------------------------------------------------------
+    # Chat review (the big model audits our own conversations)
+    # ------------------------------------------------------------------
+
+    def review_start(self, since: float | None = None, model: str = "") -> dict:
+        """Kick off a chat-history audit on a worker thread. It is slow on purpose (the biggest
+        local model, no time limit) and reports progress as it goes, so the UI can show a live
+        line instead of a spinner. Only one review runs at a time."""
+        key = "review"
+        with self._inspect_lock:
+            cur = self._inspections.get(key)
+            if cur and cur.get("status") == "running":
+                return cur
+            self._inspections[key] = {"status": "running", "progress": "starting…"}
+
+        def _note(msg: str) -> None:
+            with self._inspect_lock:
+                entry = self._inspections.get(key) or {}
+                entry["progress"] = msg
+                self._inspections[key] = entry
+
+        def _run() -> None:
+            from web_watcher.config import load as load_config
+            from web_watcher import review as _review
+            try:
+                report = _review.review_chats(load_config(), since=since, model=model, progress=_note)
+                with self._inspect_lock:
+                    self._inspections[key] = {"status": "done", "progress": "done", "report": report}
+            except Exception as exc:
+                log.warning("chat review failed: %s", exc)
+                with self._inspect_lock:
+                    self._inspections[key] = {"status": "error", "error": str(exc)}
+
+        threading.Thread(target=_run, daemon=True, name="ww-review").start()
+        return self._inspections[key]
+
+    def review_status(self) -> dict:
+        with self._inspect_lock:
+            return dict(self._inspections.get("review") or {"status": "idle"})
+
+    # ------------------------------------------------------------------
+    # Site drill (can we actually use this site? — run before trusting a watch on it)
+    # ------------------------------------------------------------------
+
+    def drill_start(self, site: str, headless: bool = False) -> dict:
+        """Run a site competency drill on a worker thread. Opens a real browser, so continuous
+        watches are stopped first to release the login profile's lock — exactly like the Facebook
+        connect flow — and restarted afterwards."""
+        key = "drill"
+        with self._inspect_lock:
+            cur = self._inspections.get(key)
+            if cur and cur.get("status") == "running":
+                return cur
+            self._inspections[key] = {"status": "running", "site": site, "progress": "starting…"}
+
+        def _note(msg: str) -> None:
+            with self._inspect_lock:
+                entry = self._inspections.get(key) or {}
+                entry["progress"] = msg
+                self._inspections[key] = entry
+
+        def _run() -> None:
+            from web_watcher.config import load as load_config
+            from web_watcher import drill as _drill
+            was_running: list[str] = []
+            if self._scheduler is not None:
+                try:
+                    was_running = self._scheduler.running_continuous()
+                    self._scheduler.stop_all_continuous()
+                except Exception as exc:
+                    log.warning("could not stop watches before the drill: %s", exc)
+            try:
+                report = _drill.run_drill(site, load_config(), progress=_note, headless=headless)
+                with self._inspect_lock:
+                    self._inspections[key] = {"status": "done", "site": site,
+                                              "progress": "done", "report": report}
+            except Exception as exc:
+                log.warning("drill failed: %s", exc)
+                with self._inspect_lock:
+                    self._inspections[key] = {"status": "error", "site": site, "error": str(exc)}
+            finally:
+                for name in was_running:
+                    try:
+                        self._scheduler.start_continuous(name)
+                    except Exception as exc:
+                        log.warning("could not restart %r after the drill: %s", name, exc)
+
+        threading.Thread(target=_run, daemon=True, name="ww-drill").start()
+        return self._inspections[key]
+
+    def drill_status(self) -> dict:
+        with self._inspect_lock:
+            return dict(self._inspections.get("drill") or {"status": "idle"})
+
+    # ------------------------------------------------------------------
     # Ollama
     # ------------------------------------------------------------------
 

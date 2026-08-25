@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -757,6 +758,131 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 bg.add_task(manager.reload_scheduler)
             return {"ok": True, "name": watch_name, "action": action}
         raise HTTPException(400, detail=f"Unknown watch action {action!r}")
+
+    @app.post("/api/owners/action")
+    def owner_lifecycle_action(body: dict, bg: BackgroundTasks):
+        """Start or stop ONE PERSON'S watches as a group — the per-user equivalent of the master
+        switch, for the server console where watches are grouped by user. owner "" = the
+        unassigned group.
+
+        This flips `enabled`, not the running loops, because that's the lever that works in BOTH
+        execution modes: when the orchestrator is driving it services every ENABLED continuous
+        watch, so stopping a per-watch loop would just be re-started on its next pass. It's also
+        the state the console already shows, so the button matches what the user sees.
+
+        STOP remembers exactly which watches it turned off, and START turns those back on — so a
+        watch the person had already deactivated on purpose is not silently resurrected by a
+        group start. With nothing remembered (first use), START enables the whole group, which is
+        what clicking "Start all" on a visible group plainly means."""
+        from web_watcher.config import load, save
+        action = str(body.get("action") or "").strip().lower()
+        if action not in ("start", "stop"):
+            raise HTTPException(400, detail=f"Unknown owner action {action!r}")
+        owner = str(body.get("owner") or "").strip()
+
+        cfg = load()
+        mine = [w for w in cfg.watches if str(getattr(w, "owner", "") or "") == owner]
+        if not mine:
+            return {"ok": True, "owner": owner, "action": action, "changed": 0,
+                    "detail": "no watches for this user"}
+
+        suspended = _load_suspended()
+        remembered = set(suspended.get(owner) or [])
+        changed: list[str] = []
+
+        if action == "stop":
+            for w in mine:
+                if w.enabled:
+                    w.enabled = False
+                    changed.append(w.name)
+                if getattr(w, "mode", "") == "continuous":
+                    try:
+                        manager.stop_continuous(w.name)       # also drop any per-watch loop now
+                    except Exception:
+                        pass
+            if changed:
+                suspended[owner] = changed
+                _save_suspended(suspended)
+        else:
+            targets = remembered if remembered else {w.name for w in mine}
+            for w in mine:
+                if w.name in targets and not w.enabled:
+                    w.enabled = True
+                    changed.append(w.name)
+            suspended.pop(owner, None)
+            _save_suspended(suspended)
+
+        if changed:
+            save(cfg)
+            bg.add_task(manager.reload_scheduler)
+        log.info("owner %s: %s — %d watch(es) changed", owner or "(unassigned)", action, len(changed))
+        return {"ok": True, "owner": owner, "action": action, "changed": len(changed),
+                "names": changed, "total": len(mine),
+                "enabled_now": sum(1 for w in mine if w.enabled),
+                "paused": manager.is_paused()}
+
+    # ------------------------------------------------------------------
+    # Chat review — the big model audits our own conversations
+    # ------------------------------------------------------------------
+
+    @app.post("/api/review/chats")
+    def start_chat_review(body: dict | None = None):
+        """Run the slow, thorough audit of stored conversations. Returns immediately; poll
+        GET /api/review/chats for progress and the finished report."""
+        body = body or {}
+        since = body.get("since")
+        return manager.review_start(
+            since=float(since) if since is not None else None,
+            model=str(body.get("model") or ""),
+        )
+
+    @app.get("/api/review/chats")
+    def chat_review_status():
+        """Live status of a running review, plus the last finished report (which survives a
+        restart — it's saved to disk)."""
+        from web_watcher import review as _review
+        status = manager.review_status()
+        if not status.get("report"):
+            last = _review.latest_report()
+            if last:
+                status["report"] = last
+        status["watermark"] = _review.watermark()
+        return status
+
+    @app.get("/api/review/chats/text", response_class=PlainTextResponse)
+    def chat_review_text():
+        """The latest report as plain text — the fastest way to actually read it."""
+        from web_watcher import review as _review
+        report = (manager.review_status().get("report")) or _review.latest_report()
+        return _review.render_report(report or {})
+
+    # ------------------------------------------------------------------
+    # Site drill — can we actually use this site?
+    # ------------------------------------------------------------------
+
+    @app.post("/api/drill")
+    def start_drill(body: dict | None = None):
+        """Run the competency drill for a site (default Facebook). Returns immediately; poll
+        GET /api/drill for progress and the report."""
+        body = body or {}
+        return manager.drill_start(str(body.get("site") or "facebook.com"),
+                                   headless=bool(body.get("headless", False)))
+
+    @app.get("/api/drill")
+    def drill_status():
+        from web_watcher import drill as _drill
+        status = manager.drill_status()
+        if not status.get("report"):
+            last = _drill.latest_report()
+            if last:
+                status["report"] = last
+        return status
+
+    @app.get("/api/drill/text", response_class=PlainTextResponse)
+    def drill_text():
+        from web_watcher import drill as _drill
+        report = (manager.drill_status().get("report")) or _drill.latest_report()
+        return _drill.render_report(report or {})
 
     @app.post("/api/connect/facebook")
     def connect_facebook(bg: BackgroundTasks):
@@ -1899,6 +2025,31 @@ def _save_watcher_history(history: list, owner: str | None = None) -> None:
         p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log.warning("Could not save watcher history: %s", exc)
+
+
+# --- Group suspend memory ---------------------------------------------------------
+# When the console stops ALL of one person's watches, we remember exactly which ones were on at
+# the time, so starting the group back up restores that set instead of blanket-enabling — a watch
+# they had deliberately deactivated must stay deactivated through a group stop/start cycle.
+_SUSPENDED_PATH = _WATCHER_HISTORY_PATH.with_name("owner_suspended.json")
+
+
+def _load_suspended() -> dict:
+    try:
+        if _SUSPENDED_PATH.exists():
+            d = json.loads(_SUSPENDED_PATH.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_suspended(data: dict) -> None:
+    try:
+        _SUSPENDED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SUSPENDED_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not save the group-suspend memory: %s", exc)
 
 
 # --- Owner display names ----------------------------------------------------------

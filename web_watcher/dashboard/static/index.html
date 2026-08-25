@@ -195,6 +195,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .owner-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;padding-bottom:7px;border-bottom:1px solid var(--border)}
 .owner-name{font-weight:700;font-size:14px}
 .owner-meta{font-size:12px;color:var(--dim)}
+.owner-actions{margin-left:auto}
+.owner-actions button{font-size:12px;padding:4px 10px}
 /* ---- Chats admin console (per-person thread viewer) ---- */
 .chats-layout{display:flex;gap:14px;align-items:stretch}
 .chats-list{flex:0 0 260px;display:flex;flex-direction:column;gap:6px;max-height:66vh;overflow-y:auto}
@@ -2019,10 +2021,16 @@ async function loadWatches() {
         const on = list.filter(w => w.enabled).length;
         const named = list.find(w => w.owner_name);
         const label = o ? ((named && named.owner_name) || `Telegram · ${o}`) : 'Unassigned (yours)';
+        // One control for this person's WHOLE set — the per-user equivalent of the master
+        // switch. It reads their current state: anything on → "Stop all"; all off → "Start all".
+        const groupBtn = on
+          ? `<button onclick="ownerAction('${o}', 'stop', ${list.length})" title="Turn off every watch for this person">⏸ Stop all</button>`
+          : `<button class="primary" onclick="ownerAction('${o}', 'start', ${list.length})" title="Turn their watches back on">▶ Start all</button>`;
         return `<div class="owner-group">
             <div class="owner-head">
               <span class="owner-name">${escapeHtml(label)}</span>
               <span class="owner-meta">${list.length} watch${list.length === 1 ? '' : 'es'} · ${on} on · ${list.length - on} off</span>
+              <span class="owner-actions">${groupBtn}</span>
             </div>
             ${sections(list)}
           </div>`;
@@ -2156,6 +2164,25 @@ async function setWatchActive(name, enabled) {
     setTimeout(() => loadWatches(), 600);
   } catch(e) {
     alert(`Could not ${enabled ? 'activate' : 'pause'} the watch: ${e.message}`);
+  }
+}
+
+// Start/stop ONE PERSON'S whole set of watches. Stopping remembers which ones were on, so
+// starting the group back up restores exactly that set instead of resurrecting watches they
+// had already deactivated on purpose (see /api/owners/action).
+async function ownerAction(owner, action, total) {
+  if (action === 'stop' && total > 1 &&
+      !confirm(`Stop all ${total} of this person's watches?`)) return;
+  try {
+    const r = await api('/api/owners/action', {
+      method: 'POST', body: JSON.stringify({ owner, action }),
+    });
+    if (action === 'start' && r && r.paused) {
+      alert('Their watches are on, but The Watcher itself is paused — resume it to actually sweep.');
+    }
+    setTimeout(() => loadWatches(), 600);
+  } catch(e) {
+    alert(`Could not ${action} this person's watches: ${e.message}`);
   }
 }
 

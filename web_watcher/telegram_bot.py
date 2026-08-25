@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import random
 import re
 import threading
 import time
@@ -60,8 +61,27 @@ _HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (conf
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 _TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
-_SLOW_TURN_S       = 12.0         # after this long a hard turn says "hang on"; each further nudge is
-                                  # one more _SLOW_TURN_S of silence, so #1 at 12s, #2 at 24s, …
+_SLOW_TURN_S       = 12.0         # a hard turn says "hang on" at ~12s, and (if still going) again at 30s
+
+# A pool for each stage so the reassurance never reads the same twice in a row. The first fires at
+# ~12s ("this is taking a moment"); the second, rarely, at ~30s ("still at it").
+_THINKING_NUDGES = (
+    "Hang on — this one's a bit trickier. Thinking it through…",
+    "Give me a sec — working through this one…",
+    "Hmm, this one needs a little more thought…",
+    "One moment — chewing on this one…",
+    "Bear with me — thinking this through…",
+    "Hang tight — this one's got a few moving parts…",
+    "Let me think on this one for a moment…",
+    "Just a sec — digging into this one…",
+)
+_STILL_WORKING_NUDGES = (
+    "Still working on it — hang tight…",
+    "Still on it — won't be much longer…",
+    "Almost there — thanks for your patience…",
+    "Nearly done — appreciate you waiting…",
+    "Still crunching this one — hang in there…",
+)
 
 
 class TelegramBridge:
@@ -270,10 +290,11 @@ class TelegramBridge:
 
         try:
             # Keep "typing" up for the whole wait, and if it runs long, say so — once at ~12s and,
-            # only if it's STILL going at ~30s (uncommon), again — so a hard turn never sits silent.
+            # only if it's STILL going at ~30s (uncommon), again. A fresh phrase each time so the
+            # reassurance never reads the same twice.
             with self._typing_until_sent(to, slow_nudges=[
-                    (_SLOW_TURN_S, "Hang on — this one's a bit trickier. Thinking it through…"),
-                    (30.0, "Still working on it — hang tight…")]):
+                    (_SLOW_TURN_S, random.choice(_THINKING_NUDGES)),
+                    (30.0, random.choice(_STILL_WORKING_NUDGES))]):
                 result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)

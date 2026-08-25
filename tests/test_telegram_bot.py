@@ -341,6 +341,14 @@ def test_the_second_nudge_holds_until_its_own_time(monkeypatch):
     assert sent == ["hang on"]
 
 
+def test_there_is_real_variety_in_the_thinking_sayings():
+    """Several distinct phrases per stage so the reassurance never gets repetitive."""
+    import web_watcher.telegram_bot as TB
+    assert len(set(TB._THINKING_NUDGES)) >= 4
+    assert len(set(TB._STILL_WORKING_NUDGES)) >= 3
+    assert all(isinstance(m, str) and m.strip() for m in TB._THINKING_NUDGES + TB._STILL_WORKING_NUDGES)
+
+
 def test_no_nudge_without_the_opt_in(monkeypatch):
     import web_watcher.telegram_bot as TB
     b = _bridge()

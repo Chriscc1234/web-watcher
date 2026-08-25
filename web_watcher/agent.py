@@ -572,7 +572,9 @@ def run_agent(
             # Special case: stuck on type with actual text = search typed but Enter
             # never pressed. Only fire if there's text to submit — don't force-Enter
             # on a blank type action (model returned type with no text/element).
-            if action.action == "type" and action.text and consecutive_same == COUNCIL_TRIGGER:
+            if (action.action == "type" and action.text
+                    and consecutive_same == COUNCIL_TRIGGER
+                    and not _is_filter_field(page)):
                 log.info(
                     "Agent stuck on type (%dx) — refocusing input and force-pressing Enter",
                     consecutive_same,
@@ -605,6 +607,23 @@ def run_agent(
                 last_sig = None
                 _human_pause(*ACTION_PAUSE)
                 continue
+
+            # Stuck on a filter box: the right move isn't Enter, it's the form's own Apply
+            # button — the same control a person reaches for after filling zip and miles.
+            if (action.action == "type" and action.text
+                    and consecutive_same == COUNCIL_TRIGGER and _is_filter_field(page)):
+                _pre_url = page.url
+                if _click_apply_button(page):
+                    _wait_for_settle(page)
+                    action.outcome = (
+                        f"clicked the filter's Apply button → {page.url[:60]}"
+                        if page.url != _pre_url else
+                        "clicked the filter's Apply button → page unchanged")
+                    log.info("Agent stuck on a filter field — clicked Apply instead of Enter")
+                    consecutive_same = 0
+                    last_sig = None
+                    _human_pause(*ACTION_PAUSE)
+                    continue
 
             log.warning(
                 "Agent stuck (%dx same action: %s) — running get-unstuck pass",
@@ -1459,6 +1478,58 @@ def _snapshot_elements(page: Page) -> list[dict]:
 _NON_TEXT_INPUT_TYPES = frozenset(
     ("checkbox", "radio", "submit", "button", "hidden", "file", "image", "color", "range")
 )
+
+# A results-page FILTER box (zip, miles, min/max price) — not a search box. Matched on the
+# field's own name/placeholder/label, which is what a person reads to tell them apart.
+_FILTER_FIELD_RE = re.compile(
+    r"\b(postal|zip|zipcode|post\s*code|mile|miles|distance|radius|"
+    r"min|max|price[_\s-]?(min|max)|from|to)\b", re.I)
+
+
+def _is_filter_field(page) -> bool:
+    """True when the focused element is a results-page filter rather than a search box.
+
+    The force-Enter recovery exists for one situation: a query was typed into a SEARCH box and
+    never submitted. Firing it on a filter box is what made a sweep look like flailing — zip,
+    Enter, nothing; miles, Enter, reload — because these fields belong to a form with its own
+    Apply button and Enter either does nothing or submits it half-filled. Never raises: if we
+    can't tell what's focused, we assume it's a search box and behave as before."""
+    try:
+        info = page.evaluate("""() => {
+            const a = document.activeElement;
+            if (!a || !['INPUT','TEXTAREA'].includes(a.tagName)) return null;
+            return [a.getAttribute('name'), a.getAttribute('placeholder'),
+                    a.getAttribute('aria-label'), a.getAttribute('id')].join(' ');
+        }""")
+    except Exception:
+        return False
+    if not info:
+        return False
+    return bool(_FILTER_FIELD_RE.search(info))
+
+
+# The control that submits a filter form. craigslist's is button.cl-exec-search; the rest are the
+# ordinary ways a submit button is written, matched by visible text.
+_APPLY_SELECTORS = (
+    "button.cl-exec-search",
+    "button[type=submit]:has-text('Apply')", "button:has-text('Apply')",
+    "button:has-text('Update')", "button:has-text('Search')",
+    "input[type=submit][value*='Apply' i]", "input[type=submit][value*='Search' i]",
+)
+
+
+def _click_apply_button(page) -> bool:
+    """Click a filter form's Apply/Search button. Returns True if one was clicked."""
+    for sel in _APPLY_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() and loc.is_visible():
+                loc.click(timeout=4_000)
+                return True
+        except Exception:
+            continue
+    return False
+
 
 def _is_location_input(e: dict) -> bool:
     """True when a text input is a place/geo picker (type only a city/ZIP here, not keywords).

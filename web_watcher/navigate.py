@@ -631,24 +631,46 @@ def _apply_inline_filters(page, req: "SearchRequest", hint: dict) -> bool:
         if loc is not None and _human_fill(loc, str(value)):
             filled = True
 
-    _fill("postal", req.zip)
-    if req.zip:
-        _fill("distance", req.radius or 50)   # a zip with no radius filters nothing useful
+    # POSTAL FIRST, and distance ONLY if the postal box actually exists. On craigslist a radius
+    # is meaningless without a centre: typing "100" into miles with no zip applied filters
+    # nothing, and submitting it just reloads the same page. Checking the VALUE isn't enough —
+    # the box itself has to be there, because that's the case that failed live.
+    postal_box = _first_visible(page, hint.get("postal", "")) if hint.get("postal") else None
+    if req.zip and postal_box is None:
+        log.info("inline filters: no postal box on this page — skipping distance too "
+                 "(a radius with no centre filters nothing)")
+    if req.zip and postal_box is not None:
+        if _human_fill(postal_box, str(req.zip)):
+            filled = True
+            _fill("distance", req.radius or 50)
     _fill("price_min", req.price_min)
     _fill("price_max", req.price_max)
     if not filled:
         return False
-    # Submit via the page's OWN apply/search button (falls back to Enter in the last field).
+
+    # ONE submit for ALL the fields, through the page's own Apply button. Pressing Enter after
+    # each field is what made this look so unstable to watch — zip, Enter, nothing; miles, Enter,
+    # reload — and each stray Enter can submit a half-filled form, so the filters land in stages
+    # or not at all. Fill everything, apply once, then CHECK it took.
     _pause(0.2, 0.5)
-    if not _click_selector(page, hint.get("apply", "")):
+    before = getattr(page, "url", "")
+    applied = _click_selector(page, hint.get("apply", ""))
+    if not applied:
+        # No Apply button on this page — Enter in the last field is the fallback, used once.
         try:
             page.keyboard.press("Enter")
         except Exception:
             pass
     try:
-        page.wait_for_timeout(1800)
+        page.wait_for_load_state("networkidle", timeout=8_000)
     except Exception:
         pass
+    if not _wait_for_url_change(page, before, timeout_s=6.0):
+        # craigslist swaps results in via the history API, so an unchanged URL is not proof of
+        # failure — but it IS worth saying, because a silently-unapplied filter is the difference
+        # between watching one town and watching a whole coast.
+        log.info("inline filters: submitted but the URL didn't change — filters may not have "
+                 "applied (page %s)", (before or "")[:70])
     return True
 
 

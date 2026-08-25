@@ -654,6 +654,20 @@ def _format_verdict(v: dict) -> str:
     """Render a Deep Inspect verdict for a phone: deal stars, scam risk, why, and any red flags."""
     if not v:
         return "I couldn't read enough from that listing to judge it."
+
+    known = v.get("known") or {}
+    saved = _saved_facts_block(known)
+
+    # The listing is gone (removed, expired, or gated). Say so plainly — and still hand over
+    # everything that was saved when it was found, which is precisely when it's most useful.
+    if v.get("fetched") is False:
+        lines = ["🚫 " + str(v.get("error") or "I couldn't open that listing.")]
+        if saved:
+            lines += ["", "Here's what was saved when it was found:", saved]
+        else:
+            lines += ["", "I don't have a saved copy of this one either."]
+        return "\n".join(lines)
+
     try:
         dq = int(v.get("deal_quality", 3))
     except (TypeError, ValueError):
@@ -669,7 +683,31 @@ def _format_verdict(v: dict) -> str:
     flags = v.get("red_flags") or []
     if flags:
         lines += ["", "⚠️ " + "; ".join(str(f) for f in flags[:4])]
+    if saved:
+        lines += ["", saved]
     return "\n".join(lines)
+
+
+def _saved_facts_block(known: dict) -> str:
+    """The facts we stored about a listing when we found it, as one short block. Used both to
+    ground a verdict and to answer usefully when the page itself has since gone away."""
+    if not known:
+        return ""
+    from web_watcher.notify import source_label
+    bits = []
+    title = str(known.get("title") or "").strip()
+    if title:
+        bits.append(title)
+    line = []
+    if known.get("price_text"):
+        line.append(f"💵 {known['price_text']}")
+    if known.get("source"):
+        line.append(f"📍 {source_label(str(known['source']))}")
+    if known.get("posted_at"):
+        line.append(f"🗓 {str(known['posted_at'])[:16]}")
+    if line:
+        bits.append("  ".join(line))
+    return "\n".join(bits)
 
 
 def _parse_iso(s) -> float:

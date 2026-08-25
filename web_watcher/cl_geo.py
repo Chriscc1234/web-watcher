@@ -677,3 +677,103 @@ def url_zip(url: str) -> str | None:
         return z if z and zip_latlon(z) else None
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Category sanity — catching the watch that silently searches the ENTIRE site
+# ---------------------------------------------------------------------------
+#
+# Craigslist does NOT reject an unknown category code. /search/mvt (not a real category) quietly
+# redirects to cat=sss — "all for sale" — so the watch keeps working, keeps returning results,
+# and every one of them is junk: lawn mowers, chairs, china, cars. The rating judge then does its
+# job perfectly and throws all of it away, and the watch looks like it's "finding nothing" when
+# it is really searching the whole site for a boat.
+#
+# It's invisible from the URL alone, so we check what craigslist ACTUALLY gave us: if we asked for
+# a specific category and landed on sss, the watch is broken and should say so loudly.
+#
+# The codes below are the ones people actually ask for; the check does not depend on the list
+# being complete — an unrecognised code is validated by the redirect, not by the table.
+CRAIGSLIST_CATEGORIES: dict[str, str] = {
+    "sss": "all for sale",     "cta": "cars & trucks",   "cto": "cars & trucks - by owner",
+    "ctd": "cars & trucks - by dealer",                  "boo": "boats",
+    "boa": "boats - by owner", "mcy": "motorcycles",     "rva": "RVs",
+    "mpo": "motorcycles - by owner",                     "hvo": "heavy equipment",
+    "sno": "snowmobiles",      "atq": "antiques",        "tls": "tools",
+    "ele": "electronics",      "fud": "farm & garden",   "hsh": "household",
+    "spo": "sporting goods",   "tro": "trailers",        "wto": "auto wheels & tires",
+    "pta": "auto parts",       "grd": "farm & garden",   "bik": "bicycles",
+}
+
+# The categories a boat/vehicle watch is usually MEANT to be on, keyed by a word in the request.
+_CATEGORY_HINTS: list[tuple[str, str]] = [
+    (r"\bboats?\b|\boutboard\b|\bsailboat\b|\bskiff\b", "boo"),
+    (r"\bmotorcycles?\b|\bmotorbike\b", "mcy"),
+    (r"\brv\b|\bmotorhome\b|\bcamper\b|\btravel trailer\b", "rva"),
+    (r"\btrailers?\b", "tro"),
+    (r"\bcars?\b|\btrucks?\b|\bpickups?\b|\bsuv\b|\bvans?\b", "cta"),
+]
+
+
+def requested_category(url: str) -> str:
+    """The craigslist category a URL asks for — from /search/<cat> or ?cat=<cat>. '' if none."""
+    try:
+        p = urlparse(url or "")
+        # The query param wins: craigslist's canonical modern URL is /search/area/<area>?cat=<cat>,
+        # where the path's own segments ("area", the area name) must NOT be read as a category.
+        q = dict(parse_qsl(p.query or ""))
+        cat = (q.get("cat") or "").strip().lower()
+        if cat:
+            return cat
+        # Legacy/short form: the code is the LAST path segment, e.g. /search/boo.
+        m = re.search(r"/search/([a-z]{3})/?$", p.path or "")
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def category_for_request(text: str) -> str:
+    """The category code a plain-English request implies ('under 30ft motor boats' → 'boo').
+    '' when nothing matches — we never guess a category we aren't confident about."""
+    t = (text or "").lower()
+    for pattern, cat in _CATEGORY_HINTS:
+        if re.search(pattern, t):
+            return cat
+    return ""
+
+
+def category_fell_back(requested_url: str, final_url: str) -> str:
+    """'' if fine, else the category we ASKED for and did not get.
+
+    Craigslist answers an unknown category with the everything-category instead of an error, so
+    landing on sss when we asked for something specific is the tell that the code was wrong and
+    the watch is now searching the whole site."""
+    want = requested_category(requested_url)
+    if not want or want == "sss":
+        return ""
+    got = requested_category(final_url)
+    if got and got != want and got == "sss":
+        return want
+    return ""
+
+
+def repair_craigslist_category(url: str, instruction: str) -> str:
+    """Swap a bad/missing category for the one the watch's own instruction implies. Returns the
+    URL unchanged when we can't tell — a wrong guess is worse than leaving it alone."""
+    want = category_for_request(instruction)
+    if not want:
+        return url
+    cur = requested_category(url)
+    if cur == want:
+        return url
+    try:
+        p = urlparse(url)
+        path = re.sub(r"/search/([a-z]{3})\b", f"/search/{want}", p.path or "")
+        if path == (p.path or ""):
+            path = (p.path or "").rstrip("/") + f"/{want}" if "/search" in (p.path or "") else p.path
+        q = dict(parse_qsl(p.query or ""))
+        if "cat" in q:
+            q["cat"] = want
+        return urlunparse(p._replace(path=path, query=urlencode(q)))
+    except Exception:
+        return url

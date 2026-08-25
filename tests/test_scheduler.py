@@ -875,3 +875,58 @@ def test_watch_geolocation_falls_back_to_name_when_url_zip_is_invalid():
     # And the NJ listing that slipped through is now confidently dropped.
     assert out_of_area("2020 Toyota C-HR in Mountain Lakes, NJ", anchor, st) is True
     assert out_of_area("Truck in Burlington, WA", anchor, st) is False
+
+
+# ── the silent whole-site search ─────────────────────────────────────────────────
+# Craigslist does not reject an unknown category code — /search/mvt redirects to cat=sss, "all
+# for sale". A boat watch then harvests lawn mowers and chairs, the judge correctly discards
+# every one, and the watch reads as "finding nothing" when it is really searching the whole site.
+# Invisible from the URL; obvious from the redirect. This is the live boat-watch bug.
+
+def test_an_unknown_category_is_detected_from_the_redirect():
+    from web_watcher import cl_geo
+    asked = "https://skagit.craigslist.org/search/mvt?max_price=15000"
+    landed = "https://www.craigslist.org/search/area/skagit?cat=sss&max_price=15000"
+    assert cl_geo.category_fell_back(asked, landed) == "mvt"
+
+
+def test_a_real_category_is_not_flagged():
+    from web_watcher import cl_geo
+    asked = "https://skagit.craigslist.org/search/boo?max_price=15000"
+    landed = "https://www.craigslist.org/search/area/skagit?cat=boo&max_price=15000"
+    assert cl_geo.category_fell_back(asked, landed) == ""
+
+
+def test_an_area_path_is_not_mistaken_for_a_category():
+    """The area URL is /search/area/<name> — 'are' must never be read as a category code."""
+    from web_watcher import cl_geo
+    assert cl_geo.requested_category(
+        "https://www.craigslist.org/search/area/skagit?cat=boo") == "boo"
+
+
+def test_a_watch_already_searching_everything_is_not_flagged():
+    from web_watcher import cl_geo
+    assert cl_geo.category_fell_back(
+        "https://x.craigslist.org/search/sss", "https://x/search/area/y?cat=sss") == ""
+
+
+def test_the_right_category_is_inferred_from_the_watch_instruction():
+    from web_watcher import cl_geo
+    assert cl_geo.category_for_request("under 30-foot motor boats with outboard motors") == "boo"
+    assert cl_geo.category_for_request("manual transmission pickup trucks") == "cta"
+    assert cl_geo.category_for_request("a nice lamp") == ""          # no confident guess
+
+
+def test_repairing_the_url_swaps_the_category():
+    from web_watcher import cl_geo
+    fixed = cl_geo.repair_craigslist_category(
+        "https://skagit.craigslist.org/search/mvt?max_price=15000&postal=98221",
+        "under 30-foot motor boats")
+    assert "/search/boo" in fixed
+    assert "max_price=15000" in fixed and "postal=98221" in fixed      # filters preserved
+
+
+def test_repair_leaves_the_url_alone_when_it_cannot_tell():
+    from web_watcher import cl_geo
+    u = "https://skagit.craigslist.org/search/mvt?max_price=15000"
+    assert cl_geo.repair_craigslist_category(u, "something vague") == u

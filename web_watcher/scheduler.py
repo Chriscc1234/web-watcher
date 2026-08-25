@@ -802,6 +802,21 @@ def _run_agent_continuous_sweep(
                                perception_mode_used="continuous-agent"), db_path)
         return
 
+    # Did craigslist silently hand us the WHOLE SITE? An unknown category code isn't rejected —
+    # it redirects to "all for sale", so a boat watch quietly starts harvesting lawn mowers and
+    # chairs, the judge correctly throws every one away, and the watch looks like it just isn't
+    # finding anything. From the URL alone this is invisible; from the redirect it's obvious.
+    from web_watcher import cl_geo
+    fell_back = cl_geo.category_fell_back(plan["start_url"], page.url)
+    if fell_back:
+        fixed = cl_geo.repair_craigslist_category(plan["start_url"], watch.instruction or "")
+        hint = (f" Try {fixed} instead." if fixed != plan["start_url"] else "")
+        msg = (f"craigslist does not have a category {fell_back!r} — it redirected to ALL for "
+               f"sale, so this watch is searching the entire site instead of one category."
+               + hint)
+        log.error("Watch %r: %s", watch.name, msg)
+        _save_error(watch.name, run_ts, msg, db_path, perception_mode="continuous-agent")
+
     # A checkpoint the moment we land (before the agent acts) → stop, alert, back off.
     if fb_safety.is_facebook(page.url) and fb_safety.is_checkpoint(page):
         _handle_fb_checkpoint(watch, cfg, run_ts, db_path, fb_safety.checkpoint_reason(page))

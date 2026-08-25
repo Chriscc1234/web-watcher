@@ -93,13 +93,32 @@ def resolve_inspect_model(cfg) -> str:
 
 
 def verdict_from_text(title: str, body: str, criteria: str, cfg,
-                      model: Optional[str] = None, timeout: float = 300.0) -> dict:
+                      model: Optional[str] = None, timeout: float = 300.0,
+                      known: Optional[dict] = None) -> dict:
     """Run the deal/scam model over already-fetched listing text. Separated from the browser
     fetch so it's unit-testable and reusable. Returns the verdict dict (see INSPECT_SCHEMA),
     always including `model`. Raises on transport/JSON errors so the caller can report them."""
     model = model or resolve_inspect_model(cfg)
-    listing = f"TITLE: {title}\n\nFULL POSTING:\n{(body or '').strip()[:8000]}"
-    user_msg = f"Buyer's criteria: {criteria or '(any)'}\n\nListing:\n{listing}\n\nGive your verdict."
+    # KNOWN FACTS FIRST. The price, the source site and the posting date usually live in the
+    # listing's TITLE and metadata, not its prose — so a model given only the ad body concludes
+    # "no price mentioned" about a listing whose price we have known all along. Everything we
+    # already stored is stated up front, plainly labelled, ahead of the free text.
+    lines = []
+    if title:
+        lines.append(f"TITLE: {title}")
+    for label, key in (("PRICE", "price_text"), ("SOURCE", "source"),
+                       ("POSTED", "posted_at"), ("LOCATION", "location"),
+                       ("YEAR", "year"), ("MILEAGE", "mileage")):
+        val = str((known or {}).get(key) or "").strip()
+        if val and val.lower() not in ("none", "0"):
+            lines.append(f"{label}: {val}")
+    lines.append(f"\nFULL POSTING:\n{(body or '').strip()[:8000]}")
+    listing = "\n".join(lines)
+    user_msg = (f"Buyer's criteria: {criteria or '(any)'}\n\nListing:\n{listing}\n\n"
+                "The TITLE/PRICE/SOURCE lines above are facts already confirmed about this "
+                "listing — treat them as true even if the posting text never repeats them. "
+                "Never say the price is unknown when a PRICE line is given.\n\n"
+                "Give your verdict.")
     payload = {
         "model": model,
         "messages": [
@@ -203,15 +222,35 @@ def deep_inspect_listing(url: str, criteria: str, cfg, model: Optional[str] = No
     scam verdict. Returns the verdict dict plus `url`, `fetched` (bool), and — on failure —
     `error`. Never raises; a failed fetch/model call is reported, not thrown."""
     model = model or resolve_inspect_model(cfg)
+
+    # What we already stored when the watch first found it. This is the difference between a
+    # dead link being a dead end and a dead link still being useful.
+    known = {}
+    try:
+        from web_watcher import storage
+        known = storage.get_listing_by_url(url) or {}
+    except Exception as exc:
+        log.debug("Deep Inspect: no stored record for %s: %s", url, exc)
+
     got = fetch_listing_text(url, cfg)
     fetched = bool(got.get("body")) and not _looks_like_dead_page(got.get("title", ""), got["body"])
     if not fetched:
-        return {"url": url, "fetched": False, "model": model,
-                "error": "Couldn't read the listing page (it may be removed, login-gated, or "
-                         "blocking automated access).",
-                "deal_quality": None, "scam_risk": None, "red_flags": [], "summary": ""}
+        # The page is gone (or gated, or blocking us). Report that plainly AND hand back
+        # everything we saved — a listing that 404s is exactly when the saved copy matters most,
+        # and answering "couldn't read it" while sitting on the title, price and photo is the
+        # least useful thing we could do.
+        out = {"url": url, "fetched": False, "model": model,
+               "error": "Couldn't open the listing page — it looks removed, login-gated, or it's "
+                        "blocking automated access.",
+               "deal_quality": None, "scam_risk": None, "red_flags": [], "summary": ""}
+        if known:
+            out["known"] = known
+            out["summary"] = ("This listing is no longer readable, but here's what was saved when "
+                              "it was found.")
+        return out
     try:
-        v = verdict_from_text(got.get("title", ""), got["body"], criteria, cfg, model=model)
+        v = verdict_from_text(got.get("title", "") or str(known.get("title") or ""),
+                              got["body"], criteria, cfg, model=model, known=known)
     except Exception as exc:
         log.warning("Deep Inspect verdict failed for %s: %s", url, exc)
         return {"url": url, "fetched": True, "model": model,
@@ -220,4 +259,6 @@ def deep_inspect_listing(url: str, criteria: str, cfg, model: Optional[str] = No
     v["url"] = url
     v["fetched"] = True
     v["images_found"] = len(got.get("images") or [])
+    if known:
+        v["known"] = known
     return v

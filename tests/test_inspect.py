@@ -57,3 +57,58 @@ def test_dead_page_detection():
     real = ("Selling my 2009 Toyota Tacoma, 158k miles, 4x4, V6 automatic. Clean title, well "
             "maintained, new tires. $11,500 obo, cash on pickup in Mount Vernon. Text to see it.")
     assert not I._looks_like_dead_page("2009 Toyota Tacoma", real)
+
+
+# ── known facts belong in the prompt ─────────────────────────────────────────────
+# The live miss: a listing whose price appears only in its TITLE was judged "price not
+# mentioned", because the model was handed the ad BODY and nothing else. Everything we already
+# know is now stated up front, plainly labelled.
+
+def test_the_prompt_states_the_price_even_when_the_body_never_mentions_it(monkeypatch):
+    from web_watcher import inspect as I
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": '{"deal_quality":4,"scam_risk":"low"}'}}
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None):
+            sent.update(json or {})
+            return _Resp()
+
+    monkeypatch.setattr(I.httpx, "Client", _Client)
+    I.verdict_from_text("1998 Toyota Tacoma - $8,500", "Runs great. Clean title.", "trucks",
+                        cfg=None, model="m",
+                        known={"price_text": "$8,500", "source": "craigslist.org",
+                               "posted_at": "2026-08-20"})
+    prompt = sent["messages"][-1]["content"]
+    assert "PRICE: $8,500" in prompt
+    assert "SOURCE: craigslist.org" in prompt
+    assert "Never say the price is unknown" in prompt
+
+
+def test_blank_known_fields_are_left_out_of_the_prompt(monkeypatch):
+    from web_watcher import inspect as I
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": '{"deal_quality":3}'}}
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None):
+            sent.update(json or {})
+            return _Resp()
+
+    monkeypatch.setattr(I.httpx, "Client", _Client)
+    I.verdict_from_text("A title", "body text here", "", cfg=None, model="m",
+                        known={"price_text": "", "year": 0, "source": None})
+    prompt = sent["messages"][-1]["content"]
+    assert "PRICE:" not in prompt and "YEAR:" not in prompt and "SOURCE:" not in prompt

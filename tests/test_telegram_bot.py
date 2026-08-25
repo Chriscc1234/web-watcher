@@ -383,3 +383,37 @@ def test_typing_is_refreshed_until_the_reply_is_ready(monkeypatch):
     n = len(beats)
     time.sleep(0.08)
     assert len(beats) == n                        # and stopped once the reply was ready
+
+
+# ── vetting a listing that has since gone away ───────────────────────────────────
+# A dead link is exactly when the saved copy matters most. Answering "couldn't read it" while
+# holding the title, price and source is the least useful thing we could do.
+
+def test_vetting_a_dead_listing_still_reports_what_was_saved():
+    from web_watcher.telegram_bot import _format_verdict
+    out = _format_verdict({
+        "fetched": False,
+        "error": "Couldn't open the listing page — it looks removed.",
+        "known": {"title": "1998 Toyota Tacoma 4x4", "price_text": "$8,500",
+                  "source": "craigslist.org", "posted_at": "2026-08-20T10:00:00"},
+    })
+    assert "removed" in out
+    assert "1998 Toyota Tacoma 4x4" in out       # the stored title
+    assert "$8,500" in out                       # the stored price
+    assert "Craigslist" in out                   # the stored source, named properly
+
+
+def test_vetting_a_dead_listing_with_nothing_saved_says_so():
+    from web_watcher.telegram_bot import _format_verdict
+    out = _format_verdict({"fetched": False, "error": "Couldn't open it.", "known": {}})
+    assert "don't have a saved copy" in out
+
+
+def test_a_normal_verdict_restates_the_saved_facts():
+    from web_watcher.telegram_bot import _format_verdict
+    out = _format_verdict({
+        "fetched": True, "deal_quality": 4, "scam_risk": "low", "summary": "Looks solid.",
+        "known": {"title": "1998 Toyota Tacoma", "price_text": "$8,500", "source": "facebook.com"},
+    })
+    assert "★★★★☆" in out and "Looks solid." in out
+    assert "1998 Toyota Tacoma" in out and "Facebook Marketplace" in out

@@ -319,3 +319,43 @@ def test_send_notifications_telegram_only():
     assert "email" not in results
     mt.assert_called_once()
     me.assert_not_called()
+
+
+# ── source, price and photo: use what we already stored ──────────────────────────
+# We record a listing's source, price and thumbnail the moment a watch finds it. Not showing
+# them on the alert made the reader guess which site a find came from, and made the vetter
+# announce "no price given" about listings whose price we'd known all along.
+
+def test_source_label_names_sites_the_way_people_do():
+    from web_watcher.notify import source_label
+    assert source_label("facebook.com") == "Facebook Marketplace"
+    assert source_label("https://seattle.craigslist.org/x") == "Craigslist"
+    assert source_label("offerup.com") == "OfferUp"
+    assert source_label("") == ""
+    assert source_label("someshop.example.com") == "someshop.example.com"   # unknown → tidy host
+
+
+def test_alert_shows_the_source_and_price(monkeypatch):
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_known_facts",
+                        lambda url: {"source": "facebook.com", "price_text": "$8,500"})
+    payload = _payload(_result(summary="★★★★☆ 1998 Toyota Tacoma", link="https://x/1"))
+    text = notify._format_telegram(payload)
+    assert "Facebook Marketplace" in text
+    assert "$8,500" in text
+
+
+def test_alert_does_not_repeat_a_price_already_in_the_summary(monkeypatch):
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_known_facts",
+                        lambda url: {"source": "craigslist.org", "price_text": "$8,500"})
+    payload = _payload(_result(summary="★★★★☆ Tacoma — $8,500 in Anacortes", link="https://x/1"))
+    text = notify._format_telegram(payload)
+    assert text.count("$8,500") == 1
+
+
+def test_a_missing_stored_record_never_breaks_the_alert(monkeypatch):
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_known_facts", lambda url: {})
+    text = notify._format_telegram(_payload(_result(summary="a find", link="https://x/1")))
+    assert "Open listing" in text

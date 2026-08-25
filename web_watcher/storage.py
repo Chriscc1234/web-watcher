@@ -450,6 +450,28 @@ def record_observation(
         )
 
 
+def get_listing_by_url(url: str, db_path: Path | None = None) -> dict | None:
+    """Everything we already KNOW about one listing, by its URL.
+
+    We store the title, price, source site, thumbnail and posted date the moment a watch finds a
+    listing — so re-opening the page to learn them again is wasted work, and it's worse than
+    wasted when the page has since been taken down. This is what lets the vetter reason about a
+    price that only ever appeared in the title, and what lets a 404 still be reported usefully.
+    Returns None if we've never seen it."""
+    if not (url or "").strip():
+        return None
+    try:
+        with _connect(_resolve(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM listings WHERE url = ? ORDER BY last_seen DESC LIMIT 1",
+                (url.strip(),)).fetchone()
+            return dict(row) if row else None
+    except Exception as exc:
+        log.debug("get_listing_by_url failed for %s: %s", url, exc)
+        return None
+
+
 def query_listings(
     watch_id:     str | None = None,
     matched:      bool | None = None,

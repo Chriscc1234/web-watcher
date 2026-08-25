@@ -83,11 +83,31 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
             {"text": "🔍 Vet this listing", "callback_data": f"{_VET_PREFIX}{tok}"},
         ]]}
 
+    # A photo makes a listing readable at a glance — you know whether it's worth opening before
+    # you read a word. Telegram will fetch the thumbnail we already stored and put it ABOVE the
+    # text as one message (sendPhoto with an HTML caption), buttons and all. Two limits decide
+    # whether we can: a caption maxes out at 1024 characters, and Telegram fetches the image
+    # itself, so a URL it can't reach fails the whole send. Both fall back to the plain message
+    # rather than risk losing an alert over a picture.
+    photo = str(_known_facts(payload.result.link).get("image") or "").strip()
+    _TG_CAPTION_MAX = 1024
+
     try:
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
-            # Send text message first
-            r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage", json=body)
-            r.raise_for_status()
+            sent = False
+            if photo.startswith("http") and len(text) <= _TG_CAPTION_MAX:
+                photo_body = {k: v for k, v in body.items() if k != "text"}
+                photo_body.update(photo=photo, caption=text)
+                try:
+                    pr = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendPhoto", json=photo_body)
+                    pr.raise_for_status()
+                    sent = True
+                except Exception as exc:
+                    log.info("Telegram: photo send failed (%s) — sending as text instead", exc)
+
+            if not sent:
+                r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage", json=body)
+                r.raise_for_status()
 
             # Attach screenshot if present
             if payload.screenshot_bytes:
@@ -285,9 +305,56 @@ def _format_telegram(payload: NotificationPayload) -> str:
     has_rating = "★" in summary
     if conf and not has_rating:
         lines += ["", f"<b>{conf}</b> confidence"]
+
+    # WHERE it came from. "Is this Craigslist or Facebook?" changes how you read a listing and
+    # how you approach the seller, and it's the first thing you want to know on a phone. We
+    # already store the source when the watch finds it, so there's no reason to make him guess.
+    facts = _known_facts(r.link)
+    bits = []
+    if facts.get("source"):
+        bits.append(f"📍 {_tg(source_label(facts['source']))}")
+    if facts.get("price_text") and "$" not in summary:
+        bits.append(f"💵 {_tg(facts['price_text'])}")
+    if bits:
+        lines += ["", "  ".join(bits)]
+
     if r.link:
         lines.append(f'🔗 <a href="{_tg(r.link, quote=True)}">Open listing</a>')
     return "\n".join(lines)
+
+
+# Pretty names for the sites we watch — "facebook.com" is not what a person calls it.
+_SOURCE_NAMES = {
+    "facebook": "Facebook Marketplace",
+    "craigslist": "Craigslist",
+    "offerup": "OfferUp",
+    "ebay": "eBay",
+    "mercari": "Mercari",
+    "nextdoor": "Nextdoor",
+    "govdeals": "GovDeals",
+    "publicsurplus": "Public Surplus",
+}
+
+
+def source_label(source: str) -> str:
+    """A human name for a listing's source site ('facebook.com' → 'Facebook Marketplace')."""
+    s = (source or "").strip().lower()
+    if not s:
+        return ""
+    for key, name in _SOURCE_NAMES.items():
+        if key in s:
+            return name
+    return s.replace("www.", "").split("/")[0]        # unknown site: show its host, tidied
+
+
+def _known_facts(url: str) -> dict:
+    """What we already stored about this listing (source, price, image…). Never raises — an
+    alert must go out even if the lookup fails."""
+    try:
+        from web_watcher import storage
+        return storage.get_listing_by_url(url or "") or {}
+    except Exception:
+        return {}
 
 
 def _format_message(payload: NotificationPayload, html: bool = True) -> str:

@@ -477,6 +477,34 @@ _ASK_LOC_RE = re.compile(
 _ASK_TAIL_RE = re.compile(r"[.\s]+$")
 
 
+_BRIEF_COOLDOWN_S = 24 * 3600
+
+
+def _briefed_recently(watch_name: str, now: float | None = None) -> bool:
+    """True if this watch was briefed inside the cooldown. Records the send when it isn't, so the
+    check and the stamp can't drift apart. Never raises — a bookkeeping failure must not block an
+    alert, so on any error we allow the send."""
+    import json
+    import time as _t
+    now = _t.time() if now is None else now
+    try:
+        from web_watcher import paths
+        p = paths.data_dir() / "baseline_briefings.json"
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+        last = float(data.get(watch_name, 0.0) or 0.0)
+        if now - last < _BRIEF_COOLDOWN_S:
+            return True
+        data[watch_name] = now
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return False
+    except Exception as exc:
+        log.debug("briefing cooldown check failed (allowing the send): %s", exc)
+        return False
+
+
 def example_ask(watch_name: str, instruction: str = "") -> str:
     """A sample question phrased in THIS watch's own words — "show me the under 30-foot motor
     boats with outboard motors" rather than a generic stand-in that mentions boats to someone
@@ -503,6 +531,13 @@ def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: Notifi
     t = cfg.telegram
     chat_id = str(owner_chat_id or "").strip() or t.chat_id
     if not t.bot_token or not chat_id or seen <= 0:
+        return False
+
+    # One briefing per watch per day, at most. A baseline can legitimately happen more than once
+    # (a changed URL, a restart, a feed that restructured), and each one firing its own message
+    # turned a helpful summary into a repeating notification — which is how this got noticed.
+    if _briefed_recently(watch_name):
+        log.info("Baseline briefing suppressed for %r — already sent one recently", watch_name)
         return False
 
     tok = remember_brief(watch_name)

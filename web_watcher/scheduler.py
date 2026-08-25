@@ -88,6 +88,10 @@ _ALERT_PACE_SECONDS = 1.2
 # re-baseline silently instead of alerting on what is almost certainly pre-existing
 # inventory. Post-priming sweeps normally surface 0-5 new items.
 _FLOOD_REBASELINE_THRESHOLD = 30
+# How many listings a watch must have banked before we treat it as having a real baseline. Past
+# this, a large "new" batch is ordinary churn on a broad search rather than a baseline gap, and
+# is judged and alerted normally (capped by the watch's continuous_max_alerts).
+_ESTABLISHED_SEEN = 250
 
 # When silently baselining a big backlog (first sweep, or a flood), still JUDGE up to this
 # many so the matches show in Results — capped to keep the single judge call fast/accurate.
@@ -539,6 +543,15 @@ def _watch_geolocation(watch: Watch):
                   zip_from_text(watch.instruction or ""),
                   zip_from_text(watch.name or "")):
             ll = zip_latlon(z) if z else None
+            if ll:
+                return ll
+        # Last rung: the town named in WORDS. Every rung above looks for five digits, but people
+        # write "within 150 miles of Anacortes", not a zip — so a watch could reach here with no
+        # anchor at all, and with no anchor the out-of-area filter passes everything. That is how
+        # Brooklyn and British Columbia listings reached a watch centred on Anacortes.
+        from web_watcher.cl_geo import place_from_text
+        for text in (watch.instruction or "", watch.name or ""):
+            ll = place_from_text(text)
             if ll:
                 return ll
         return None
@@ -1156,11 +1169,19 @@ def _process_sweep_listings(
         _baseline_batch(watch, cfg, listings, run_ts, db_path, mode_label, "primed")
         return
 
-    # Flood guard: an implausibly large "new" batch almost always means a baseline gap (a
-    # thin first sweep, a rotated search term's fresh backlog, or the feed restructured)
-    # rather than a genuine burst. Baseline it silently — but, like priming, still judge +
-    # record matches to Results; just no notifications for what is really pre-existing stock.
-    if len(new_listings) >= _FLOOD_REBASELINE_THRESHOLD:
+    # Flood guard: an implausibly large "new" batch usually means a baseline gap (a thin first
+    # sweep, a rotated term's backlog, the feed restructured) rather than a genuine burst, so we
+    # baseline it silently instead of firing a wall of alerts.
+    #
+    # ⚠ ONLY WHILE THE WATCH IS STILL BUILDING ITS PICTURE. On a broad search — every boat within
+    # 150 miles is thousands of listings — each sweep's scroll/sort variation legitimately turns
+    # up another 80-200 unseen ones, so an unconditional guard trips forever: the watch
+    # re-baselines on every single sweep and can NEVER alert. That's exactly what happened live
+    # (200 → 189 → 86 re-baselined, no alerts ever). Once a watch has a real baseline behind it,
+    # a big batch is normal and gets judged normally — `continuous_max_alerts` is what caps the
+    # volume, and that is its whole job.
+    established = count_seen_listings(watch.name, db_path) >= _ESTABLISHED_SEEN
+    if len(new_listings) >= _FLOOD_REBASELINE_THRESHOLD and not established:
         _baseline_batch(watch, cfg, new_listings, run_ts, db_path, mode_label, "re-baselined")
         return
 
@@ -1371,6 +1392,26 @@ _RATING_RUBRIC = (
 )
 
 
+def _price_cap_for(watch: Watch) -> int | None:
+    """This watch's maximum price, from its URLs or its own words. Cached on the watch object so
+    a sweep parses it once. None when the watch never stated a budget — then nothing is dropped
+    on price, because "no cap" must not become "cap of zero"."""
+    cached = getattr(watch, "_price_cap_cache", "unset")
+    if cached != "unset":
+        return cached
+    try:
+        from web_watcher.cl_geo import watch_price_cap
+        cap = watch_price_cap(list(watch.urls or []), watch.instruction or "")
+    except Exception as exc:
+        log.debug("could not read a price cap for %r: %s", watch.name, exc)
+        cap = None
+    try:
+        object.__setattr__(watch, "_price_cap_cache", cap)
+    except Exception:
+        pass
+    return cap
+
+
 def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
     """Cheap, deterministic keyword gate run BEFORE the LLM judge (free; cuts GPU load and
     false alerts). Returns (kept, dropped). A listing is dropped if it contains ANY
@@ -1378,10 +1419,22 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
     over the title + ad body. Each dropped listing gets .judge_reason set for the log/UI."""
     kw   = [k.lower() for k in (watch.keywords or []) if k.strip()]
     anti = [k.lower() for k in (watch.antikeywords or []) if k.strip()]
-    if not kw and not anti:
+    # A watch with a stated budget must never surface something over it. Whether $30,000 exceeds
+    # $15,000 is arithmetic, not a judgement call — leaving it to the 14b produced exactly the
+    # failure you'd expect: $30k, $29k and $28k boats all "matched" a $15k watch. The site's own
+    # price filter can't be relied on either, since the agent sorts and scrolls its way onto
+    # pages the filter no longer applies to.
+    cap = _price_cap_for(watch)
+    if not kw and not anti and cap is None:
         return listings, []
     kept, dropped = [], []
     for l in listings:
+        price = getattr(l, "price_value", None)
+        if price is None:
+            price = (getattr(l, "attributes", None) or {}).get("price_value")
+        if cap is not None and isinstance(price, (int, float)) and price > cap:
+            l.judge_reason = f"over budget (${int(price):,} > ${cap:,})"
+            dropped.append(l); continue
         hay = f"{l.title or ''} {getattr(l, 'details', '') or ''}".lower()
         hit_anti = next((a for a in anti if a in hay), None)
         if hit_anti:
@@ -1392,8 +1445,10 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
             dropped.append(l); continue
         kept.append(l)
     if dropped:
-        log.info("Keyword prefilter dropped %d/%d listing(s) for %r",
-                 len(dropped), len(listings), watch.name)
+        over = sum(1 for d in dropped if "over budget" in (getattr(d, "judge_reason", "") or ""))
+        log.info("Prefilter dropped %d/%d listing(s) for %r%s",
+                 len(dropped), len(listings), watch.name,
+                 f" ({over} over the ${cap:,} budget)" if over and cap else "")
     return kept, dropped
 
 

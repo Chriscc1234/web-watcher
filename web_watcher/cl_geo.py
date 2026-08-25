@@ -777,3 +777,95 @@ def repair_craigslist_category(url: str, instruction: str) -> str:
         return urlunparse(p._replace(path=path, query=urlencode(q)))
     except Exception:
         return url
+
+
+def watch_price_cap(urls, instruction: str = "") -> int | None:
+    """The maximum price this watch is actually asking for, from its URL params or, failing
+    that, its own words ("under $15,000", "up to 8k"). None when no cap is stated.
+
+    Reads the same param aliases the URL builder writes, so a cap set any way it can be set is
+    understood the same way."""
+    for u in (urls or []):
+        try:
+            q = dict(parse_qsl(urlparse(u).query or ""))
+        except Exception:
+            continue
+        for k, v in q.items():
+            if k.lower() in _MAX_ALIASES:
+                try:
+                    return int(float(str(v).replace(",", "").lstrip("$")))
+                except (ValueError, TypeError):
+                    pass
+    return price_cap_from_text(instruction or "")
+
+
+# "under 30-foot motor boats" is a SIZE, not a budget — reading it as a $30 cap would reject
+# every boat ever posted. So a bare number only counts as money when nothing unit-like follows it.
+_CAP_UNIT_RE = (
+    r"(?!\s*(?:-|\s)?\s*(?:foot|feet|ft|inch(?:es)?|mile[sq]?|mi|lbs?|pounds?|hp|hours?|hrs?|"
+    r"years?|yrs?|cc|kg|gal(?:lons?)?|acres?|sq|square|amps?|volts?|watts?|rpm|mph|knots?|"
+    r"km|meters?|m|inches|days?|weeks?|months?)\b)"
+)
+_CAP_LEAD = r"(?:under|below|less\s+than|up\s+to|max(?:imum)?|no\s+more\s+than|within|budget\s+of|at\s+most)"
+_CAP_DOLLAR_RE = re.compile(_CAP_LEAD + r"\s*\$\s*([\d,]+(?:\.\d+)?)\s*(k\b)?", re.I)
+_CAP_K_RE      = re.compile(_CAP_LEAD + r"\s*([\d,]+(?:\.\d+)?)\s*(k)\b", re.I)
+# (?![\d.,]) forces the WHOLE number to be consumed. Without it the engine backtracks to a
+# shorter number — "under 30-foot" matched just "3", then looked past "0-foot" and saw no unit.
+_CAP_BARE_RE   = re.compile(_CAP_LEAD + r"\s*([\d,]+(?:\.\d+)?)(?![\d.,])" + _CAP_UNIT_RE, re.I)
+
+
+def price_cap_from_text(text: str) -> int | None:
+    """A budget stated in plain words → dollars, or None. Tried most-explicit first: an amount
+    with a "$" is unambiguous, then one with a "k", and only then a bare number — and a bare
+    number is rejected when a unit follows it, because "under 30-foot" is a size."""
+    def _num(m) -> int | None:
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except (ValueError, TypeError):
+            return None
+        if len(m.groups()) > 1 and m.group(2):
+            val *= 1000
+        return int(val)
+
+    for rx in (_CAP_DOLLAR_RE, _CAP_K_RE, _CAP_BARE_RE):
+        m = rx.search(text or "")
+        if m:
+            got = _num(m)
+            if got:
+                return got
+    return None
+
+
+# Words that are never a place in a watch's wording, so a stray one can't anchor a search.
+_PLACE_STOPWORDS = frozenset({
+    "watch", "watches", "search", "listing", "listings", "under", "over", "near", "within",
+    "miles", "mile", "price", "cheap", "new", "used", "for", "sale", "the", "and", "with",
+    "only", "best", "good", "manual", "auto", "automatic", "motor", "boat", "boats", "car",
+    "cars", "truck", "trucks", "van", "vans", "suv", "outboard", "transmission", "foot", "feet",
+})
+
+
+def place_from_text(text: str) -> tuple[float, float] | None:
+    """Coordinates for a town named in plain words — "Anacortes Manual Transmission Cars Watch"
+    → Anacortes.
+
+    The zip parsers only ever look for five digits, so a watch that names its town in WORDS (which
+    is how people actually write them) yielded no anchor at all — and with no anchor the
+    out-of-area filter silently passes everything, which is how listings from Brooklyn and
+    British Columbia reached a watch centred on Anacortes.
+
+    Tries two-word names first ("Mount Vernon") so they aren't split, skips words that are never
+    places, and relies on place_latlon refusing ambiguous names — guessing a state would quietly
+    watch the wrong coast."""
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z.'-]+", text or "")]
+    if not words:
+        return None
+    for size in (2, 1):
+        for i in range(len(words) - size + 1):
+            chunk = words[i:i + size]
+            if any(w.lower() in _PLACE_STOPWORDS for w in chunk):
+                continue
+            got = place_latlon(" ".join(chunk))
+            if got:
+                return got
+    return None

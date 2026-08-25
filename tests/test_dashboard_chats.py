@@ -140,3 +140,41 @@ def test_always_run_counts_as_a_change_request():
     # The exact miss from the logs: "…always run" must register as asking to change the watch.
     assert bool(S._CHANGE_SIGNAL_RE.search("my watch I just created always run")) is True
     assert bool(S._CHANGE_SIGNAL_RE.search("can you make it run continuously?")) is True
+
+
+# ── history stores what was SAID, not how it was formatted ───────────────────────
+# Markup belongs to the delivery channel. A reply saved with <b> tags is read back to the model
+# as its own past work, and it starts writing tags into its prose — which is how a literal
+# "<i>Change yours:</i>" reached a phone.
+
+def test_stored_replies_carry_no_markup(isolated):
+    S._persist_chat_turn(
+        [{"role": "user", "content": "settings"}],
+        {"message": "⚙️ <b>Your settings</b>\n• Quiet check-ins: <b>twice a day</b>\n"
+                    "<i>Change yours:</i> “twice a day”"},
+        "555")
+    saved = S._load_watcher_history("555")[-1]["content"]
+    assert "<b>" not in saved and "<i>" not in saved
+    assert "Your settings" in saved and "twice a day" in saved
+
+
+def test_strip_html_unescapes_entities_and_leaves_plain_text_alone():
+    assert S._strip_html("Tacoma &amp; Hilux") == "Tacoma & Hilux"
+    assert S._strip_html("boats under 30 feet") == "boats under 30 feet"
+    assert S._strip_html("") == ""
+
+
+def test_an_emptied_thread_is_not_listed(isolated):
+    """Clearing a conversation leaves its file behind; a person with no messages and no watches
+    is just a mystery entry in the console."""
+    S._save_watcher_history([], "999888777")
+    cfg = AppConfig(watches=[])
+    labels = [t["label"] for t in S._list_conversation_threads(cfg)]
+    assert not any("999888777" in l for l in labels)
+
+
+def test_a_thread_with_watches_is_still_listed_when_empty(isolated):
+    S._save_watcher_history([], "555")
+    cfg = AppConfig(watches=[Watch(name="Theirs", urls=["https://x"], instruction="x",
+                                   interval_minutes=30, owner="555")])
+    assert any("555" in t["label"] for t in S._list_conversation_threads(cfg))

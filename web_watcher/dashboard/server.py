@@ -1997,6 +1997,20 @@ def _history_path(owner: str | None = None):
     return _WATCHER_HISTORY_PATH.with_name(f"watcher_history_{safe}.json")
 
 
+_TG_TAG_RE = re.compile(r"</?(b|strong|i|em|u|s|code|pre|a|br)\b[^>]*>", re.I)
+
+
+def _strip_html(text: str) -> str:
+    """Telegram-legal markup → plain text, for anything we STORE rather than send. Unescapes the
+    handful of entities the formatter introduces so a saved reply reads exactly as it was said."""
+    if not text or ("<" not in text and "&" not in text):
+        return text or ""
+    out = _TG_TAG_RE.sub("", text)
+    for ent, ch in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"')):
+        out = out.replace(ent, ch)
+    return out
+
+
 def _persist_chat_turn(messages: list, result: dict, owner: str | None) -> None:
     """Save the exchange on EVERY turn that had a user message — including degraded/error turns —
     so a transient model hiccup can't punch a permanent hole in the saved chat. (An older gate only
@@ -2007,7 +2021,11 @@ def _persist_chat_turn(messages: list, result: dict, owner: str | None) -> None:
         return
     import time as _t
     now = _t.time()
-    reply_text = result.get("raw") or result.get("message") or ""
+    # Store PLAIN TEXT. Markup belongs to the delivery channel, not the record: a reply saved
+    # with <b> tags is read back to the model as its own past work, and it starts writing tags
+    # into its prose — which is how literal "<i>Change yours:</i>" reached a phone. Formatting is
+    # applied at send time (notify/_send); history keeps what was actually said.
+    reply_text = _strip_html(result.get("raw") or result.get("message") or "")
     n_sugg = len(result.get("watch_suggestions") or
                  ([result["watch_suggestion"]] if result.get("watch_suggestion") else []))
     log.info("Watcher chat turn: user=%r → reply %d char(s), %d suggestion(s)",
@@ -2336,6 +2354,10 @@ def _list_conversation_threads(cfg) -> list[dict]:
             if not token:
                 continue
             hist = _load_watcher_history(token)
+            # An emptied thread leaves its file behind. Listing a person with no messages and no
+            # watches just leaves a mystery entry in the console — nothing to read, nothing to do.
+            if not hist and not _watches_for_owner(cfg, token):
+                continue
             label = names.get(token) or f"Telegram · {token}"
             threads.append(_thread_summary(token, label, hist, cfg))
     except Exception as exc:

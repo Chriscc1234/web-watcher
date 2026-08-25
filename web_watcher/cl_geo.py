@@ -874,32 +874,66 @@ def place_from_text(text: str) -> tuple[float, float] | None:
 # craigslist listing URLs carry the town in the slug: /view/d/<town>-<title-words>/<id>
 _CL_SLUG_RE = re.compile(r"/(?:view/d|d)/([a-z][a-z-]*?)-[a-z0-9-]*/[a-zA-Z0-9]+/?$")
 
-# Towns just across a border that a US-anchored search legitimately reaches — Vancouver BC is 62
-# miles from Anacortes, CLOSER than Seattle. They're in range and still wrong: another country,
-# another currency, a border crossing. Most aren't in the US gazetteer at all, so they can't be
-# ruled out by resolving them; the ones that ARE (Surrey → North Dakota, Vancouver → Washington)
-# resolve somewhere far away and are handled by the distance check. Extend as new borders come up.
-_FOREIGN_CITIES: frozenset = frozenset({
-    # BC lower mainland + island (reachable from northwest Washington)
-    "vancouver bc", "north vancouver", "west vancouver", "port moody", "port coquitlam",
-    "coquitlam", "burnaby", "richmond bc", "new westminster", "maple ridge", "pitt meadows",
-    "white rock", "delta bc", "tsawwassen", "ladner", "langley bc", "aldergrove", "abbotsford",
-    "chilliwack", "mission bc", "hope bc", "squamish", "whistler", "sechelt", "gibsons",
-    "victoria bc", "saanich", "sidney bc", "duncan", "nanaimo", "parksville", "courtenay",
-    "campbell river", "port alberni", "powell river", "kelowna", "kamloops", "vernon bc",
-    "penticton", "prince george", "cranbrook", "nelson bc", "trail bc", "castlegar",
-    # Ontario/Quebec border metros (for watches anchored in the northeast/midwest)
-    "windsor on", "sarnia", "niagara falls on", "fort erie", "st catharines", "hamilton on",
-    "toronto", "mississauga", "brampton", "oakville", "burlington on", "kitchener", "waterloo on",
-    "guelph", "cambridge on", "london on", "ottawa", "gatineau", "montreal", "laval",
-    "sherbrooke", "quebec city",
-    # Prairie / Atlantic
-    "calgary", "edmonton", "winnipeg", "regina", "saskatoon", "halifax", "moncton",
-    "fredericton", "saint john nb", "thunder bay",
-    # Mexican border
-    "tijuana", "mexicali", "ciudad juarez", "nogales sonora", "matamoros", "reynosa",
-    "nuevo laredo",
-})
+# ---------------------------------------------------------------------------
+# Where a town actually is — including outside the US
+# ---------------------------------------------------------------------------
+#
+# A hand-written list of border towns was never going to hold: it missed Metchosin the first time
+# it was tested. The honest question is "what country is this town in, and how far away", and that
+# needs real data for BOTH sides of a border, so a GeoNames-derived world gazetteer sits alongside
+# the Census one (see assets/ATTRIBUTION.md).
+#
+# Country comes from the nearest craigslist REGION, which our bundled area list already labels —
+# 707 rows, so it costs nothing, and it means the rule works for a watch anchored anywhere rather
+# than assuming everyone is American.
+
+
+@lru_cache(maxsize=1)
+def _world_table() -> dict[str, list[tuple[str, float, float]]]:
+    """Non-US place name -> [(country, lat, lon), …]. US towns live in _place_table()."""
+    out: dict[str, list[tuple[str, float, float]]] = {}
+    try:
+        with gzip.open(_ASSETS / "world_places.csv.gz", "rt", newline="", encoding="utf-8") as f:
+            for row in csv.reader(f):
+                out.setdefault(row[0], []).append((row[1], float(row[2]), float(row[3])))
+    except Exception as exc:
+        log.warning("could not load world places: %s", exc)
+    return out
+
+
+def _deg(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(b[0] - a[0], (b[1] - a[1]) * math.cos(math.radians(a[0])))
+
+
+def resolve_town(name: str, anchor: tuple[float, float] | None = None):
+    """A town name -> (country, lat, lon), or None if we've never heard of it.
+
+    Searches the US and world gazetteers together and returns the candidate NEAREST the anchor,
+    because town names repeat across countries: Victoria is in British Columbia, Texas and
+    Argentina, and picking the wrong one is how a watch ends up judging the wrong continent."""
+    key = " ".join((name or "").lower().split())
+    if not key:
+        return None
+    cands: list[tuple[str, float, float]] = [("US", la, lo) for _st, la, lo in
+                                             (c for c in _place_table().get(key, []))]
+    cands += _world_table().get(key, [])
+    if not cands:
+        return None
+    if anchor is None:
+        return cands[0] if len(cands) == 1 else None      # ambiguous with nothing to compare to
+    return min(cands, key=lambda c: _deg(anchor, (c[1], c[2])))
+
+
+@lru_cache(maxsize=256)
+def country_at(lat: float, lon: float) -> str:
+    """The country of the nearest craigslist region — our cheapest reliable "which side of the
+    border is this point on", from data we already ship."""
+    best, best_d = "", float("inf")
+    for a in _areas():
+        d = _deg((lat, lon), (a["lat"], a["lon"]))
+        if d < best_d:
+            best, best_d = a.get("country", ""), d
+    return best
 
 
 def listing_city(url: str) -> str:
@@ -916,41 +950,34 @@ def listing_city(url: str) -> str:
 
 
 def city_is_near(city_slug: str, anchor: tuple[float, float], radius_miles: float) -> bool | None:
-    """Is the town in this listing's URL actually near the watch's anchor?
+    """Is this listing's town somewhere the watch actually wants?
 
-    Returns True (near), False (a real place, but not near) or None (can't tell — the caller
-    should keep it, because absence of evidence is not evidence of absence).
+    True (yes), False (a real place, but not one this watch asked for), or None — we've never
+    heard of the town, and absence of evidence is not evidence of absence, so the caller keeps it.
 
-    This is what separates "Anacortes" from "Surrey". The US gazetteer is no help on its own:
-    it maps Surrey to North Dakota and Vancouver to Washington, both real US towns and both
-    nowhere near. Resolving the name AGAINST THE ANCHOR settles it — a nearby match is the one
-    that's meant, and a name that only resolves a thousand miles away is either a different town
-    or across a border, and either way it isn't what the watch asked for.
-    """
+    Two ways to fail, and they're different questions:
+
+      • WRONG COUNTRY. Vancouver BC is 62 miles from Anacortes, closer than Seattle. It passes any
+        distance test and is still wrong: a border, a currency, a customs form. So the country is
+        compared first, and a mismatch fails regardless of how near it is.
+      • TOO FAR. Within the same country, the watch's own radius decides.
+
+    Only the LEADING slug words are read, because the town is the start of a craigslist slug and
+    scanning the whole thing lets a word from the item's TITLE ("…bellingham trailer…") vouch for
+    a listing posted somewhere else. Longest first, so "mount vernon" beats "mount"."""
     words = [w for w in (city_slug or "").split() if w]
     if not words or not anchor:
         return None
-    # Border towns that are simply not in the US gazetteer, so no amount of resolving will place
-    # them — "port moody" and "burnaby" return nothing at all, which would read as "unknown" and
-    # be kept. Named explicitly because the alternative is inferring foreignness from absence,
-    # and absence is also what an unusual slug looks like.
-    for size in (3, 2, 1):
-        if " ".join(words[:size]) in _FOREIGN_CITIES:
-            return False
-
-    coslat = math.cos(math.radians(anchor[0]))
+    home = country_at(anchor[0], anchor[1])
     limit_deg = max(0.4, (radius_miles or 100) / 69.0)
-    # LEADING words only — the town is the start of the slug, and scanning the whole thing lets a
-    # word from the item's title ("...bellingham trailer...") vouch for a listing posted
-    # elsewhere. Longest first so "mount vernon" wins over "mount".
     for size in (3, 2, 1):
-        name = " ".join(words[:size])
-        cands = _place_table().get(name)
-        if not cands:
+        got = resolve_town(" ".join(words[:size]), anchor)
+        if not got:
             continue
-        best = min(cands, key=lambda c: math.hypot(c[1] - anchor[0], (c[2] - anchor[1]) * coslat))
-        d = math.hypot(best[1] - anchor[0], (best[2] - anchor[1]) * coslat)
-        return d <= limit_deg
+        cc, lat, lon = got
+        if home and cc and cc != home:
+            return False                      # in range or not, it's across a border
+        return _deg(anchor, (lat, lon)) <= limit_deg
     return None
 
 

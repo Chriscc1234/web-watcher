@@ -179,15 +179,29 @@ def test_nearby_washington_towns_are_near():
 
 
 def test_british_columbia_towns_are_not_near():
-    """In range by miles, wrong by country — and the gazetteer's Surrey ND is what makes the
-    anchor comparison necessary rather than a name lookup."""
-    # Surrey resolves (to North Dakota) and is ruled out by distance; Port Moody and Burnaby
-    # aren't in the US gazetteer at all, so they're named explicitly — absence of a US match is
-    # also what an unusual slug looks like, and that must not be enough to drop a listing.
-    assert city_is_near("surrey immaculate 2014 larson", _ANACORTES, 150) is False
-    assert city_is_near("port moody sea ray 200", _ANACORTES, 150) is False
-    assert city_is_near("burnaby boat trailer", _ANACORTES, 150) is False
-    assert city_is_near("coquitlam skiff", _ANACORTES, 150) is False
+    """The reason a hand-written border list had to go: it missed Metchosin the first time it was
+    tested. These now resolve through a real gazetteer and fail on COUNTRY, not on a lookup."""
+    for slug in ("surrey immaculate 2014 larson", "port moody sea ray 200",
+                 "burnaby boat trailer", "coquitlam skiff",
+                 "metchosin 2006 volvo v70r wagon", "victoria bc sailboat"):
+        assert city_is_near(slug, _ANACORTES, 150) is False, slug
+
+
+def test_a_near_but_foreign_town_fails_on_country_not_distance():
+    """Vancouver BC is 62 miles from Anacortes — closer than Seattle. It passes any distance
+    test and is still wrong, so country is checked first and a mismatch fails outright."""
+    from web_watcher.cl_geo import resolve_town, country_at
+    cc, lat, lon = resolve_town("vancouver", _ANACORTES)
+    assert cc == "CA"
+    assert country_at(*_ANACORTES) == "US"
+    assert city_is_near("vancouver something", _ANACORTES, 500) is False   # generous radius
+
+
+def test_towns_are_disambiguated_by_the_anchor():
+    """Victoria is in British Columbia, Texas and Argentina. Near Anacortes it is the BC one."""
+    from web_watcher.cl_geo import resolve_town
+    cc, lat, lon = resolve_town("victoria", _ANACORTES)
+    assert cc == "CA" and 48.0 < lat < 49.0
 
 
 def test_a_far_away_same_named_us_town_is_not_near():
@@ -227,3 +241,20 @@ def test_out_of_area_listings_are_dropped_by_the_prefilter():
     ], w)
     assert [l.title for l in kept] == ["Sea Ray"]
     assert "outside the" in dropped[0].judge_reason
+
+
+def test_a_far_us_town_is_out_of_range_but_domestic():
+    """Miami is in the right country and hopelessly far — distance still has a job."""
+    from web_watcher.cl_geo import resolve_town
+    assert resolve_town("miami", _ANACORTES)[0] == "US"
+    assert city_is_near("miami speedboat", _ANACORTES, 150) is False
+
+
+def test_the_home_country_is_read_from_the_anchor_not_assumed():
+    """A watch anchored in Canada should treat Canadian towns as home and US ones as foreign —
+    the rule is 'a different country from yours', not 'not America'."""
+    from web_watcher.cl_geo import country_at
+    vancouver = (49.2497, -123.1193)
+    assert country_at(*vancouver) == "CA"
+    assert city_is_near("burnaby boat trailer", vancouver, 100) is True
+    assert city_is_near("bellingham skiff", vancouver, 100) is False

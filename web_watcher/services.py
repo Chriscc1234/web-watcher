@@ -26,6 +26,9 @@ import httpx
 log = logging.getLogger(__name__)
 
 OLLAMA_URL     = "http://localhost:11434"
+# How long the scheduled self-audit will wait for watching to go quiet before running anyway.
+# A continuous watch is busy nearly always, so an unbounded "wait for idle" means never.
+_REVIEW_BUSY_GRACE_S = 2 * 3600.0
 OLLAMA_TIMEOUT = 30.0   # seconds to wait for Ollama to become ready after launch
 
 
@@ -826,11 +829,22 @@ class ServiceManager:
                     continue
                 if self.review_status().get("status") == "running":
                     continue
-                # Never audit on top of a sweep — the big model would hold the GPU for a long
-                # time. Wait for a quiet moment; there will be another in five minutes.
-                if self.orchestrator_running() or self._scheduler and self._scheduler.running_continuous():
-                    log.debug("chat review: watching is busy — deferring the scheduled audit")
+                # Prefer a quiet moment — the big model holds the GPU for a while. But a
+                # continuous watch is busy essentially always, so "wait for idle" alone would
+                # defer forever and the audit would never run at all. So we wait only for a
+                # bounded grace period past due, then go ahead: the audit is chunked and releases
+                # the GPU between chunks, and a person's chat jumps the queue regardless.
+                busy = self.orchestrator_running() or bool(
+                    self._scheduler and self._scheduler.running_continuous())
+                overdue_by = (time.time() - last - every) if last else every
+                if busy and overdue_by < _REVIEW_BUSY_GRACE_S:
+                    log.debug("chat review: watching is busy — deferring (%.0f min into the grace "
+                              "period)", max(0.0, overdue_by) / 60)
                     continue
+                if busy:
+                    log.info("chat review: watching is still busy but the audit is %.1fh overdue "
+                             "— running it anyway (it yields the GPU between chunks)",
+                             overdue_by / 3600)
                 log.info("chat review: scheduled run starting (every %.1fh)", rc.every_hours)
                 self.review_start()
                 self._await_review_then_notify(cfg)

@@ -256,3 +256,32 @@ def test_a_scheduled_run_waits_for_a_quiet_moment(monkeypatch, tmp_path):
     monkeypatch.setattr(m._review_stop, "wait", fake_wait)
     m._review_scheduler()
     assert started == []          # deferred while watching is busy, not run
+
+
+def test_an_overdue_review_runs_even_while_watching_is_busy(monkeypatch):
+    """A continuous watch is busy essentially always — waiting for idle forever would mean the
+    audit never runs at all, which is the same as not having the feature."""
+    import time as _time
+    from web_watcher.services import ServiceManager
+    m = ServiceManager()
+    started = []
+    monkeypatch.setattr(m, "review_start", lambda *a, **k: started.append(1))
+    monkeypatch.setattr(m, "orchestrator_running", lambda: True)       # never quiet
+    monkeypatch.setattr(m, "review_status", lambda: {"status": "idle"})
+    monkeypatch.setattr(m, "_await_review_then_notify", lambda cfg: None)
+
+    from web_watcher.config import AppConfig, ReviewConfig
+    import web_watcher.config as C
+    monkeypatch.setattr(C, "load", lambda: AppConfig(review=ReviewConfig(enabled=True, every_hours=1)))
+    # Due 3 hours ago — past the grace period.
+    monkeypatch.setattr(R, "watermark",
+                        lambda data_dir=None: {"last_run_at": _time.time() - 4 * 3600})
+
+    calls = {"n": 0}
+
+    def fake_wait(timeout=None):
+        calls["n"] += 1
+        return calls["n"] > 1
+    monkeypatch.setattr(m._review_stop, "wait", fake_wait)
+    m._review_scheduler()
+    assert started == [1]        # ran anyway rather than deferring forever

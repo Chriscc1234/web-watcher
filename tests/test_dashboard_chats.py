@@ -356,3 +356,53 @@ def test_fabricated_prose_is_replaced_when_rows_exist(monkeypatch):
     assert "12,000" not in out["message"]
     assert "2 matches" in out["message"] and "Boats" in out["message"]
     assert out["listings"] == rows                # the real rows are what's shown
+
+
+# ── "the matches for boats" means the boats watch ────────────────────────────────
+# With two watches and no focus set, the lookup ran unscoped and returned boats mixed with a
+# Nissan Rogue from the cars watch — and the lead-in read "your watches" instead of naming it.
+
+def _two_watches():
+    return AppConfig(watches=[
+        Watch(name="Anacortes Manual Transmission Cars Watch", urls=["https://a"],
+              instruction="cars", interval_minutes=30, owner=""),
+        Watch(name="Anacortes Under 30' Motor Boats Watch", urls=["https://b"],
+              instruction="boats", interval_minutes=30, owner=""),
+    ])
+
+
+def test_a_watch_is_matched_on_a_distinctive_word():
+    cfg = _two_watches()
+    assert S._watch_named_in("show me the matches for boats", cfg, None) == \
+        "Anacortes Under 30' Motor Boats Watch"
+    assert S._watch_named_in("anything on the cars?", cfg, None) == \
+        "Anacortes Manual Transmission Cars Watch"
+
+
+def test_singular_and_plural_both_match():
+    cfg = _two_watches()
+    assert S._watch_named_in("show me the boat matches", cfg, None).endswith("Boats Watch")
+
+
+def test_a_word_every_watch_shares_matches_nothing():
+    """"Anacortes" is in both names — acting on it would show the wrong watch half the time."""
+    assert S._watch_named_in("show me the anacortes matches", _two_watches(), None) == ""
+
+
+def test_noise_words_never_identify_a_watch():
+    assert S._watch_named_in("show me all the watches", _two_watches(), None) == ""
+    assert S._watch_named_in("show me the matches", _two_watches(), None) == ""
+
+
+def test_the_named_watch_scopes_the_lookup(monkeypatch):
+    ran = {}
+    monkeypatch.setattr(S, "_chat_reply_natural", lambda *a, **k: ("ok", 0, 0, 0))
+    monkeypatch.setattr(S, "_extract_watch_action", lambda *a, **k: {})
+    monkeypatch.setattr(S, "_run_listing_query", lambda p, **k: ran.update(p) or [])
+    monkeypatch.setattr(S, "_persist_chat_turn", lambda *a, **k: None)
+    cfg = _two_watches()
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "Show me a full list of all of the matches for boats"}],
+        cfg, "m", owner=None)
+    assert ran["watch"] == "Anacortes Under 30' Motor Boats Watch"

@@ -2313,6 +2313,34 @@ def _prose_enumerates_listings(text: str) -> bool:
     return listish >= 2
 
 
+# Words in a watch's name that don't identify it — every watch has some of these.
+_WATCH_NAME_NOISE = frozenset({
+    "watch", "watches", "the", "and", "for", "with", "under", "over", "near", "within", "all",
+    "my", "a", "an", "of", "in", "on", "to", "up", "new", "used", "only", "miles", "mile",
+})
+
+
+def _watch_named_in(text: str, cfg, owner) -> str:
+    """The watch the person is talking about, matched on a distinctive word of its name.
+
+    "show me the matches for boats" plainly means the boats watch — but with two watches and no
+    focus set, the lookup ran unscoped and returned boats mixed with a Nissan Rogue from the
+    other one. Returns "" unless EXACTLY ONE watch matches, because acting on an ambiguous
+    reference is how the wrong watch gets shown."""
+    words = {w for w in re.findall(r"[a-z0-9']+", (text or "").lower())
+             if len(w) > 2 and w not in _WATCH_NAME_NOISE}
+    if not words:
+        return ""
+    hits = []
+    for w in _watches_for_owner(cfg, owner):
+        name_words = {x for x in re.findall(r"[a-z0-9']+", w.name.lower())
+                      if len(x) > 2 and x not in _WATCH_NAME_NOISE}
+        # Match on the singular/plural stem so "boats" finds "Boat" and vice versa.
+        if any(a == b or a.rstrip("s") == b.rstrip("s") for a in words for b in name_words):
+            hits.append(w.name)
+    return hits[0] if len(hits) == 1 else ""
+
+
 def _lookup_limit(text: str, default: int = 10) -> int:
     """'top 20' / 'show me 5' → that many. Bounded so a stray number can't dump the whole DB."""
     m = re.search(r"\b(?:top|first|best|show me)\s+(\d{1,6})\b", text or "", re.I)
@@ -3547,6 +3575,8 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # model actually decided.
         if _is_lookup_request(latest := _latest_user_text(conv)):
             target = focus if (focus and focus != PENDING_CREATE) else ""
+            if not target:
+                target = _watch_named_in(latest, cfg, owner)    # "…matches for boats"
             if not target:
                 mine = _watches_for_owner(cfg, owner)
                 if len(mine) == 1:

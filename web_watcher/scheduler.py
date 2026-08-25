@@ -1106,6 +1106,17 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
                        summary=f"{verb} {len(batch)} listings; {len(matched_keys)} matches recorded (no alerts)",
                        perception_mode_used=mode_label), db_path)
 
+    # Tell them it happened. Suppressing a wall of alerts is right; saying NOTHING is not — from
+    # the outside a silent baseline is indistinguishable from a watch that found nothing, which
+    # is exactly how "it never notified me about any boats" happens. So: one message with the
+    # numbers and a way to act on the backlog we just quietly banked.
+    try:
+        from web_watcher.notify import send_baseline_briefing
+        send_baseline_briefing(watch.name, len(batch), len(matched_keys), cfg.notifications,
+                               owner_chat_id=getattr(watch, "owner", "") or "")
+    except Exception as exc:
+        log.debug("baseline briefing not sent for %r: %s", watch.name, exc)
+
 
 def _process_sweep_listings(
     watch:   Watch,

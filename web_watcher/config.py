@@ -291,10 +291,22 @@ class Watch(BaseModel):
 # Root config
 # ---------------------------------------------------------------------------
 
+class ReviewConfig(BaseModel):
+    """The self-audit: the biggest local model reads the app's OWN conversations and reports
+    where it went wrong. Off by default — it's slow (that's the point) and it should be the
+    user's choice when to spend the GPU on introspection rather than on watching."""
+    enabled: bool = False
+    every_hours: float = 24.0
+    # Message the admin on Telegram when a run turns up HIGH-severity findings. A report nobody
+    # reads is a report that didn't happen.
+    notify: bool = True
+
+
 class AppConfig(BaseModel):
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     watches: list[Watch] = Field(default_factory=list)
 
     # Cross-watch matching: when one watch surfaces a fresh listing, also test it against

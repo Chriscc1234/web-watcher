@@ -485,6 +485,42 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       <div id="cred-an-esc" style="font-size:12px;color:var(--dim);margin-top:10px"></div>
     </div>
 
+    <!-- Self-review -->
+    <h3 style="margin-top:22px;font-size:15px">Self-review</h3>
+    <div class="card" style="padding:14px">
+      <div style="font-size:12px;color:var(--dim);line-height:1.55;margin-bottom:10px">
+        Your biggest local model reads back through the app's own conversations and reports where
+        it went wrong — misunderstood a request, ignored part of one, contradicted itself, or
+        answered confusingly. It's slow on purpose and runs entirely on your machine, so it costs
+        nothing but GPU time, and it waits for a quiet moment rather than interrupting a sweep.
+      </div>
+      <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:12px 14px;background:var(--bg)">
+        <div style="flex:1">
+          <div style="font-weight:600;margin-bottom:4px">Review my chats automatically</div>
+          <div style="font-size:12px;color:var(--dim)">Off = only when you press Run now.</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap">
+          <div class="toggle-wrap">
+            <input type="checkbox" id="rev-enabled" style="display:none" onchange="saveReviewSettings()">
+            <div class="toggle-track" id="rev-track"><div class="toggle-thumb"></div></div>
+          </div>
+          <span id="rev-label" style="font-size:13px;color:var(--dim)">Off</span>
+        </label>
+      </div>
+      <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:150px">
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Run every (hours)</label>
+          <input id="rev-hours" type="number" min="1" step="1" placeholder="24" onchange="saveReviewSettings()"
+                 style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
+        </div>
+        <button onclick="runReviewNow(this)">Run now</button>
+      </div>
+      <div id="rev-status" style="font-size:12px;color:var(--dim);margin-top:10px"></div>
+      <details style="margin-top:10px"><summary style="cursor:pointer;color:var(--blue);font-size:12px">Latest report</summary>
+        <pre id="rev-report" style="white-space:pre-wrap;font-size:11px;color:var(--dim);margin-top:8px;max-height:340px;overflow:auto"></pre>
+      </details>
+    </div>
+
     <!-- Email -->
     <h3 style="margin-top:22px;font-size:15px">Email alerts (optional)</h3>
     <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
@@ -3152,6 +3188,70 @@ async function _pollRescan() {
   } catch(_) { _rescanTimer = setTimeout(_pollRescan, 5000); }
 }
 
+
+// ---- Self-review ---------------------------------------------------------
+// The app auditing its own conversations. Slow, local, and off unless asked for.
+async function loadReviewSettings() {
+  try {
+    const d = await api('/api/review/settings');
+    const chk = document.getElementById('rev-enabled');
+    if (chk) { chk.checked = !!d.enabled; _applyRevToggle(!!d.enabled); }
+    const hrs = document.getElementById('rev-hours');
+    if (hrs) hrs.value = d.every_hours || 24;
+    loadReviewStatus();
+  } catch(e) {}
+}
+
+function _applyRevToggle(on) {
+  const track = document.getElementById('rev-track');
+  const label = document.getElementById('rev-label');
+  if (track) track.classList.toggle('on', !!on);
+  if (label) { label.textContent = on ? 'On' : 'Off'; label.style.color = on ? 'var(--green)' : 'var(--dim)'; }
+}
+
+async function saveReviewSettings() {
+  const enabled = document.getElementById('rev-enabled').checked;
+  _applyRevToggle(enabled);
+  try {
+    await api('/api/review/settings', { method: 'POST', body: JSON.stringify({
+      enabled, every_hours: document.getElementById('rev-hours').value || 24 }) });
+  } catch(e) { alert('Could not save the review settings: ' + e.message); }
+}
+
+async function runReviewNow(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/review/chats', { method: 'POST', body: JSON.stringify({}) });
+    loadReviewStatus();
+  } catch(e) { alert('Could not start the review: ' + e.message); }
+  finally { if (btn) setTimeout(() => btn.disabled = false, 3000); }
+}
+
+async function loadReviewStatus() {
+  const el = document.getElementById('rev-status');
+  const rep = document.getElementById('rev-report');
+  if (!el) return;
+  try {
+    const d = await api('/api/review/chats');
+    const st = d.status || 'idle';
+    if (st === 'running') {
+      el.textContent = 'Reading… ' + (d.progress || '');
+      el.style.color = 'var(--blue)';
+      setTimeout(loadReviewStatus, 8000);      // it takes a while; keep the line live
+    } else if (d.report) {
+      const c = d.report.counts || {};
+      el.style.color = 'var(--dim)';
+      el.textContent = `Last run read ${d.report.turns_reviewed || 0} messages with `
+        + `${d.report.model || '?'} — ${c.high||0} high, ${c.medium||0} medium, ${c.low||0} low.`;
+    } else {
+      el.textContent = 'Not run yet.';
+    }
+    if (rep) {
+      try { rep.textContent = await (await fetch('/api/review/chats/text')).text(); } catch(e) {}
+    }
+  } catch(e) { el.textContent = ''; }
+}
+
 // ---- Model set selector -------------------------------------------------
 function _gb(mb) { return (mb / 1000).toFixed(1) + ' GB'; }
 
@@ -3352,6 +3452,7 @@ async function loadCredentials() {
       spend.textContent += `  Today: $${(sp.today||0).toFixed(2)}.`;
   }
   loadEscalations();
+  loadReviewSettings();
   const setV = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; };
   setV('cred-em-server', em.smtp_server); setV('cred-em-port', em.smtp_port);
   setV('cred-em-from', em.from_address); setV('cred-em-to', em.to_address);

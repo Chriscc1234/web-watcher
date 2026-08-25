@@ -404,6 +404,12 @@ class TelegramBridge:
         if not self._authorized(chat):
             log.warning("Telegram: ignoring button from unauthorized chat %s", chat)
             return
+        # "Show top N" from a baseline briefing — the backlog we deliberately didn't alert on.
+        if data.startswith("top:"):
+            self._answer_callback(cb.get("id"), "Fetching…")
+            self._handle_top_request(data[4:], str(chat))
+            return
+
         self._answer_callback(cb.get("id"), "Vetting…")
         if not data.startswith("vet:"):
             return
@@ -422,6 +428,36 @@ class TelegramBridge:
         body = head + _h.escape(verdict) + f'\n\n<a href="{_h.escape(url, quote=True)}">{_h.escape(url)}</a>'
         self._send(body, str(chat), html=True,
                    buttons=[[{"text": "🔗 Open listing", "url": url}]])
+
+    def _handle_top_request(self, payload: str, chat: str) -> None:
+        """'<token>:<n>' → the best N already-recorded matches for that watch. Reads what the
+        judge already rated, so it's instant — no re-browsing, no model call."""
+        from web_watcher.notify import watch_for_brief
+        token, _, n_raw = payload.partition(":")
+        try:
+            limit = max(1, min(int(n_raw or 10), 30))
+        except ValueError:
+            limit = 10
+        name = watch_for_brief(token)
+        if not name:
+            self._send("I couldn't tell which watch that was — it may be from an older message.", chat)
+            return
+        try:
+            r = httpx.get(f"{self.dashboard_url}/api/listings",
+                          params={"watch_name": name, "matched": "true", "limit": limit},
+                          timeout=30.0)
+            r.raise_for_status()
+            data = r.json()
+            rows = data if isinstance(data, list) else (data.get("listings") or data.get("rows") or [])
+        except Exception as exc:
+            log.warning("top-N request failed for %r: %s", name, exc)
+            self._send("I couldn't fetch those just now — try asking me in chat.", chat)
+            return
+        if not rows:
+            self._send(f"Nothing recorded for “{name}” yet.", chat)
+            return
+        header = f"⭐ Top {len(rows)} from “{name}”:\n\n"
+        self._send(header + _format_listings(rows, limit=limit), chat)
 
     def _answer_callback(self, cb_id, text: str = "") -> None:
         """Acknowledge the tap so Telegram stops the button's spinner."""

@@ -359,3 +359,72 @@ def test_a_missing_stored_record_never_breaks_the_alert(monkeypatch):
     monkeypatch.setattr(notify, "_known_facts", lambda url: {})
     text = notify._format_telegram(_payload(_result(summary="a find", link="https://x/1")))
     assert "Open listing" in text
+
+
+# ── the baseline burst ───────────────────────────────────────────────────────────
+# A new or changed watch finds hundreds of listings that were already there. Alerting on all of
+# them is a wall of noise, so we bank them silently — but silence looks exactly like a broken
+# watch ("it never notified me about any boats"). One message with the numbers, and buttons.
+
+def _tg_cfg():
+    from web_watcher.config import NotificationsConfig, TelegramConfig
+    return NotificationsConfig(telegram=TelegramConfig(bot_token="tok", chat_id="111"))
+
+
+def _capture(monkeypatch):
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True}
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None, **kw):
+            sent.update(json or {})
+            return _Resp()
+
+    from web_watcher import notify
+    monkeypatch.setattr(notify.httpx, "Client", _Client)
+    return sent
+
+
+def test_baseline_briefing_states_the_numbers_and_offers_the_backlog(monkeypatch, tmp_path):
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    sent = _capture(monkeypatch)
+    assert notify.send_baseline_briefing("Boats Watch", 189, 10, _tg_cfg()) is True
+    assert "189 listings" in sent["text"]
+    assert "10 of them" in sent["text"]
+    buttons = sent["reply_markup"]["inline_keyboard"][0]
+    assert [b["text"] for b in buttons] == ["⭐ Show top 10", "Show top 20"]
+    assert all(len(b["callback_data"].encode()) <= 64 for b in buttons)   # Telegram's hard cap
+
+
+def test_baseline_briefing_with_no_matches_offers_no_buttons(monkeypatch, tmp_path):
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    sent = _capture(monkeypatch)
+    notify.send_baseline_briefing("Boats Watch", 189, 0, _tg_cfg())
+    assert "None of them matched" in sent["text"]
+    assert "reply_markup" not in sent
+
+
+def test_the_briefing_token_resolves_back_to_the_watch(monkeypatch, tmp_path):
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    tok = notify.remember_brief("Anacortes Under 30' Motor Boats Watch")
+    assert notify.watch_for_brief(tok) == "Anacortes Under 30' Motor Boats Watch"
+    assert notify.watch_for_brief("nope") == ""
+
+
+def test_a_briefing_token_cannot_collide_with_a_vet_token(monkeypatch, tmp_path):
+    """Both live in one small file; a shared key would resolve a watch name as a listing URL."""
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    notify.remember_vet_link("https://x/1", "A listing")
+    tok = notify.remember_brief("https://x/1")           # same string, different kind
+    assert notify.watch_for_brief(tok) == "https://x/1"
+    assert notify.vet_entry_for(notify.vet_token("https://x/1")).get("url") == "https://x/1"

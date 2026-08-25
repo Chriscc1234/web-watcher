@@ -396,3 +396,109 @@ def _format_message(payload: NotificationPayload, html: bool = True) -> str:
   </table>
   {link_html}
 </body></html>"""
+
+
+def send_plain_telegram(text: str, cfg: NotificationsConfig, chat_id_override: str = "") -> bool:
+    """Send one plain-text Telegram message (no listing payload, no parse mode). For the app's
+    own notices — a finished self-review, a heads-up — where there is no match to format."""
+    t = cfg.telegram
+    chat_id = str(chat_id_override or "").strip() or t.chat_id
+    if not t.bot_token or not chat_id or not (text or "").strip():
+        return False
+    try:
+        with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
+            r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage",
+                            json={"chat_id": chat_id, "text": text})
+            r.raise_for_status()
+        return True
+    except Exception as exc:
+        log.warning("Telegram plain message failed: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Baseline briefing — what to do with a backlog we deliberately didn't alert on
+# ---------------------------------------------------------------------------
+#
+# A new or newly-changed watch finds hundreds of listings that were already there. Alerting on
+# all of them would be a wall of noise, so we bank them silently — but silence looks exactly
+# like a broken watch from the outside ("it never notified me about any boats"). So we send ONE
+# message with the numbers and buttons to act on the backlog we just banked.
+
+_TOP_PREFIX = "top:"
+_BRIEF_PREFIX = "brief:"
+
+
+def brief_token(watch_name: str) -> str:
+    """A short token for a watch name — Telegram caps callback_data at 64 bytes, and watch names
+    are long."""
+    import hashlib
+    return hashlib.sha1((watch_name or "").encode("utf-8")).hexdigest()[:16]
+
+
+def remember_brief(watch_name: str) -> str:
+    """Store watch_name under its token so a tapped button can resolve it. Shares the vet store
+    (one small file, two kinds of key) — keyed under a prefix so they can't collide."""
+    tok = brief_token(watch_name)
+    try:
+        import json
+        p = _vet_store_path()
+        data = {}
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8")) or {}
+        data[_BRIEF_PREFIX + tok] = {"watch": watch_name}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data)[:400_000], encoding="utf-8")
+    except Exception as exc:
+        log.debug("could not store the briefing token: %s", exc)
+    return tok
+
+
+def watch_for_brief(token: str) -> str:
+    """The watch name behind a briefing token, or ''."""
+    try:
+        import json
+        p = _vet_store_path()
+        if not p.exists():
+            return ""
+        entry = (json.loads(p.read_text(encoding="utf-8")) or {}).get(_BRIEF_PREFIX + token)
+        return str((entry or {}).get("watch") or "")
+    except Exception:
+        return ""
+
+
+def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: NotificationsConfig,
+                           owner_chat_id: str = "") -> bool:
+    """One message: what the watch just banked, and what you can do about it."""
+    t = cfg.telegram
+    chat_id = str(owner_chat_id or "").strip() or t.chat_id
+    if not t.bot_token or not chat_id or seen <= 0:
+        return False
+
+    tok = remember_brief(watch_name)
+    if matched:
+        line = (f"{matched} of them look worth a second glance. I didn't alert on each one — "
+                "they were already posted before this watch started looking.")
+    else:
+        line = ("None of them matched what you asked for. They were already posted before this "
+                "watch started looking, so nothing was worth alerting on.")
+    text = (f"📋 {watch_name}\n\nFirst proper look: {seen} listings.\n{line}\n\n"
+            "From here on you'll get an alert for anything NEW.")
+    buttons = []
+    if matched:
+        buttons = [[{"text": "⭐ Show top 10", "callback_data": f"{_TOP_PREFIX}{tok}:10"},
+                    {"text": "Show top 20", "callback_data": f"{_TOP_PREFIX}{tok}:20"}]]
+        text += "\n\nWant them now? Tap below — or just ask me, e.g. “show me the boats with outboards”."
+
+    body: dict = {"chat_id": chat_id, "text": text}
+    if buttons:
+        body["reply_markup"] = {"inline_keyboard": buttons}
+    try:
+        with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
+            r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage", json=body)
+            r.raise_for_status()
+        log.info("Baseline briefing sent for %r (%d seen, %d matched)", watch_name, seen, matched)
+        return True
+    except Exception as exc:
+        log.warning("Baseline briefing failed for %r: %s", watch_name, exc)
+        return False

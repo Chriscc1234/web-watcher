@@ -199,3 +199,60 @@ def test_render_report_is_plain_text():
 
 def test_render_report_handles_no_review_yet():
     assert "No review" in R.render_report({})
+
+
+# ── running on a schedule ────────────────────────────────────────────────────────
+# The audit is slow by design, so when it runs matters: off unless asked for, on the user's
+# interval, and never on top of a sweep (the big model would hold the GPU for a long time).
+
+def test_review_is_off_by_default():
+    from web_watcher.config import AppConfig
+    rc = AppConfig().review
+    assert rc.enabled is False and rc.every_hours == 24.0 and rc.notify is True
+
+
+def test_review_settings_round_trip(monkeypatch):
+    from unittest.mock import MagicMock
+    from fastapi.testclient import TestClient
+    from web_watcher.config import AppConfig
+    from web_watcher.dashboard.server import create_app
+    from web_watcher.dashboard import server as S
+    import web_watcher.config as C
+
+    cfg = AppConfig(watches=[])
+    monkeypatch.setattr(C, "load", lambda: cfg)
+    monkeypatch.setattr(C, "save", lambda c: None)
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    client = TestClient(create_app(MagicMock()))
+
+    assert client.get("/api/review/settings").json()["enabled"] is False
+    r = client.post("/api/review/settings", json={"enabled": True, "every_hours": 6}).json()
+    assert r["enabled"] is True and r["every_hours"] == 6.0
+    # An interval below an hour would mean auditing more or less continuously.
+    assert client.post("/api/review/settings",
+                       json={"every_hours": 0.1}).json()["every_hours"] == 1.0
+
+
+def test_a_scheduled_run_waits_for_a_quiet_moment(monkeypatch, tmp_path):
+    """The 72b holds the GPU for a long time — it must never start on top of a sweep."""
+    from web_watcher.services import ServiceManager
+    m = ServiceManager()
+    started = []
+    monkeypatch.setattr(m, "review_start", lambda *a, **k: started.append(1))
+    monkeypatch.setattr(m, "orchestrator_running", lambda: True)      # watching is busy
+    monkeypatch.setattr(m, "review_status", lambda: {"status": "idle"})
+
+    from web_watcher.config import AppConfig, ReviewConfig
+    import web_watcher.config as C
+    monkeypatch.setattr(C, "load", lambda: AppConfig(review=ReviewConfig(enabled=True, every_hours=1)))
+    monkeypatch.setattr(R, "watermark", lambda data_dir=None: {"last_run_at": 0.0})
+
+    # Exactly one pass of the loop body, then stop (wait() False = "keep going").
+    calls = {"n": 0}
+
+    def fake_wait(timeout=None):
+        calls["n"] += 1
+        return calls["n"] > 1
+    monkeypatch.setattr(m._review_stop, "wait", fake_wait)
+    m._review_scheduler()
+    assert started == []          # deferred while watching is busy, not run

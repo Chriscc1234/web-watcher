@@ -72,6 +72,8 @@ class ServiceManager:
         # status: running | done | error. Runs on a worker thread (browser + a slow big model).
         self._inspections: dict = {}
         self._inspect_lock = threading.Lock()
+        # Scheduled self-audit (off unless the user turns it on) — see _review_scheduler.
+        self._review_stop = threading.Event()
         # Auto-update state (populated by the background checker; surfaced via /api/update).
         self._window          = None    # pywebview window — set by main.py, used to restart
         self._update_available = None   # dict {version, notes} when a newer release is staged
@@ -93,6 +95,7 @@ class ServiceManager:
         self._start_ollama()    # first: scheduler needs Ollama available
         self._start_server()
         self._start_scheduler()
+        threading.Thread(target=self._review_scheduler, daemon=True, name="ww-review-sched").start()
         # Master switch on launch. If the user left it PAUSED, re-pause so nothing sweeps. If it's
         # ON (the default), actually WATCH: hand any enabled continuous watches to the driver —
         # scheduled watches already run via apscheduler, but continuous ones register "stopped", so
@@ -803,6 +806,63 @@ class ServiceManager:
     def review_status(self) -> dict:
         with self._inspect_lock:
             return dict(self._inspections.get("review") or {"status": "idle"})
+
+    def _review_scheduler(self) -> None:
+        """Run the self-audit on the user's schedule. Checks every few minutes rather than
+        sleeping for hours, so turning it on or changing the interval takes effect right away
+        instead of after the old sleep finally expires."""
+        from web_watcher.config import load as load_config
+        from web_watcher import review as _review
+
+        while not self._review_stop.wait(300.0):
+            try:
+                cfg = load_config()
+                rc = getattr(cfg, "review", None)
+                if not rc or not rc.enabled:
+                    continue
+                every = max(1.0, float(rc.every_hours or 24.0)) * 3600.0
+                last = float(_review.watermark().get("last_run_at", 0.0) or 0.0)
+                if last and (time.time() - last) < every:
+                    continue
+                if self.review_status().get("status") == "running":
+                    continue
+                # Never audit on top of a sweep — the big model would hold the GPU for a long
+                # time. Wait for a quiet moment; there will be another in five minutes.
+                if self.orchestrator_running() or self._scheduler and self._scheduler.running_continuous():
+                    log.debug("chat review: watching is busy — deferring the scheduled audit")
+                    continue
+                log.info("chat review: scheduled run starting (every %.1fh)", rc.every_hours)
+                self.review_start()
+                self._await_review_then_notify(cfg)
+            except Exception as exc:
+                log.warning("chat review scheduler: %s", exc)
+
+    def _await_review_then_notify(self, cfg) -> None:
+        """Wait for the running audit, then tell the admin if it found anything serious. A report
+        nobody reads is a report that didn't happen — but only HIGH findings are worth a ping."""
+        def _wait() -> None:
+            for _ in range(720):                       # up to ~2h; the 72b is slow on purpose
+                if self._review_stop.wait(10.0):
+                    return
+                st = self.review_status()
+                if st.get("status") != "running":
+                    break
+            report = (self.review_status().get("report")) or {}
+            highs = int((report.get("counts") or {}).get("high", 0))
+            rc = getattr(cfg, "review", None)
+            if not (highs and rc and rc.notify):
+                return
+            try:
+                from web_watcher.notify import send_plain_telegram
+                send_plain_telegram(
+                    f"🔎 Chat self-review: {highs} thing(s) worth a look across "
+                    f"{report.get('turns_reviewed', 0)} messages.\n\n"
+                    "Open the app → Settings → Self-review for the details.",
+                    cfg.notifications)
+            except Exception as exc:
+                log.debug("could not send the review summary: %s", exc)
+
+        threading.Thread(target=_wait, daemon=True, name="ww-review-notify").start()
 
     # ------------------------------------------------------------------
     # Site drill (can we actually use this site? — run before trusting a watch on it)

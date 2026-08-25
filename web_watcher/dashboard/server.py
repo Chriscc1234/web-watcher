@@ -849,6 +849,34 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         status["watermark"] = _review.watermark()
         return status
 
+    @app.get("/api/review/settings")
+    def get_review_settings():
+        cfg = _load_cfg()
+        rc = getattr(cfg, "review", None)
+        from web_watcher import review as _review
+        return {"enabled": bool(getattr(rc, "enabled", False)),
+                "every_hours": float(getattr(rc, "every_hours", 24.0)),
+                "notify": bool(getattr(rc, "notify", True)),
+                "last_run_at": _review.watermark().get("last_run_at", 0.0)}
+
+    @app.post("/api/review/settings")
+    def set_review_settings(body: dict):
+        """Turn the self-audit on/off and set how often it runs."""
+        from web_watcher.config import load, save
+        cfg = load()
+        if "enabled" in body:
+            cfg.review.enabled = bool(body["enabled"])
+        if "notify" in body:
+            cfg.review.notify = bool(body["notify"])
+        if "every_hours" in body:
+            try:
+                cfg.review.every_hours = max(1.0, float(body["every_hours"] or 24.0))
+            except (TypeError, ValueError):
+                pass
+        save(cfg)
+        return {"ok": True, "enabled": cfg.review.enabled,
+                "every_hours": cfg.review.every_hours, "notify": cfg.review.notify}
+
     @app.get("/api/review/chats/text", response_class=PlainTextResponse)
     def chat_review_text():
         """The latest report as plain text — the fastest way to actually read it."""

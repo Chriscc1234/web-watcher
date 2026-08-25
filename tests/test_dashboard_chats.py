@@ -406,3 +406,43 @@ def test_the_named_watch_scopes_the_lookup(monkeypatch):
         "sys", [{"role": "user", "content": "Show me a full list of all of the matches for boats"}],
         cfg, "m", owner=None)
     assert ran["watch"] == "Anacortes Under 30' Motor Boats Watch"
+
+
+# ── when we hold the rows, the model writes a LEAD-IN ────────────────────────────
+# Detecting each fabrication shape one at a time was a losing game: the first guard caught blank
+# placeholders, the next caught invented listings, and the one after slipped through by a single
+# marker ("- [Match Details]" twice where three were needed). Inverted: a lead-in is short.
+
+_SLIPPED = """Sure, here's the full list of matches for boats that I've found so far:
+
+**Anacortes Under 30' Motor Boats Watch**
+- **Site:** Craigslist (Skagit County)
+- **Search Distance:** 150 miles from Anacortes
+- **Price Range:** Under $15,000
+
+Matches Found:
+- [Match Details]
+- [Match Details]
+
+If you need more specific information, let me know!"""
+
+
+def test_a_long_re_description_of_the_search_is_replaced():
+    assert S._should_replace_prose(_SLIPPED) is True
+
+
+def test_a_short_genuine_remark_survives():
+    for keep in ("Here are the 10 matches — the Sea Ray at $14,500 looks like the best value.",
+                 "I pulled up 10 boats. A couple are just over your budget.",
+                 "Found 6. The GLASPLY at $9,500 is the cheapest with a real outboard."):
+        assert S._should_replace_prose(keep) is False, keep
+
+
+def test_an_empty_reply_is_replaced():
+    assert S._should_replace_prose("") is True
+    assert S._should_replace_prose("   ") is True
+
+
+def test_the_shapes_caught_before_are_still_caught():
+    assert S._should_replace_prose(_FABRICATED) is True
+    assert S._should_replace_prose("1. **Title:** [Boat Title]\n   **Price:** $XX,XXX") is True

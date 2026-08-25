@@ -2277,10 +2277,10 @@ _PLACEHOLDER_RE = re.compile(
 def _looks_like_a_blank_template(text: str) -> bool:
     """True when a reply is a listing template with the values left blank rather than an answer.
 
-    Needs SEVERAL markers: one bracketed phrase is ordinary writing ("[see below]"), a repeated
-    pattern of them is scaffolding. Being strict matters — a real reply must never be thrown away
-    and rewritten."""
-    return len(_PLACEHOLDER_RE.findall(text or "")) >= 3
+    Needs MORE THAN ONE marker: a single bracketed phrase is ordinary writing ("[see below]",
+    "[I'll keep looking]"), but two is a pattern, and a pattern is a template. Three was too
+    lenient — a two-row blank table came in just under it."""
+    return len(_PLACEHOLDER_RE.findall(text or "")) >= 2
 
 
 # A reply that walks through listings item by item: "**Match 1:** … Title: … Price: $12,000".
@@ -2311,6 +2311,30 @@ def _prose_enumerates_listings(text: str) -> bool:
                   if _ENUM_LINE_RE.match(line) and (re.search(r"\$\s?\d", line)
                                                     or _ITEM_FIELD_RE.search(line)))
     return listish >= 2
+
+
+# A lead-in to a list that's about to be shown needs a sentence or two. Past this, the model has
+# stopped introducing the listings and started re-describing the search or inventing entries.
+_LEAD_IN_MAX_CHARS = 320
+
+
+def _should_replace_prose(message: str) -> bool:
+    """True when the model's words should give way to the real listing rows.
+
+    Detecting each fabrication shape one at a time is a losing game — the first attempt caught
+    blank placeholders, the next caught invented listings, and the one after slipped through by a
+    single marker ("- [Match Details]" twice where three were needed). So the test is inverted:
+    when we already hold the rows, the model's job is a LEAD-IN, and a lead-in is short. Anything
+    long is re-describing the search or making entries up, and the rows say it better anyway.
+
+    A short, genuine remark ("the Sea Ray at $14,500 looks like the best value") is well under the
+    limit and survives — which is the one thing worth keeping from the model here."""
+    text = (message or "").strip()
+    if not text:
+        return True
+    if _looks_like_a_blank_template(text) or _prose_enumerates_listings(text):
+        return True
+    return len(text) > _LEAD_IN_MAX_CHARS
 
 
 # Words in a watch's name that don't identify it — every watch has some of these.
@@ -3737,8 +3761,7 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # Engine, $12,000, Everett") while the genuine listings travel alongside it. A reader can
         # see through blanks; they cannot see through a fabrication, and someone could drive to
         # Everett for a boat that never existed. Either shape is replaced with a plain lead-in.
-        if listings and (_looks_like_a_blank_template(message)
-                         or _prose_enumerates_listings(message)):
+        if listings and _should_replace_prose(message):
             what = (lq or {}).get("watch") or "your watches"
             message = f"Here {'is' if len(listings) == 1 else 'are'} " \
                       f"{len(listings)} match{'' if len(listings) == 1 else 'es'} for “{what}”:"

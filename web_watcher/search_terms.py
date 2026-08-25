@@ -81,19 +81,24 @@ def expand_search_terms(intent: str, model: str, db_path=None,
     user_msg += "Search terms:"
 
     try:
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": user_msg},
-            ],
-            "stream": False,
-            "format": "json",
-        }
-        with httpx.Client(timeout=60.0) as client:
-            r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            r.raise_for_status()
-        raw = r.json()["message"]["content"]
+        from web_watcher import llm
+        messages = [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": user_msg},
+        ]
+
+        def _usable(text: str) -> bool:
+            # A usable answer is a NON-EMPTY terms list — empty/garbage here means the watch would
+            # search for nothing, which is exactly when this (rare, per-watch) role earns a cloud
+            # call.
+            try:
+                d = json.loads(llm._extract_json_text(text))
+                return isinstance(d, dict) and any(str(t).strip() for t in (d.get("terms") or []))
+            except Exception:
+                return False
+
+        raw = llm.chat_smart(messages, role="terms", local_model=model, cfg=None,
+                             format_json=True, timeout=60.0, validate=_usable).get("text") or "{}"
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:

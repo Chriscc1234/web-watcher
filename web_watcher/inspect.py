@@ -119,20 +119,29 @@ def verdict_from_text(title: str, body: str, criteria: str, cfg,
                 "listing — treat them as true even if the posting text never repeats them. "
                 "Never say the price is unknown when a PRICE line is given.\n\n"
                 "Give your verdict.")
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _INSPECT_SYSTEM},
-            {"role": "user",   "content": user_msg},
-        ],
-        "stream": False,
-        "format": "json",
-    }
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-        r.raise_for_status()
-    data = json.loads(r.json()["message"]["content"])
-    return _normalize_verdict(data, model)
+    from web_watcher import llm
+    messages = [
+        {"role": "system", "content": _INSPECT_SYSTEM},
+        {"role": "user",   "content": user_msg},
+    ]
+
+    def _usable(text: str) -> bool:
+        # A real verdict, not any JSON: it must carry a deal rating. A local model that returns
+        # junk here is exactly when a person asked about ONE listing and it's worth a cloud dollar.
+        try:
+            d = json.loads(llm._extract_json_text(text))
+            return isinstance(d, dict) and d.get("deal_quality") is not None
+        except Exception:
+            return False
+
+    # Deep Inspect runs the big local model first, and escalates to Claude only if that verdict
+    # fails the check — vetting is on-demand (a person asked about this one listing), so it's rare
+    # and consequential, which is exactly what the cloud budget is for.
+    res = llm.chat_smart(messages, role="vet", local_model=model, cfg=cfg,
+                         format_json=True, timeout=timeout, validate=_usable)
+    data = json.loads(llm._extract_json_text(res.get("text") or "{}"))
+    used = res.get("used") or "local"
+    return _normalize_verdict(data, model if used == "local" else used)
 
 
 def _normalize_verdict(data: dict, model: str) -> dict:

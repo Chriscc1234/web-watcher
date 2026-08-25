@@ -157,21 +157,30 @@ def comprehend_from_structure(struct: dict, cfg, model: Optional[str] = None,
     """Run the comprehension model over an already-scanned structure. Separated so it's
     unit-testable with a canned structure. Returns the understanding dict (see schema)."""
     from web_watcher.inspect import resolve_inspect_model
+    from web_watcher import llm
     model = model or resolve_inspect_model(cfg)
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _COMPREHEND_SYSTEM},
-            {"role": "user",   "content": "Evidence:\n" + _evidence_block(struct)},
-        ],
-        "stream": False,
-        "format": "json",
-    }
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-        r.raise_for_status()
-    data = json.loads(r.json()["message"]["content"])
-    return _normalize_understanding(data, model)
+    messages = [
+        {"role": "system", "content": _COMPREHEND_SYSTEM},
+        {"role": "user",   "content": "Evidence:\n" + _evidence_block(struct)},
+    ]
+
+    def _usable(text: str) -> bool:
+        # A real understanding, not just any JSON: it must at least name the site kind. Junk here
+        # is what triggers the (rare, once-per-site) escalation to Claude.
+        try:
+            d = json.loads(llm._extract_json_text(text))
+            return isinstance(d, dict) and bool(str(d.get("site_kind", "")).strip())
+        except Exception:
+            return False
+
+    # Local first (the big inspect model), Claude only if it can't understand the page. Comprehend
+    # is once-per-site and consequential (it gates whether a watch is even viable), so it's one of
+    # the roles worth a cloud dollar when local falls short.
+    res = llm.chat_smart(messages, role="comprehend", local_model=model, cfg=cfg,
+                         format_json=True, timeout=timeout, validate=_usable)
+    data = json.loads(llm._extract_json_text(res.get("text") or "{}"))
+    used = res.get("used") or "local"
+    return _normalize_understanding(data, model if used == "local" else used)
 
 
 def _normalize_understanding(data: dict, model: str) -> dict:

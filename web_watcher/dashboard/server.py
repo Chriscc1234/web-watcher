@@ -3671,11 +3671,19 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
               + "\n\nThe assistant just told the user:\n\"" + (reply or "") + "\"")
     try:
         from web_watcher import llm
-        content = llm.chat(
-            [{"role": "system", "content": system}, *messages],
-            role="chat", local_model=model, cfg=cfg,
-            format_json=True, timeout=60.0, force_local=force_local,
-        )
+        msgs = [{"role": "system", "content": system}, *messages]
+        # Extraction is the app's most consequential call — a wrong one is a watch that quietly
+        # finds nothing for a week — and it's rare (only when a watch is made or changed). So on a
+        # HARD turn it goes through the local-first cascade under its OWN 'extract' role: local
+        # first, Claude only if the local model can't even produce valid JSON. Easy turns
+        # (force_local) and auto-off stay strictly local, same as the chat reply.
+        auto = getattr(getattr(getattr(cfg, "models", None), "cloud", None), "auto", True)
+        if force_local or not auto:
+            content = llm.chat(msgs, role="extract", local_model=model, cfg=cfg,
+                               format_json=True, timeout=60.0, force_local=True)
+        else:
+            content = llm.chat_smart(msgs, role="extract", local_model=model, cfg=cfg,
+                                     format_json=True, timeout=60.0).get("text", "")
         data = _parse_chat_response(content)
     except Exception as exc:
         log.warning("action-extraction failed: %s", exc)

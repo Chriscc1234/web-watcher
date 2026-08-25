@@ -865,19 +865,25 @@ def _convene_council(
 
     log.info("Get-unstuck pass for: %s", problem[:60])
     try:
-        payload = {
-            "model":    council_model,
-            "messages": [
-                {"role": "system", "content": _UNSTUCK_SYSTEM},
-                {"role": "user",   "content": situation},
-            ],
-            "stream": False,
-            "format": "json",
-        }
-        with _gpu_slot(), httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
-            r = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            r.raise_for_status()
-        raw = r.json()["message"]["content"]
+        from web_watcher import llm
+        messages = [
+            {"role": "system", "content": _UNSTUCK_SYSTEM},
+            {"role": "user",   "content": situation},
+        ]
+
+        def _usable(text: str) -> bool:
+            try:
+                d = json.loads(llm._extract_json_text(text))
+                return isinstance(d, dict) and bool(str(d.get("action", "")).strip())
+            except Exception:
+                return False
+
+        # Escalating a FAILURE is free of volume risk by construction — this only fires when the
+        # local agent is already stuck, so local has demonstrably lost. chat_smart takes the local
+        # GPU slot itself, so DON'T wrap it in _gpu_slot() (that same lock isn't reentrant → a
+        # nested acquire would deadlock the sweep).
+        raw = llm.chat_smart(messages, role="stuck", local_model=council_model, cfg=None,
+                             format_json=True, timeout=OLLAMA_TIMEOUT, validate=_usable).get("text") or "{}"
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:

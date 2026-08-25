@@ -244,3 +244,54 @@ def test_unknown_group_action_and_unknown_owner(group_app):
     assert client.post("/api/owners/action", json={"owner": "555", "action": "nope"}).status_code == 400
     r = client.post("/api/owners/action", json={"owner": "nobody", "action": "stop"}).json()
     assert r["ok"] is True and r["changed"] == 0
+
+
+# ── "stop my watches" has to actually stop them ──────────────────────────────────
+# Live: the bot replied "Stoping all 2 of your watches" and both kept running. Stopping a
+# per-watch loop is a no-op whenever the orchestrator is driving — it owns every ENABLED
+# continuous watch and sweeps it again on the next pass. `enabled` is the lever that works in
+# both execution modes, and it's the state the Active/Inactive lists already show.
+
+@pytest.fixture()
+def stop_app(monkeypatch):
+    cfg = AppConfig(watches=[
+        Watch(name="Boats", urls=["https://x"], instruction="boats", interval_minutes=30,
+              mode="continuous", enabled=True, owner="555"),
+        Watch(name="Scheduled one", urls=["https://y"], instruction="cars", interval_minutes=30,
+              enabled=True, owner="555"),
+    ])
+    import web_watcher.config as C
+    monkeypatch.setattr(C, "load", lambda: cfg)
+    monkeypatch.setattr(C, "save", lambda c: None)
+    return TestClient(create_app(MagicMock())), cfg
+
+
+def _w(cfg, name):
+    return next(x for x in cfg.watches if x.name == name)
+
+
+def test_stopping_a_continuous_watch_disables_it(stop_app):
+    client, cfg = stop_app
+    r = client.post("/api/watches/Boats/action", json={"action": "stop"}).json()
+    assert r["ok"] is True and r["enabled"] is False
+    assert _w(cfg, "Boats").enabled is False          # the driver will not pick it up again
+
+
+def test_stopping_a_scheduled_watch_still_disables_it(stop_app):
+    client, cfg = stop_app
+    client.post("/api/watches/Scheduled one/action", json={"action": "stop"})
+    assert _w(cfg, "Scheduled one").enabled is False
+
+
+def test_starting_it_again_turns_it_back_on(stop_app):
+    client, cfg = stop_app
+    client.post("/api/watches/Boats/action", json={"action": "stop"})
+    client.post("/api/watches/Boats/action", json={"action": "start"})
+    assert _w(cfg, "Boats").enabled is True
+
+
+def test_stop_is_idempotent(stop_app):
+    client, cfg = stop_app
+    client.post("/api/watches/Boats/action", json={"action": "stop"})
+    assert client.post("/api/watches/Boats/action", json={"action": "stop"}).json()["ok"] is True
+    assert _w(cfg, "Boats").enabled is False

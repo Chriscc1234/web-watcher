@@ -750,13 +750,18 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             # the caller can tell the user to resume the master switch first.
             return {"ok": True, "name": watch_name, "action": action, "paused": manager.is_paused()}
         if action in ("disable", "stop"):
-            if action == "stop" and continuous:
-                bg.add_task(manager.stop_continuous, watch_name)     # transient: stop the loop now
-            elif w.enabled:
-                w.enabled = False                                    # scheduled: disable to stop it
+            # "Stop" has to actually stop it. Stopping a per-watch loop is a no-op whenever the
+            # orchestrator is driving — it owns every ENABLED continuous watch and simply sweeps
+            # it again on the next pass — so the bot could report "stopped all 2 of your watches"
+            # while both kept running. `enabled` is the lever that works in BOTH execution modes,
+            # and it's the state the Active/Inactive lists already show.
+            if continuous:
+                bg.add_task(manager.stop_continuous, watch_name)     # drop any per-watch loop now
+            if w.enabled:
+                w.enabled = False
                 save(cfg)
                 bg.add_task(manager.reload_scheduler)
-            return {"ok": True, "name": watch_name, "action": action}
+            return {"ok": True, "name": watch_name, "action": action, "enabled": False}
         raise HTTPException(400, detail=f"Unknown watch action {action!r}")
 
     @app.post("/api/owners/action")
@@ -2259,6 +2264,25 @@ def _is_lookup_request(text: str) -> bool:
     return bool(_LOOKUP_RE.search(t))
 
 
+# Fill-in-the-blank scaffolding a small model produces when asked to list things it was about to
+# be handed: bracketed slots ("[Boat Title]", "[Link to Listing]") and masked numbers ("$XX,XXX").
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?:[A-Z][\w' ]{2,28}|link[^\]]{0,20}|url[^\]]{0,20}|title[^\]]{0,20}|"
+    r"price[^\]]{0,20}|description[^\]]{0,20})\]"
+    r"|\$\s?X[X,\.]*X"
+    r"|\bxx+[,\.]?xx+\b",
+    re.I)
+
+
+def _looks_like_a_blank_template(text: str) -> bool:
+    """True when a reply is a listing template with the values left blank rather than an answer.
+
+    Needs SEVERAL markers: one bracketed phrase is ordinary writing ("[see below]"), a repeated
+    pattern of them is scaffolding. Being strict matters — a real reply must never be thrown away
+    and rewritten."""
+    return len(_PLACEHOLDER_RE.findall(text or "")) >= 3
+
+
 def _lookup_limit(text: str, default: int = 10) -> int:
     """'top 20' / 'show me 5' → that many. Bounded so a stray number can't dump the whole DB."""
     m = re.search(r"\b(?:top|first|best|show me)\s+(\d{1,6})\b", text or "", re.I)
@@ -3646,6 +3670,17 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                     watch_actions = [{"action": act, "name": w.name} for w in mine] or None
                     message = (f"{act.title()}ing your {len(watch_actions)} watch(es)."
                                if watch_actions else "You don't have any watches yet.")
+
+        # The model sometimes answers "show me the matches" by inventing a BLANK TEMPLATE —
+        # "**Title:** [Boat Title] … **Price:** $XX,XXX … **URL:** [Link to Listing]" — and the
+        # real listings then arrive underneath it. The reader gets a screenful of fill-in-the-
+        # blanks before anything useful. When we have the actual rows, that scaffolding is
+        # replaced with a plain lead-in; the listings themselves are the answer.
+        if listings and _looks_like_a_blank_template(message):
+            what = (lq or {}).get("watch") or "your watches"
+            message = f"Here {'is' if len(listings) == 1 else 'are'} " \
+                      f"{len(listings)} match{'' if len(listings) == 1 else 'es'} for “{what}”:"
+            log.info("chat: replaced a placeholder listing template with the real rows")
 
         return {
             "message":           message,

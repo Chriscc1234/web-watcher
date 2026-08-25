@@ -257,3 +257,26 @@ def test_what_the_model_did_decide_is_respected(monkeypatch):
 
 def test_ordinary_chat_does_not_trigger_a_lookup(monkeypatch):
     assert _lookup_turn(monkeypatch, "thanks!", None, _one_watch_cfg()) == {}
+
+
+# ── a blank template is not an answer ────────────────────────────────────────────
+# Live: "show me a full list of the matches" was answered with fill-in-the-blanks —
+# "**Title:** [Boat Title] … **Price:** $XX,XXX … **URL:** [Link to Listing]" — with the real
+# listings arriving underneath it. A screenful of scaffolding before anything useful.
+
+def test_a_placeholder_template_is_recognised():
+    assert S._looks_like_a_blank_template(
+        "1. **Title:** [Boat Title]\n **Price:** $XX,XXX\n **URL:** [Link to Listing]") is True
+
+
+def test_real_prose_is_never_mistaken_for_a_template():
+    for good in ("Here are the 10 matches. The Sea Ray at $14,500 looks like the best value.",
+                 "I found 3 boats — a 1999 Hewscraft ($15,950), a Bayliner and a Reinell.",
+                 "Nothing new yet [I'll keep looking].",
+                 "You have two watches running."):
+        assert S._looks_like_a_blank_template(good) is False, good
+
+
+def test_one_bracketed_phrase_is_not_scaffolding():
+    """A single bracket is ordinary writing; a repeated pattern of them is a template."""
+    assert S._looks_like_a_blank_template("The best one is [see the list below].") is False

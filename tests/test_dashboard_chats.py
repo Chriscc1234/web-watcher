@@ -494,3 +494,51 @@ def test_a_real_lookup_still_works_after_the_restructure(monkeypatch):
     ran = _lookup_ran(monkeypatch, "show me the matches for boats", {}, cfg)
     assert ran["called"] is True
     assert ran["params"]["watch"] == "Anacortes Under 30' Motor Boats Watch"
+
+
+# ── the model gets an unambiguous run-state to repeat ────────────────────────────
+# Two answers in one session contradicted each other — "two watches running right now" (both were
+# OFF) and "all turned off". The model was inferring run-state from terse per-watch jargon
+# ("DISABLED, stopped") and guessing. It now gets a plain pre-computed STATUS line and plain
+# per-watch state ("OFF — not watching").
+
+def _ctx(watches, paused=False, running=None):
+    from unittest.mock import MagicMock
+    mgr = MagicMock()
+    mgr.is_paused.return_value = paused
+    mgr.get_job_info.return_value = [{"watch_name": n, "continuous_running": True}
+                                     for n in (running or [])]
+    return S._build_watches_context(AppConfig(watches=watches), mgr)
+
+
+def _off(name):
+    return Watch(name=name, urls=["https://x"], instruction="x", interval_minutes=30,
+                 mode="continuous", enabled=False)
+
+
+def _on(name):
+    return Watch(name=name, urls=["https://x"], instruction="x", interval_minutes=30,
+                 mode="continuous", enabled=True)
+
+
+def test_all_off_says_nothing_is_watching():
+    ctx = _ctx([_off("Boats"), _off("Cars")])
+    assert "ALL are turned OFF" in ctx and "nothing is being watched" in ctx
+    assert "OFF — not watching" in ctx
+    assert "are ON" not in ctx        # nothing is claimed to be on
+
+
+def test_some_on_is_counted_exactly():
+    ctx = _ctx([_on("Boats"), _off("Cars")], running=["Boats"])
+    assert "1 of 2 watch(es) are ON" in ctx
+
+
+def test_paused_master_switch_overrides_watch_state():
+    ctx = _ctx([_on("Boats")], paused=True, running=["Boats"])
+    assert "PAUSED" in ctx and "NOTHING is being watched" in ctx
+
+
+def test_a_disabled_watch_is_never_described_as_running():
+    ctx = _ctx([_off("Boats")])
+    boats = [ln for ln in ctx.splitlines() if "health:" in ln][0]
+    assert "OFF" in boats and "watching now" not in boats

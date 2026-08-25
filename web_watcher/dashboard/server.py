@@ -2758,9 +2758,15 @@ def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
     def _health_line(w) -> str:
         # Defensive: a DB/scheduler hiccup here must not 500 the whole assistant.
         try:
-            state = "enabled" if w.enabled else "DISABLED"
-            if w.mode == "continuous":
-                state += ", running" if job_map.get(w.name, {}).get("continuous_running") else ", stopped"
+            # Plain words, because the model reads "DISABLED, stopped" and still writes "running".
+            # A watch that's turned off is NOT watching, full stop — say exactly that.
+            if not w.enabled:
+                state = "OFF — not watching (turned off)"
+            elif w.mode == "continuous":
+                sweeping = job_map.get(w.name, {}).get("continuous_running")
+                state = "ON — watching now" if sweeping else "ON — watching (idle between sweeps)"
+            else:
+                state = "ON — watching (scheduled)"
             last = get_last_run(w.name)
             if not last:
                 health = "never run"
@@ -2805,7 +2811,31 @@ def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
         return "\n".join(lines)
 
     scoped = _watches_for_owner(cfg, owner)
-    body = (
+
+    # A pre-computed status line the model can read back verbatim, instead of inferring run-state
+    # from per-watch detail (which it got wrong — calling turned-off watches "running"). Facts,
+    # counted here, stated plainly.
+    on = sum(1 for w in scoped if w.enabled)
+    paused = False
+    try:
+        paused = manager.is_paused()
+    except Exception:
+        pass
+    if scoped:
+        if paused:
+            status = (f"STATUS: the master switch is PAUSED, so NOTHING is being watched right now "
+                      f"(you have {len(scoped)} watch(es); {on} would be on if resumed).")
+        elif on == 0:
+            status = (f"STATUS: {len(scoped)} watch(es) exist but ALL are turned OFF — nothing is "
+                      f"being watched right now.")
+        else:
+            status = (f"STATUS: {on} of {len(scoped)} watch(es) are ON and being watched right now"
+                      + (f"; {len(scoped) - on} are turned off." if len(scoped) > on else "."))
+        status += " Read this back when asked what's running; do NOT call a running watch 'off' or an off one 'running'.\n\n"
+    else:
+        status = ""
+
+    body = status + (
         ("EXISTING WATCHES: none assigned to you yet — ask the owner to assign you some in the "
          "Web Watcher app." if owner else "EXISTING WATCHES: none configured yet.") if not scoped else
         "EXISTING WATCHES (edit one via action:\"update\"; manage via watch_actions; "

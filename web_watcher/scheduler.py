@@ -1113,7 +1113,8 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
     try:
         from web_watcher.notify import send_baseline_briefing
         send_baseline_briefing(watch.name, len(batch), len(matched_keys), cfg.notifications,
-                               owner_chat_id=getattr(watch, "owner", "") or "")
+                               owner_chat_id=getattr(watch, "owner", "") or "",
+                               instruction=watch.instruction or "")
     except Exception as exc:
         log.debug("baseline briefing not sent for %r: %s", watch.name, exc)
 

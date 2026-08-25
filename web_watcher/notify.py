@@ -467,8 +467,38 @@ def watch_for_brief(token: str) -> str:
         return ""
 
 
+# Boilerplate the watch's own wording tends to start with, and the location clause at the end.
+# Stripping both leaves the THING being looked for, which is what makes a good example ask.
+_ASK_LEAD_RE = re.compile(
+    r"^\s*(please\s+)?(look(ing)?\s+(for|out\s+for)|watch(ing)?\s+for|search(ing)?\s+for|"
+    r"find\s+(me\s+)?|monitor(ing)?|check\s+for|keep\s+an\s+eye\s+out\s+for)\b[:,]?\s*", re.I)
+_ASK_LOC_RE = re.compile(
+    r"\s*\b(with)?in\s+\d+\s*(mi|miles?|km)\b.*$|\s*\b(near|around|close\s+to)\b\s+[^,.]*$", re.I)
+_ASK_TAIL_RE = re.compile(r"[.\s]+$")
+
+
+def example_ask(watch_name: str, instruction: str = "") -> str:
+    """A sample question phrased in THIS watch's own words — "show me the under 30-foot motor
+    boats with outboard motors" rather than a generic stand-in that mentions boats to someone
+    watching for trucks.
+
+    Built from the watch's instruction with the boilerplate lead-in and the location clause
+    removed, because "within 150 miles of Anacortes" is not what you'd type when asking to see
+    what turned up. Falls back to the watch's name, then to a plain generic ask."""
+    for source in (instruction or "", watch_name or ""):
+        phrase = _ASK_LEAD_RE.sub("", source.strip())
+        phrase = _ASK_LOC_RE.sub("", phrase)
+        phrase = _ASK_TAIL_RE.sub("", phrase).strip()
+        # A watch NAME often ends in the word "Watch" — "…Motor Boats Watch" reads badly here.
+        phrase = re.sub(r"\s+watch(es)?$", "", phrase, flags=re.I).strip()
+        words = phrase.split()
+        if len(words) >= 2:
+            return "show me the " + " ".join(words[:8]).lower()
+    return "show me what you found"
+
+
 def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: NotificationsConfig,
-                           owner_chat_id: str = "") -> bool:
+                           owner_chat_id: str = "", instruction: str = "") -> bool:
     """One message: what the watch just banked, and what you can do about it."""
     t = cfg.telegram
     chat_id = str(owner_chat_id or "").strip() or t.chat_id
@@ -488,7 +518,8 @@ def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: Notifi
     if matched:
         buttons = [[{"text": "⭐ Show top 10", "callback_data": f"{_TOP_PREFIX}{tok}:10"},
                     {"text": "Show top 20", "callback_data": f"{_TOP_PREFIX}{tok}:20"}]]
-        text += "\n\nWant them now? Tap below — or just ask me, e.g. “show me the boats with outboards”."
+        text += ("\n\nWant them now? Tap below — or just ask me, "
+                 f"e.g. “{example_ask(watch_name, instruction)}”.")
 
     body: dict = {"chat_id": chat_id, "text": text}
     if buttons:

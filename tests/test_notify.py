@@ -428,3 +428,45 @@ def test_a_briefing_token_cannot_collide_with_a_vet_token(monkeypatch, tmp_path)
     tok = notify.remember_brief("https://x/1")           # same string, different kind
     assert notify.watch_for_brief(tok) == "https://x/1"
     assert notify.vet_entry_for(notify.vet_token("https://x/1")).get("url") == "https://x/1"
+
+
+# ── the example ask is in THIS watch's words ─────────────────────────────────────
+# A briefing for a truck watch that suggests "show me the boats with outboards" reads like it
+# wasn't about your watch at all.
+
+def test_example_ask_uses_the_watch_instruction():
+    from web_watcher.notify import example_ask
+    got = example_ask("Anacortes Under 30' Motor Boats Watch",
+                      "Look for under 30-foot motor boats with outboard motors within 150 miles of Anacortes.")
+    assert got == "show me the under 30-foot motor boats with outboard motors"
+
+
+def test_example_ask_drops_the_location_clause():
+    from web_watcher.notify import example_ask
+    got = example_ask("Cars", "Find manual transmission cars under $8000 within 100 miles of Anacortes")
+    assert "miles" not in got and "anacortes" not in got
+    assert "manual transmission cars" in got
+
+
+def test_example_ask_falls_back_to_the_watch_name():
+    from web_watcher.notify import example_ask
+    assert example_ask("Thrive Workwear Pants Restock", "") == "show me the thrive workwear pants restock"
+
+
+def test_example_ask_strips_a_trailing_watch_from_the_name():
+    from web_watcher.notify import example_ask
+    assert not example_ask("Motor Boats Watch", "").endswith("watch")
+
+
+def test_example_ask_has_a_generic_last_resort():
+    from web_watcher.notify import example_ask
+    assert example_ask("W", "") == "show me what you found"
+
+
+def test_the_briefing_example_is_watch_specific(monkeypatch, tmp_path):
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    sent = _capture(monkeypatch)
+    notify.send_baseline_briefing("Boats Watch", 189, 10, _tg_cfg(),
+                                  instruction="Look for under 30-foot motor boats with outboard motors")
+    assert "under 30-foot motor boats with outboard motors" in sent["text"]

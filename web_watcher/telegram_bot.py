@@ -640,6 +640,14 @@ class TelegramBridge:
         and without parse_mode our own tags would print literally — which is what happened to the
         settings block's <i>…</i>."""
         target = chat_id or self.chat_id       # reply to the sender; fall back to the alert chat
+        # The model writes Markdown ("**Anacortes Cars Watch**") because that is what chat models
+        # do. Sent as plain text those asterisks print literally; sent as Markdown, one stray
+        # underscore in a URL breaks the whole message. So we convert the few things it actually
+        # uses into Telegram HTML and escape the rest — the text renders the way it was meant to,
+        # and nothing the model writes can break the parser.
+        if not html:
+            text = _markdown_to_telegram_html(text)
+            html = True
         chunks = _chunk(text, _MSG_LIMIT)
         for i, chunk in enumerate(chunks):
             body = {"chat_id": target, "text": chunk, "disable_web_page_preview": True}
@@ -658,6 +666,32 @@ class TelegramBridge:
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-tested)
 # ---------------------------------------------------------------------------
+
+_MD_BOLD_RE   = re.compile(r"\*\*(.+?)\*\*", re.S)
+_MD_ITALIC_RE = re.compile(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])")
+_MD_CODE_RE   = re.compile(r"`([^`\n]+)`")
+_MD_LINK_RE   = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+
+def _markdown_to_telegram_html(text: str) -> str:
+    """The Markdown a chat model actually produces → Telegram HTML.
+
+    Order matters: escape FIRST so any < & > in the prose is inert, then re-introduce only the
+    tags we intend. Doing it the other way round lets a stray angle bracket in a listing title
+    break the message — and Telegram rejects the whole send, so the reply is simply lost.
+
+    Only **bold**, *italic*, `code` and [text](url) are converted; everything else is left as
+    written. Under-converting is safe, over-converting loses messages."""
+    import html as _h
+    if not text:
+        return ""
+    out = _h.escape(text, quote=False)
+    out = _MD_LINK_RE.sub(lambda m: f'<a href="{_h.escape(m.group(2), quote=True)}">{m.group(1)}</a>', out)
+    out = _MD_CODE_RE.sub(lambda m: "<code>" + m.group(1) + "</code>", out)
+    out = _MD_BOLD_RE.sub(lambda m: "<b>" + m.group(1) + "</b>", out)
+    out = _MD_ITALIC_RE.sub(lambda m: "<i>" + m.group(1) + "</i>", out)
+    return out
+
 
 def _format_listings(rows: list, limit: int = 15) -> str:
     """A compact, scannable list of finds for a phone: rating, title, price, tappable link.

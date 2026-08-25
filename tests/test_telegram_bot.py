@@ -330,8 +330,13 @@ def test_html_blocks_are_sent_with_parse_mode(monkeypatch):
                         lambda url, **k: posts.append(k.get("json") or {}) or _R())
     b._send("<b>Your settings</b>", "111", html=True)
     assert posts[-1].get("parse_mode") == "HTML"
+    assert posts[-1]["text"] == "<b>Your settings</b>"      # ours is already correct — untouched
+
+    # Model prose is CONVERTED (its Markdown rendered) and escaped, so it goes out as HTML too
+    # but still cannot break the parser — the escaping happens before any tag is introduced.
     b._send("plain model prose with < and & in it", "111")
-    assert "parse_mode" not in posts[-1]          # model prose stays plain (can't break the parser)
+    assert posts[-1].get("parse_mode") == "HTML"
+    assert posts[-1]["text"] == "plain model prose with &lt; and &amp; in it"
 
 
 def test_settings_reply_is_sent_as_html(monkeypatch):
@@ -417,3 +422,60 @@ def test_a_normal_verdict_restates_the_saved_facts():
     })
     assert "★★★★☆" in out and "Looks solid." in out
     assert "1998 Toyota Tacoma" in out and "Facebook Marketplace" in out
+
+
+# ── the model writes Markdown; Telegram doesn't read it ──────────────────────────
+# From the real log: "1. **Anacortes Manual Transmission Cars Watch** - ..." reached the phone
+# with the asterisks printed. Sending as Markdown instead is not the fix — one underscore in a
+# listing URL breaks the parse and Telegram drops the WHOLE message. Convert, escape, send HTML.
+
+def _md(text):
+    from web_watcher.telegram_bot import _markdown_to_telegram_html
+    return _markdown_to_telegram_html(text)
+
+
+def test_markdown_bold_and_italic_become_html():
+    assert _md("You have **two watches**") == "You have <b>two watches</b>"
+    assert _md("the *boats* one") == "the <i>boats</i> one"
+
+
+def test_angle_brackets_in_a_listing_title_are_escaped_not_sent_raw():
+    """An unescaped < in a title makes Telegram reject the send — the reply is simply lost."""
+    assert _md("1998 Toyota <Tacoma> & trailer") == "1998 Toyota &lt;Tacoma&gt; &amp; trailer"
+
+
+def test_multiplication_and_snake_case_are_left_alone():
+    # A watch about "5*3 sheets" or a URL slug must not turn into italics.
+    assert _md("price is 5*3 and a_b_c stays") == "price is 5*3 and a_b_c stays"
+
+
+def test_markdown_links_become_tappable():
+    assert _md("See [the listing](https://x.com/a_b?c=1)") == \
+        'See <a href="https://x.com/a_b?c=1">the listing</a>'
+
+
+def test_conversion_is_safe_on_empty_and_plain_text():
+    assert _md("") == ""
+    assert _md("just a normal sentence") == "just a normal sentence"
+
+
+def test_a_reply_is_converted_before_sending(monkeypatch):
+    """The bridge must not send raw model prose — that's how the asterisks got through."""
+    from web_watcher.telegram_bot import TelegramBridge
+    sent = {}
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **kw: sent.update(kw.get("json") or {}) or _Ok())
+    b = TelegramBridge("tok", "111", "http://127.0.0.1:7878")
+    b._send("You have **two watches**", "111")
+    assert sent["text"] == "You have <b>two watches</b>"
+    assert sent["parse_mode"] == "HTML"
+
+
+class _Ok:
+    status_code = 200
+
+    def json(self):
+        return {"ok": True}
+
+    def raise_for_status(self):
+        pass

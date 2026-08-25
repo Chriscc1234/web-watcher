@@ -2226,6 +2226,50 @@ def _is_settings_request(text: str) -> bool:
     return not re.search(r"\b(change|set|update|edit|turn|make)\b", t, re.I)
 
 
+# "Show me the match" must SHOW the match. The 14b's extractor keeps classifying this as ordinary
+# conversation, so the reply describes the watch's CRITERIA back at you — "it's an under 30-foot
+# motor boat, priced within $15,000" — which is what was asked FOR, not what was found. Same class
+# of miss as settings and start/stop, so it gets the same treatment: decided in code, not by a
+# small model that has already proved it gets this wrong.
+_LOOKUP_RE = re.compile(
+    r"\b("
+    r"show\s+(me|us|it|them)?|show\s+me\s+the|"
+    r"list\s+(them|it|the|out|all)|let'?s\s+see|lemme\s+see|"
+    r"what\s+(did|have)\s+(you|it|we)\s+(find|found|got)|"
+    r"what'?s\s+(it|the\s+watch)?\s*found|"
+    r"any(thing)?\s+(new|on|from|for|good|yet)|got\s+anything|"
+    r"the\s+(match|matches|listing|listings|find|finds|hits?|results?)\b|"
+    r"top\s+\d+|best\s+(ones?|matches|listings|finds)"
+    r")", re.I)
+
+# Words that mean "make/change a watch", never "show me what you found". A message with these is
+# not a lookup no matter what else it says, so "show me how to set up a watch" can't hijack.
+_NOT_LOOKUP_RE = re.compile(
+    r"\b(set\s*up|create|make\s+a\s+(new\s+)?watch|add\s+a\s+watch|start\s+watching|"
+    r"delete|remove|pause|stop|resume|change|edit|update)\b", re.I)
+
+
+def _is_lookup_request(text: str) -> bool:
+    """True when the person is asking to SEE what's been found. Deliberately conservative: a
+    false positive shows listings nobody asked for, which is far less costly than the current
+    false negative (describing the search criteria instead of the results)."""
+    t = (text or "").strip()
+    if not t or _NOT_LOOKUP_RE.search(t):
+        return False
+    return bool(_LOOKUP_RE.search(t))
+
+
+def _lookup_limit(text: str, default: int = 10) -> int:
+    """'top 20' / 'show me 5' → that many. Bounded so a stray number can't dump the whole DB."""
+    m = re.search(r"\b(?:top|first|best|show me)\s+(\d{1,6})\b", text or "", re.I)
+    if m:
+        try:
+            return max(1, min(int(m.group(1)), 30))
+        except ValueError:
+            pass
+    return default
+
+
 def _fmt_hours(h: float) -> str:
     if not h:
         return "off"
@@ -3439,6 +3483,20 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
 
         listings = None
         lq = data.get("listing_query")
+        # Safety net: the person plainly asked to SEE what was found and the extractor didn't
+        # produce a lookup. Build one ourselves, aimed at the watch under discussion (the focus),
+        # so "show me the one match" returns the actual listing instead of a description of the
+        # search. Only fills a GAP — a lookup the model did produce is left alone.
+        if not isinstance(lq, dict) and _is_lookup_request(latest := _latest_user_text(conv)):
+            target = focus if (focus and focus != PENDING_CREATE) else ""
+            if not target:
+                mine = _watches_for_owner(cfg, owner)
+                if len(mine) == 1:
+                    target = mine[0].name           # only one watch — no ambiguity to resolve
+            if target:
+                lq = {"watch": target, "matched_only": True, "limit": _lookup_limit(latest)}
+                log.info("chat: no lookup from the model but the user asked to see finds — "
+                         "querying %r", target)
         if isinstance(lq, dict):
             # Scope a Telegram person's "what have you found" to THEIR watches: a lookup must
             # name a watch they own, otherwise it could surface everyone's finds. Desktop is open.

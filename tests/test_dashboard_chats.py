@@ -178,3 +178,35 @@ def test_a_thread_with_watches_is_still_listed_when_empty(isolated):
     cfg = AppConfig(watches=[Watch(name="Theirs", urls=["https://x"], instruction="x",
                                    interval_minutes=30, owner="555")])
     assert any("555" in t["label"] for t in S._list_conversation_threads(cfg))
+
+
+# ── "show me the match" must SHOW the match ──────────────────────────────────────
+# From the real log: "Show me the one match" → "It's an under 30-foot motor boat with an outboard
+# motor, priced reasonably within $15,000." That's the watch's CRITERIA read back — what was
+# asked for, not what was found. The 14b's extractor keeps missing this intent, so it's decided
+# in code, like settings and start/stop before it.
+
+def test_asking_to_see_finds_is_recognised():
+    for msg in ["show me the one match", "Show me the matches", "list them",
+                "what did you find?", "anything on the boats?", "show me the top 10",
+                "let's see the listings", "any new results?", "show me the best ones"]:
+        assert S._is_lookup_request(msg) is True, msg
+
+
+def test_making_or_changing_a_watch_is_not_a_lookup():
+    for msg in ["show me how to set up a watch", "create a watch for boats",
+                "stop the boats watch", "change the price to 5000",
+                "delete the truck watch", "make a new watch"]:
+        assert S._is_lookup_request(msg) is False, msg
+
+
+def test_ordinary_chat_is_not_a_lookup():
+    for msg in ["hi", "thanks", "how are you", "settings", "yes"]:
+        assert S._is_lookup_request(msg) is False, msg
+
+
+def test_lookup_limit_reads_the_number_asked_for():
+    assert S._lookup_limit("show me the top 20") == 20
+    assert S._lookup_limit("show me 5") == 5
+    assert S._lookup_limit("show me the matches") == 10        # default
+    assert S._lookup_limit("top 9999") == 30                   # bounded — no whole-DB dump

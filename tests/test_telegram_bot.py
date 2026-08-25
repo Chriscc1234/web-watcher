@@ -207,6 +207,77 @@ def test_format_verdict_renders_stars_risk_and_flags():
     assert "★★☆☆☆" in out and "high scam risk" in out and "no photos" in out
 
 
+# ── the "top N" list: a photo card + a Vet button per listing ────────────────────
+
+def test_top_n_card_with_an_image_sends_a_photo_with_a_vet_button(monkeypatch, tmp_path):
+    """A picture AND a per-listing vet control need one message per listing — Telegram won't
+    attach buttons to a multi-photo album. The card is a sendPhoto with a vet: button."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    b = _bridge()
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: calls.append((url, k)) or _Resp())
+    monkeypatch.setattr(b, "_send", lambda *a, **k: pytest.fail("a photo card must not fall back"))
+    row = {"url": "https://skagit.craigslist.org/boo/1.html", "title": "Sea Ray 190",
+           "price_text": "$9,000", "source": "craigslist",
+           "image": "https://images.craigslist.org/x.jpg", "rating": 4}
+    b._send_listing_card(row, "12345")
+
+    photo = [c for c in calls if "sendPhoto" in c[0]]
+    assert len(photo) == 1
+    body = photo[0][1]["json"]
+    assert body["photo"] == "https://images.craigslist.org/x.jpg"
+    assert "Sea Ray 190" in body["caption"] and "$9,000" in body["caption"]
+    kb = body["reply_markup"]["inline_keyboard"][0]
+    vet = next(btn for btn in kb if btn.get("callback_data", "").startswith("vet:"))
+    assert notify.vet_url_for(vet["callback_data"][4:]) == row["url"]     # token → this listing
+
+
+def test_top_n_card_without_an_image_falls_back_to_text_but_keeps_vet(monkeypatch, tmp_path):
+    """No picture must never cost the vet control — a text card still carries the Vet button."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_send",
+                        lambda t, chat_id="", html=False, buttons=None: sent.append((t, buttons)))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda *a, **k: pytest.fail("no photo call without an image"))
+    row = {"url": "https://x/boo/2.html", "title": "Bayliner 175",
+           "price_text": "$7,500", "source": "craigslist"}
+    b._send_listing_card(row, "12345")
+    assert len(sent) == 1
+    text, buttons = sent[0]
+    assert "Bayliner 175" in text
+    assert any(btn.get("callback_data", "").startswith("vet:") for btn in buttons[0])
+
+
+def test_top_request_sends_a_header_then_one_card_per_listing(monkeypatch, tmp_path):
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    monkeypatch.setattr(notify, "watch_for_brief", lambda tok: "Boats Watch")
+    b = _bridge()
+    rows = [{"url": f"https://x/{i}", "title": f"Boat {i}"} for i in range(3)]
+
+    class _R:
+        def raise_for_status(self): pass
+        def json(self): return rows
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.get", lambda *a, **k: _R())
+    monkeypatch.setattr("web_watcher.telegram_bot.time.sleep", lambda s: None)
+    headers, cards = [], []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: headers.append(t))
+    monkeypatch.setattr(b, "_send_listing_card", lambda row, chat: cards.append(row))
+    b._handle_top_request("sometoken:10", "12345")
+    assert len(headers) == 1 and "Top 3" in headers[0]
+    assert [r["title"] for r in cards] == ["Boat 0", "Boat 1", "Boat 2"]
+
+
 # ── proactive check-ins (heartbeats) ─────────────────────────────────────────────
 
 def test_checkin_hours_configures_the_interval():

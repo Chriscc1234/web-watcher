@@ -456,8 +456,65 @@ class TelegramBridge:
         if not rows:
             self._send(f"Nothing recorded for “{name}” yet.", chat)
             return
-        header = f"⭐ Top {len(rows)} from “{name}”:\n\n"
-        self._send(header + _format_listings(rows, limit=limit), chat)
+        # One message per listing — a small thumbnail, a compact caption, and its own 🔍 Vet
+        # button. Telegram allows a photo OR buttons on a message, but not many photos WITH
+        # buttons, so a per-listing card is the only shape that gives BOTH a picture and a
+        # tap-to-vet control on every result. A single combined list could show neither.
+        self._send(f"⭐ Top {len(rows)} from “{name}” — tap 🔍 to vet any of them:", chat)
+        for i, row in enumerate(rows[:limit]):
+            self._send_listing_card(row, chat)
+            if i < len(rows[:limit]) - 1:
+                time.sleep(0.3)          # stay under Telegram's per-chat burst limit; keep order
+
+    def _send_listing_card(self, row: dict, chat: str) -> None:
+        """One top-N listing as its own message: thumbnail + compact caption + 🔗 Open / 🔍 Vet.
+        Falls back to a text card (still with the Vet button) when there's no image or Telegram
+        can't fetch it — a missing picture must never cost the vet control."""
+        import html as _h
+        from web_watcher.notify import remember_vet_link, vet_token, source_label
+        if not isinstance(row, dict):
+            return
+        url    = str(row.get("url") or "").strip()
+        title  = str(row.get("title") or "(listing)").strip()[:90]
+        price  = str(row.get("price_text") or row.get("price") or "").strip()
+        source = str(row.get("source") or "").strip()
+        image  = str(row.get("image") or "").strip()
+        try:
+            rating = int(row.get("rating") or 0)
+        except (TypeError, ValueError):
+            rating = 0
+        head = ("★" * rating + " ") if rating else ""
+        cap  = f"{head}<b>{_h.escape(title)}</b>"
+        bits = [b for b in (_h.escape(price) if price else "",
+                            _h.escape(source_label(source)) if source else "") if b]
+        if bits:
+            cap += "\n" + " · ".join(bits)
+
+        buttons = None
+        if url.startswith("http"):
+            remember_vet_link(url, title)         # so the tapped button resolves back to this URL
+            buttons = [[{"text": "🔗 Open", "url": url},
+                        {"text": "🔍 Vet", "callback_data": f"vet:{vet_token(url)}"}]]
+
+        # Photo-card when we have a fetchable image and the caption fits Telegram's 1024 cap.
+        if image.startswith("http") and len(cap) <= 1024:
+            body = {"chat_id": chat, "photo": image, "caption": cap, "parse_mode": "HTML"}
+            if buttons:
+                body["reply_markup"] = {"inline_keyboard": buttons}
+            try:
+                r = httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendPhoto",
+                               json=body, timeout=20.0)
+                if r.status_code == 200:
+                    return
+                log.info("Telegram: top-N photo card HTTP %s — text instead", r.status_code)
+            except Exception as exc:
+                log.info("Telegram: top-N photo card failed (%s) — text instead", exc)
+
+        # Text fallback keeps the Vet button so every result is still vettable.
+        text = cap
+        if url.startswith("http"):
+            text += f'\n<a href="{_h.escape(url, quote=True)}">open</a>'
+        self._send(text, chat, html=True, buttons=buttons)
 
     def _answer_callback(self, cb_id, text: str = "") -> None:
         """Acknowledge the tap so Telegram stops the button's spinner."""

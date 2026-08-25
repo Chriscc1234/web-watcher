@@ -248,7 +248,7 @@ def test_top_n_card_falls_back_to_text_when_the_image_cant_be_fetched(monkeypatc
     still carries the Vet button."""
     from web_watcher import notify
     monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
-    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: None)           # fetch fails
+    monkeypatch.setattr(notify, "image_bytes_for_listing", lambda img, link="": None)  # no picture
     b = _bridge()
     sent = []
     monkeypatch.setattr(b, "_send",

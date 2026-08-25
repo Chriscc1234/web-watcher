@@ -368,7 +368,7 @@ def test_alert_uploads_the_listing_photo_bytes_not_a_url(monkeypatch):
     from web_watcher import notify
     monkeypatch.setattr(notify, "_known_facts",
                         lambda url: {"source": "craigslist.org", "image": "https://img/x.jpg"})
-    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: b"JPEGDATA")
+    monkeypatch.setattr(notify, "image_bytes_for_listing", lambda img, link="": b"JPEGDATA")
     calls = []
 
     class _Resp:
@@ -397,7 +397,7 @@ def test_alert_falls_back_to_text_when_the_photo_cant_be_downloaded(monkeypatch)
     from web_watcher import notify
     monkeypatch.setattr(notify, "_known_facts",
                         lambda url: {"source": "craigslist.org", "image": "https://img/dead.jpg"})
-    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: None)
+    monkeypatch.setattr(notify, "image_bytes_for_listing", lambda img, link="": None)
     calls = []
 
     class _Resp:
@@ -416,6 +416,82 @@ def test_alert_falls_back_to_text_when_the_photo_cant_be_downloaded(monkeypatch)
     assert ok is True
     assert any("sendMessage" in c[0] for c in calls)         # text still went out
     assert not any("sendPhoto" in c[0] for c in calls)       # no photo attempted
+
+
+def test_image_recovers_from_og_image_when_the_scraper_stored_none(monkeypatch):
+    """Agent sweeps miss craigslist's lazy-loaded card images, so a match can be stored with no
+    thumbnail. The alert then recovers the picture from the listing page's og:image."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_known_facts", lambda url: {"source": "craigslist.org"})  # no image
+    seen = {}
+
+    def _fake_og(listing_url):
+        seen["og_called_with"] = listing_url
+        return "https://images.craigslist.org/recovered_600x450.jpg"
+
+    monkeypatch.setattr(notify, "og_image_for", _fake_og)
+    monkeypatch.setattr(notify, "fetch_image_bytes",
+                        lambda u: b"RECOVERED" if "recovered" in u else None)
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, **kw):
+            calls.append((url, kw)); return _Resp()
+
+    monkeypatch.setattr(notify.httpx, "Client", _Client)
+    ok = send_telegram(_payload(_result(summary="★★★★☆ Boat", link="https://cl/view/d/boat/abc")),
+                       _cfg(email=False))
+    assert ok is True
+    assert seen["og_called_with"] == "https://cl/view/d/boat/abc"   # recovered from THIS listing
+    photo = [c for c in calls if "sendPhoto" in c[0]]
+    assert len(photo) == 1 and photo[0][1]["files"]["photo"][1] == b"RECOVERED"
+
+
+def _og_client(text):
+    class _Resp:
+        def __init__(self): self.text = text
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url, **kw): return _Resp()
+
+    return _Client
+
+
+def test_og_image_parses_either_attribute_order(monkeypatch):
+    from web_watcher import notify
+    monkeypatch.setattr(notify.httpx, "Client", _og_client(
+        '<head><meta property="og:image" content="https://images.craigslist.org/a_600x450.jpg"></head>'))
+    assert notify.og_image_for("https://cl/view/d/x/1").endswith("a_600x450.jpg")
+    monkeypatch.setattr(notify.httpx, "Client", _og_client(
+        '<head><meta content="https://images.craigslist.org/b_600x450.jpg" property="og:image"></head>'))
+    assert notify.og_image_for("https://cl/view/d/x/1").endswith("b_600x450.jpg")
+
+
+def test_og_image_never_fetches_facebook(monkeypatch):
+    """FB pages are login-walled and we only ever touch FB as a human — never a background fetch."""
+    from web_watcher import notify
+
+    def _boom(**kw):
+        raise AssertionError("must not fetch a Facebook page for og:image")
+
+    monkeypatch.setattr(notify.httpx, "Client", _boom)
+    assert notify.og_image_for("https://www.facebook.com/marketplace/item/123") == ""
+
+
+def test_og_image_returns_blank_when_absent(monkeypatch):
+    from web_watcher import notify
+    monkeypatch.setattr(notify.httpx, "Client", _og_client("<head><title>no og here</title></head>"))
+    assert notify.og_image_for("https://cl/view/d/x/1") == ""
 
 
 # ── the baseline burst ───────────────────────────────────────────────────────────

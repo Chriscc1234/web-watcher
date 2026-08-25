@@ -473,7 +473,7 @@ class TelegramBridge:
         import html as _h
         import json as _json
         from web_watcher.notify import (remember_vet_link, vet_token, source_label,
-                                        fetch_image_bytes)
+                                        image_bytes_for_listing)
         if not isinstance(row, dict):
             return
         url    = str(row.get("url") or "").strip()
@@ -498,11 +498,12 @@ class TelegramBridge:
             buttons = [[{"text": "🔗 Open", "url": url},
                         {"text": "🔍 Vet", "callback_data": f"vet:{vet_token(url)}"}]]
 
-        # Photo-card when we have a fetchable image and the caption fits Telegram's 1024 cap.
-        # UPLOAD the bytes rather than handing Telegram the URL — its server-side fetch of
-        # craigslist image URLs 400s, so we fetch (proven to work) and send the bytes.
-        if image.startswith("http") and len(cap) <= 1024:
-            img = fetch_image_bytes(image)
+        # Photo-card when the caption fits Telegram's 1024 cap. UPLOAD the bytes rather than
+        # handing Telegram the URL — its server-side fetch of craigslist image URLs 400s, so we
+        # fetch (proven to work) and send the bytes. If the row has no stored thumbnail (agent
+        # sweeps miss lazy-loaded images), the helper recovers it from the listing's og:image.
+        if len(cap) <= 1024:
+            img = image_bytes_for_listing(image, url)
             if img:
                 data = {"chat_id": chat, "caption": cap, "parse_mode": "HTML"}
                 if buttons:

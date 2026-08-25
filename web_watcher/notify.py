@@ -96,14 +96,16 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
     try:
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
             sent = False
-            if photo.startswith("http") and len(text) <= _TG_CAPTION_MAX:
+            if len(text) <= _TG_CAPTION_MAX:
                 # UPLOAD THE BYTES, don't hand Telegram a URL. Telegram fetching a craigslist
                 # image URL itself returned 400 on every boat alert (the image is fine — curl
                 # gets it — but Telegram's own fetch was rejected), so every alert silently fell
                 # back to a text card with no picture. Fetching the bytes here (which we've proven
                 # works) and multipart-uploading them removes Telegram's fetch step entirely, the
-                # one thing that differed from the text send that always succeeded.
-                img = fetch_image_bytes(photo)
+                # one thing that differed from the text send that always succeeded. When the
+                # scraper stored no thumbnail (agent sweeps miss lazy-loaded images), the helper
+                # recovers it from the listing page's og:image.
+                img = image_bytes_for_listing(photo, payload.result.link)
                 if img:
                     data = {"chat_id": chat_id, "caption": text, "parse_mode": "HTML"}
                     if body.get("reply_markup"):
@@ -392,6 +394,52 @@ def fetch_image_bytes(url: str) -> bytes | None:
     except Exception as exc:
         log.info("Telegram: could not fetch listing image (%s) — no picture", exc)
         return None
+
+
+# og:image meta tag, in either attribute order (content-first or property-first).
+_OG_IMAGE_RES = (
+    re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.I),
+    re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', re.I),
+)
+
+
+def og_image_for(listing_url: str) -> str:
+    """Recover a listing's thumbnail from its page's og:image tag when the scraper stored none —
+    which happens on AGENT-harvested sweeps, where craigslist lazy-loads card images and the src
+    is still empty at extraction time. Every craigslist/OfferUp/eBay listing page carries an
+    og:image, so this reliably gets the photo the card didn't. Never touches Facebook (its pages
+    are login-walled and we navigate FB only as a human, never a background fetch). Returns "" on
+    anything odd; never raises."""
+    u = (listing_url or "").strip()
+    if not u.startswith("http") or "facebook.com" in u.lower():
+        return ""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebWatcher/1.0"}
+        with httpx.Client(timeout=TELEGRAM_TIMEOUT, follow_redirects=True) as c:
+            r = c.get(u, headers=headers)
+            r.raise_for_status()
+            head = r.text[:60_000]           # og tags live in <head>; don't scan a whole page
+            for rx in _OG_IMAGE_RES:
+                m = rx.search(head)
+                if m:
+                    img = _html.unescape(m.group(1).strip())
+                    return img if img.startswith("http") else ""
+    except Exception as exc:
+        log.info("Telegram: og:image lookup failed for %s (%s)", u[:80], exc)
+    return ""
+
+
+def image_bytes_for_listing(image_url: str, listing_url: str = "") -> bytes | None:
+    """The bytes of a listing's picture, ready to upload. Tries the stored thumbnail first; if
+    there isn't one (agent sweeps miss lazy-loaded images) or it can't be fetched, recovers the
+    photo from the listing page's og:image. Returns None → caller sends text only."""
+    img = fetch_image_bytes(image_url) if (image_url or "").startswith("http") else None
+    if img:
+        return img
+    recovered = og_image_for(listing_url)
+    if recovered:
+        return fetch_image_bytes(recovered)
+    return None
 
 
 def _known_facts(url: str) -> dict:

@@ -2411,10 +2411,12 @@ _SINGULAR_LATEST_RE = re.compile(r"\b(?:latest|last|most recent|newest)\b", re.I
 _MANY_RE = re.compile(r"\b(?:matches|listings|finds|ones|results|few|several|all|some)\b", re.I)
 
 
-def _lookup_limit(text: str, default: int = 10) -> int:
-    """How many finds to show. 'top 20' / 'show me 5' → that many. 'the latest match' /
-    'most recent listing' (singular) → exactly ONE — that phrasing asks for a single item, not a
-    page. Bounded so a stray number can't dump the whole DB."""
+def _lookup_limit(text: str, default=10):
+    """How many finds to show, taken from the USER'S words. 'top 20' / 'show me 5' → that many.
+    'the latest match' / 'most recent listing' (singular) → exactly ONE — that phrasing asks for a
+    single item, not a page. When the words carry no count signal at all, returns `default`
+    (callers pass default=None to mean 'no explicit ask — fall back to the model's/standard page').
+    Bounded so a stray number can't dump the whole DB."""
     t = text or ""
     m = re.search(r"\b(?:top|first|best|show me|latest|last|newest)\s+(\d{1,6})\b", t, re.I)
     if m:
@@ -3764,8 +3766,15 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 lq["watch"] = target
             if lq.get("matched_only") is None:
                 lq["matched_only"] = True           # "show me the matches" means the MATCHES
-            if not lq.get("limit"):
-                lq["limit"] = _lookup_limit(latest)
+            # The user's OWN words decide how many: an explicit count ("top 10") or a singular
+            # "the latest match" (→ 1) WINS over whatever limit the model guessed into its query.
+            # Without this, "show me the latest match" returned 10 because the model's listing_query
+            # already carried limit=10, so our singular-latest rule never got to apply.
+            explicit = _lookup_limit(latest, default=None)
+            if explicit is not None:
+                lq["limit"] = explicit
+            elif not lq.get("limit"):
+                lq["limit"] = 10
             # The model hallucinated a lookup for a message that never asked to SEE listings, and
             # we can't pin it to a watch the user referenced — running it would dump the whole
             # store. Drop it; the model's own prose (which has the watch context) answers.

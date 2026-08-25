@@ -226,6 +226,14 @@ def test_latest_plural_still_shows_a_page():
     assert S._lookup_limit("latest 5 matches") == 5            # an explicit count still wins
 
 
+def test_no_count_signal_returns_the_given_default():
+    """With no count words, the caller's default stands — None means 'no explicit ask'."""
+    assert S._lookup_limit("show me the matches", default=None) is None
+    assert S._lookup_limit("what did you find", default=None) is None
+    assert S._lookup_limit("the latest match", default=None) == 1     # singular is still a signal
+    assert S._lookup_limit("top 15", default=None) == 15             # an explicit count is a signal
+
+
 # ── a vague lookup gets completed, not obeyed literally ──────────────────────────
 # Live: the model DID produce a listing_query for "show me the matches from the boats watch",
 # but with no watch, no matched-only and no limit — so it returned 200 rows of everything ever
@@ -267,6 +275,16 @@ def test_what_the_model_did_decide_is_respected(monkeypatch):
                        {"watch": "Boats Watch", "matched_only": False, "limit": 20},
                        _one_watch_cfg())
     assert ran["matched_only"] is False and ran["limit"] == 20   # not overridden
+
+
+def test_latest_match_overrides_a_model_supplied_limit(monkeypatch):
+    """The live bug: 'show me the latest match' still returned ten because the model's
+    listing_query already carried limit=10, so our singular-latest rule never applied. The user's
+    'the latest match' must win over the model's guessed limit."""
+    ran = _lookup_turn(monkeypatch, "show me the latest match for the boats",
+                       {"watch": "Boats Watch", "matched_only": True, "limit": 10},
+                       _one_watch_cfg())
+    assert ran["limit"] == 1                     # the user asked for one, not the model's ten
 
 
 def test_ordinary_chat_does_not_trigger_a_lookup(monkeypatch):

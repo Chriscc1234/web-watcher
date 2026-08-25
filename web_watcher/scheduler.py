@@ -1425,7 +1425,12 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
     # price filter can't be relied on either, since the agent sorts and scrolls its way onto
     # pages the filter no longer applies to.
     cap = _price_cap_for(watch)
-    if not kw and not anti and cap is None:
+    anchor = _watch_geolocation(watch)
+    radius = None
+    if anchor:
+        from web_watcher.cl_geo import url_radius
+        radius = next((r for r in (url_radius(u) for u in (watch.urls or [])) if r), 100)
+    if not kw and not anti and cap is None and not anchor:
         return listings, []
     kept, dropped = [], []
     for l in listings:
@@ -1435,6 +1440,18 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
         if cap is not None and isinstance(price, (int, float)) and price > cap:
             l.judge_reason = f"over budget (${int(price):,} > ${cap:,})"
             dropped.append(l); continue
+        # Where the listing actually IS. Craigslist honours the radius correctly — the surprise
+        # is that 100 miles from Anacortes reaches Metro Vancouver, which is closer than Seattle.
+        # Those listings are in range and still wrong: another country, another currency, a
+        # border crossing. Judged from the town in the listing's own URL, resolved against the
+        # watch's anchor, and only dropped when the town is positively somewhere else — a town
+        # we can't place is kept.
+        if anchor:
+            from web_watcher.cl_geo import city_is_near, listing_city
+            town = listing_city(getattr(l, "url", "") or "")
+            if town and city_is_near(town, anchor, radius) is False:
+                l.judge_reason = f"outside the {radius}-mile search area"
+                dropped.append(l); continue
         hay = f"{l.title or ''} {getattr(l, 'details', '') or ''}".lower()
         hit_anti = next((a for a in anti if a in hay), None)
         if hit_anti:
@@ -1445,10 +1462,16 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
             dropped.append(l); continue
         kept.append(l)
     if dropped:
-        over = sum(1 for d in dropped if "over budget" in (getattr(d, "judge_reason", "") or ""))
+        def _n(word):
+            return sum(1 for d in dropped if word in (getattr(d, "judge_reason", "") or ""))
+        bits = []
+        if _n("over budget"):
+            bits.append(f"{_n('over budget')} over the ${cap:,} budget")
+        if _n("outside the"):
+            bits.append(f"{_n('outside the')} outside the search area")
         log.info("Prefilter dropped %d/%d listing(s) for %r%s",
                  len(dropped), len(listings), watch.name,
-                 f" ({over} over the ${cap:,} budget)" if over and cap else "")
+                 f" ({'; '.join(bits)})" if bits else "")
     return kept, dropped
 
 

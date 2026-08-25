@@ -869,3 +869,101 @@ def place_from_text(text: str) -> tuple[float, float] | None:
             if got:
                 return got
     return None
+
+
+# craigslist listing URLs carry the town in the slug: /view/d/<town>-<title-words>/<id>
+_CL_SLUG_RE = re.compile(r"/(?:view/d|d)/([a-z][a-z-]*?)-[a-z0-9-]*/[a-zA-Z0-9]+/?$")
+
+# Towns just across a border that a US-anchored search legitimately reaches — Vancouver BC is 62
+# miles from Anacortes, CLOSER than Seattle. They're in range and still wrong: another country,
+# another currency, a border crossing. Most aren't in the US gazetteer at all, so they can't be
+# ruled out by resolving them; the ones that ARE (Surrey → North Dakota, Vancouver → Washington)
+# resolve somewhere far away and are handled by the distance check. Extend as new borders come up.
+_FOREIGN_CITIES: frozenset = frozenset({
+    # BC lower mainland + island (reachable from northwest Washington)
+    "vancouver bc", "north vancouver", "west vancouver", "port moody", "port coquitlam",
+    "coquitlam", "burnaby", "richmond bc", "new westminster", "maple ridge", "pitt meadows",
+    "white rock", "delta bc", "tsawwassen", "ladner", "langley bc", "aldergrove", "abbotsford",
+    "chilliwack", "mission bc", "hope bc", "squamish", "whistler", "sechelt", "gibsons",
+    "victoria bc", "saanich", "sidney bc", "duncan", "nanaimo", "parksville", "courtenay",
+    "campbell river", "port alberni", "powell river", "kelowna", "kamloops", "vernon bc",
+    "penticton", "prince george", "cranbrook", "nelson bc", "trail bc", "castlegar",
+    # Ontario/Quebec border metros (for watches anchored in the northeast/midwest)
+    "windsor on", "sarnia", "niagara falls on", "fort erie", "st catharines", "hamilton on",
+    "toronto", "mississauga", "brampton", "oakville", "burlington on", "kitchener", "waterloo on",
+    "guelph", "cambridge on", "london on", "ottawa", "gatineau", "montreal", "laval",
+    "sherbrooke", "quebec city",
+    # Prairie / Atlantic
+    "calgary", "edmonton", "winnipeg", "regina", "saskatoon", "halifax", "moncton",
+    "fredericton", "saint john nb", "thunder bay",
+    # Mexican border
+    "tijuana", "mexicali", "ciudad juarez", "nogales sonora", "matamoros", "reynosa",
+    "nuevo laredo",
+})
+
+
+def listing_city(url: str) -> str:
+    """The town a craigslist listing URL names, or ''. Tries the longest leading run of slug
+    words first so two-word towns ("mount-vernon", "port-moody") survive."""
+    try:
+        path = urlparse(url or "").path or ""
+    except Exception:
+        return ""
+    m = re.search(r"/(?:view/)?d/([a-z0-9-]+)/[a-zA-Z0-9]{6,}/?$", path)
+    if not m:
+        return ""
+    return m.group(1).replace("-", " ").strip()
+
+
+def city_is_near(city_slug: str, anchor: tuple[float, float], radius_miles: float) -> bool | None:
+    """Is the town in this listing's URL actually near the watch's anchor?
+
+    Returns True (near), False (a real place, but not near) or None (can't tell — the caller
+    should keep it, because absence of evidence is not evidence of absence).
+
+    This is what separates "Anacortes" from "Surrey". The US gazetteer is no help on its own:
+    it maps Surrey to North Dakota and Vancouver to Washington, both real US towns and both
+    nowhere near. Resolving the name AGAINST THE ANCHOR settles it — a nearby match is the one
+    that's meant, and a name that only resolves a thousand miles away is either a different town
+    or across a border, and either way it isn't what the watch asked for.
+    """
+    words = [w for w in (city_slug or "").split() if w]
+    if not words or not anchor:
+        return None
+    # Border towns that are simply not in the US gazetteer, so no amount of resolving will place
+    # them — "port moody" and "burnaby" return nothing at all, which would read as "unknown" and
+    # be kept. Named explicitly because the alternative is inferring foreignness from absence,
+    # and absence is also what an unusual slug looks like.
+    for size in (3, 2, 1):
+        if " ".join(words[:size]) in _FOREIGN_CITIES:
+            return False
+
+    coslat = math.cos(math.radians(anchor[0]))
+    limit_deg = max(0.4, (radius_miles or 100) / 69.0)
+    # LEADING words only — the town is the start of the slug, and scanning the whole thing lets a
+    # word from the item's title ("...bellingham trailer...") vouch for a listing posted
+    # elsewhere. Longest first so "mount vernon" wins over "mount".
+    for size in (3, 2, 1):
+        name = " ".join(words[:size])
+        cands = _place_table().get(name)
+        if not cands:
+            continue
+        best = min(cands, key=lambda c: math.hypot(c[1] - anchor[0], (c[2] - anchor[1]) * coslat))
+        d = math.hypot(best[1] - anchor[0], (best[2] - anchor[1]) * coslat)
+        return d <= limit_deg
+    return None
+
+
+def url_radius(url: str, default: int | None = None) -> int | None:
+    """The search radius a URL asks for (craigslist search_distance / radius, eBay _sadis)."""
+    try:
+        q = dict(parse_qsl(urlparse(url or "").query or ""))
+    except Exception:
+        return default
+    for k in ("search_distance", "radius", "_sadis"):
+        if k in q:
+            try:
+                return int(float(str(q[k]).strip()))
+            except (ValueError, TypeError):
+                pass
+    return default

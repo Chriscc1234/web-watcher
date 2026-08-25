@@ -150,3 +150,80 @@ def test_a_watch_naming_nowhere_has_no_anchor():
     w = Watch(name="Boats", urls=["https://x/search/boo"], instruction="boats",
               interval_minutes=30)
     assert _watch_geolocation(w) is None
+
+
+# ── the area gate ────────────────────────────────────────────────────────────────
+# The surprise from the live data: craigslist's radius filter was working perfectly. 100 miles
+# from Anacortes reaches Metro Vancouver, which is CLOSER than Seattle (62 vs 60 miles). Those
+# listings are genuinely in range and still wrong — another country, another currency, a border.
+# The US gazetteer alone can't settle it: it maps Surrey to North Dakota and Vancouver to
+# Washington, both real and both nowhere near. Resolving the name against the ANCHOR does.
+
+from web_watcher.cl_geo import city_is_near, listing_city, url_radius
+
+_ANACORTES = (48.4542, -122.6039)
+
+
+def test_the_town_is_read_from_the_listing_url():
+    assert listing_city(
+        "https://www.craigslist.org/view/d/port-moody-sea-ray-200-select/iq82a5USvpykg17TtzgwWf"
+    ).startswith("port moody")
+    assert listing_city("https://example.com/not-a-listing") == ""
+
+
+def test_nearby_washington_towns_are_near():
+    for slug in ("tacoma-19ft-ocean-going-boat", "olympia-1990-searay-21-open-bow",
+                 "mercer-island-cobalt-bowrider", "shelton-ft-hewscraft-sea-runner"):
+        city = slug.replace("-", " ")
+        assert city_is_near(city, _ANACORTES, 150) is True, slug
+
+
+def test_british_columbia_towns_are_not_near():
+    """In range by miles, wrong by country — and the gazetteer's Surrey ND is what makes the
+    anchor comparison necessary rather than a name lookup."""
+    # Surrey resolves (to North Dakota) and is ruled out by distance; Port Moody and Burnaby
+    # aren't in the US gazetteer at all, so they're named explicitly — absence of a US match is
+    # also what an unusual slug looks like, and that must not be enough to drop a listing.
+    assert city_is_near("surrey immaculate 2014 larson", _ANACORTES, 150) is False
+    assert city_is_near("port moody sea ray 200", _ANACORTES, 150) is False
+    assert city_is_near("burnaby boat trailer", _ANACORTES, 150) is False
+    assert city_is_near("coquitlam skiff", _ANACORTES, 150) is False
+
+
+def test_a_far_away_same_named_us_town_is_not_near():
+    """Vancouver WA is a real US city ~200 miles off — outside a 100-mile watch."""
+    assert city_is_near("vancouver", _ANACORTES, 100) is False
+
+
+def test_an_unplaceable_town_is_kept():
+    """Absence of evidence isn't evidence of absence — an unknown town must not be dropped."""
+    assert city_is_near("zzzqqq widget", _ANACORTES, 150) is None
+    assert city_is_near("", _ANACORTES, 150) is None
+
+
+def test_only_the_leading_slug_words_name_the_town():
+    """A word from the ITEM's title must not vouch for a listing posted somewhere else."""
+    assert city_is_near("surrey boat with bellingham trailer", _ANACORTES, 150) is False
+
+
+def test_the_radius_comes_from_the_url():
+    assert url_radius("https://x/s?search_distance=150") == 150
+    assert url_radius("https://x/s?radius=50") == 50
+    assert url_radius("https://x/s") is None
+
+
+def test_out_of_area_listings_are_dropped_by_the_prefilter():
+    w = Watch(name="Anacortes Boats", instruction="boats near Anacortes", interval_minutes=30,
+              urls=["https://skagit.craigslist.org/search/boo?postal=98221&search_distance=150"])
+
+    class _U:
+        def __init__(self, title, url, price=None):
+            self.title, self.url, self.price_value = title, url, price
+            self.details, self.judge_reason = "", ""
+
+    kept, dropped = _keyword_prefilter([
+        _U("Sea Ray", "https://www.craigslist.org/view/d/tacoma-sea-ray/aaaaaaaa", 9000),
+        _U("Larson", "https://www.craigslist.org/view/d/surrey-larson-lx/bbbbbbbb", 9000),
+    ], w)
+    assert [l.title for l in kept] == ["Sea Ray"]
+    assert "outside the" in dropped[0].judge_reason

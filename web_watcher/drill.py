@@ -68,8 +68,11 @@ DRILLS: dict[str, dict] = {
         # A known-good control: if the Facebook drill fails, running this one says whether the
         # problem is Facebook or our browsing stack.
         "url": "https://seattle.craigslist.org/",
+        # Hints must be SPECIFIC. A loose one ("for sale") matched "real estate for sale" on a
+        # live run and the drill happily reported success on the wrong section — which is exactly
+        # the silent wrong-page failure this whole file exists to catch.
         "section": "cars & trucks",
-        "section_hints": ["cars & trucks", "cars+trucks", "for sale"],
+        "section_hints": ["cars & trucks", "cars+trucks"],
         "question": "What is the title and price of the first listing shown?",
         "expect_login": False,
         "read_only": False,
@@ -272,11 +275,21 @@ def _step_navigate(page, spec: dict) -> dict:
     if not moved:
         return _step("navigate", False,
                      f"clicked {text!r} but nothing changed — the page is identical", fatal=True)
-    in_section = _norm(section) in _norm(after_url) or _norm(section) in after_text
-    return _step("navigate", True,
-                 f"clicked {text!r} like a person → {after_url}"
-                 + ("" if in_section else f" (note: the word {section!r} isn't obvious on the new page)"),
-                 url=after_url, section_confirmed=in_section)
+    # Landing SOMEWHERE is not landing in the right place. A click that moved us to a different
+    # section is a failure, not a pass with a footnote — the drill's whole job is to notice that
+    # we're reading the wrong page. Match on the section words, the URL, or the label we clicked
+    # (a site may show "cars+trucks" in the link and "cars & trucks" nowhere else).
+    words = [w for w in re.split(r"[^a-z0-9]+", _norm(section)) if len(w) > 2]
+    hay = _norm(after_url) + " " + after_text + " " + _norm(text)
+    hits = [w for w in words if w in hay]
+    in_section = bool(words) and len(hits) >= max(1, len(words) // 2)
+    if not in_section:
+        return _step("navigate", False,
+                     f"clicked {text!r} and the page moved to {after_url}, but this does NOT look "
+                     f"like the {section!r} section — we'd be reading the wrong page.",
+                     url=after_url, section_confirmed=False, fatal=True)
+    return _step("navigate", True, f"clicked {text!r} like a person → {after_url}",
+                 url=after_url, section_confirmed=True)
 
 
 _FIND_SYSTEM = (

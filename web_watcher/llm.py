@@ -255,12 +255,46 @@ def _anthropic_chat(system_text: str, user_messages: list[dict], model: str, key
 # Local path (Ollama) — the original call, unchanged in behaviour
 # ---------------------------------------------------------------------------
 
+# A screenshot is charged as image TOKENS, and a big one can exceed Ollama's whole default
+# context (4096) by itself — the model then 400s with exceed_context_size before it has read a
+# single word. That is not a rare edge: it's every vision call on a high-DPI monitor, and it
+# fails the same way for the OCR fallback, the browsing agent and the drill. So we shrink the
+# image to a size the model reads just as well, and give vision a bigger window besides.
+_MAX_IMAGE_EDGE = 1280      # px on the longest edge — plenty for reading a page
+_VISION_NUM_CTX = 8_192     # default window when images are present
+
+
+def _shrink_image_b64(b64: str, max_edge: int = _MAX_IMAGE_EDGE) -> str:
+    """Downscale an oversized base64 PNG. Returns the input unchanged if PIL is missing or the
+    image is already small enough — never raises, because a failed resize must not lose the call."""
+    try:
+        import base64 as _b64
+        import io
+        from PIL import Image
+
+        raw = _b64.b64decode(b64)
+        img = Image.open(io.BytesIO(raw))
+        if max(img.size) <= max_edge:
+            return b64
+        ratio = max_edge / float(max(img.size))
+        img = img.convert("RGB").resize(
+            (max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return _b64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        log.debug("could not shrink an image for vision: %s", exc)
+        return b64
+
+
 def _ollama_chat(messages: list[dict], model: str, *, format_json: bool,
                  images: Optional[list[str]], timeout: float, base_url: str = OLLAMA_BASE,
                  priority: bool = False, num_ctx: int = 0) -> str:
     msgs = [dict(m) for m in messages]
     if images and msgs:
-        msgs[-1]["images"] = images
+        msgs[-1]["images"] = [_shrink_image_b64(i) for i in images]
+        if num_ctx <= 0:
+            num_ctx = _VISION_NUM_CTX
     payload: dict = {"model": model, "messages": msgs, "stream": False}
     if format_json:
         payload["format"] = "json"
@@ -461,12 +495,28 @@ def day_spend(data_dir=None) -> float:
 # answer, so the expensive models are reached only by the handful of calls that truly need them.
 CLOUD_LADDER: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5")
 
-# Roles allowed to escalate at all. The per-sweep JUDGE is deliberately absent: it runs on every
-# listing of every sweep, so routing it to cloud is how a budget disappears overnight — and a
-# local probe found the 14b's ratings as good as a 32b's anyway. Vision is absent because the
-# cloud vision path isn't wired. The slow local quality tier (inspect/review/comprehend) is
-# absent because it already has the biggest local model and all the time it wants.
-ESCALATABLE_ROLES: frozenset = frozenset({"chat", "extract", "vet", "terms"})
+# WHICH ROLES MAY ESCALATE. The rule is volume against consequence: escalate what is RARE and
+# CONSEQUENTIAL, never what runs per-listing.
+#
+#   chat       a person is waiting; a handful of turns a day.
+#   extract    turning "watch for manual trucks under 10k near Anacortes" into a real watch. Rare
+#              (only when a watch is made or changed) and the most consequential call in the app —
+#              a wrong extraction is a watch that quietly finds nothing for a week.
+#   terms      the search terms a watch uses. Rare, and it decides whether the watch sees anything
+#              at all.
+#   comprehend understanding a NEW site — once per site, then cached forever.
+#   vet        Deep Inspect, only when a person asks about one listing.
+#   stuck      the browsing agent has failed on a page and is about to give up. Escalating a
+#              FAILURE is free of volume risk by construction: it can only fire when local
+#              already lost, which is the same principle as the cascade itself.
+#
+# JUDGE IS DELIBERATELY ABSENT and should stay that way. It rates every listing of every sweep —
+# on a continuous watch that is thousands of calls a day, which is tens of dollars a month before
+# anyone notices. A local probe also found the 14b's ratings as good as a 32b's, so there is
+# nothing to buy. Vision is absent because the cloud vision path isn't wired. review/inspect are
+# absent because they already run the biggest local model with no time limit, for free.
+ESCALATABLE_ROLES: frozenset = frozenset(
+    {"chat", "extract", "terms", "comprehend", "vet", "stuck"})
 
 
 def cloud_ready(cfg, role: str) -> tuple[bool, str]:

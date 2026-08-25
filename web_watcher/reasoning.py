@@ -197,15 +197,19 @@ class Reasoner:
             {"role": "system", "content": _SYSTEM},
             {"role": "user",   "content": user_msg},
         ]
-        if images:
-            messages[-1]["images"] = images
-
         payload: dict = {
             "model":    model,
             "messages": messages,
             "stream":   False,
             "format":   "json",   # constrains output to valid JSON syntax
         }
+        if images:
+            # A full-size screenshot can exceed Ollama's whole default context (4096) on its own
+            # and 400 before the model reads anything — so shrink it and ask for a real window.
+            # Shared with llm.py so every vision path in the app behaves the same way.
+            from web_watcher.llm import _MAX_IMAGE_EDGE, _VISION_NUM_CTX, _shrink_image_b64
+            messages[-1]["images"] = [_shrink_image_b64(i, _MAX_IMAGE_EDGE) for i in images]
+            payload["options"] = {"num_ctx": _VISION_NUM_CTX}
 
         try:
             with httpx.Client(timeout=self.timeout) as client:

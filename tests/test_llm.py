@@ -345,3 +345,58 @@ def test_the_escalation_log_is_capped(tmp_path, monkeypatch):
     rows = llm.escalations(100)
     assert len(rows) <= 5
     assert rows[0]["cloud"] == "n11"        # newest first, oldest dropped
+
+
+# ── vision payload size ──────────────────────────────────────────────────────────
+# A full-size screenshot is charged as image TOKENS and can exceed Ollama's entire default
+# context (4096) on its own — the call then 400s with exceed_context_size before the model has
+# read a word. On a high-DPI monitor that is EVERY vision call, not an edge case, so the shrink
+# and the bigger window are applied centrally where every vision path goes through.
+
+def _png_b64(w, h):
+    import base64, io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (20, 30, 40)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _edge(b64):
+    import base64, io
+    from PIL import Image
+    return max(Image.open(io.BytesIO(base64.b64decode(b64))).size)
+
+
+def test_an_oversized_screenshot_is_shrunk():
+    assert _edge(llm._shrink_image_b64(_png_b64(2560, 1440))) == llm._MAX_IMAGE_EDGE
+
+
+def test_a_small_screenshot_is_left_alone():
+    small = _png_b64(800, 600)
+    assert llm._shrink_image_b64(small) == small
+
+
+def test_shrink_never_raises_on_junk():
+    assert llm._shrink_image_b64("not-an-image") == "not-an-image"
+
+
+def test_vision_calls_get_a_real_context_window(monkeypatch):
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": "ok"}}
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None):
+            sent.clear(); sent.update(json or {})
+            return _Resp()
+
+    monkeypatch.setattr(llm.httpx, "Client", _Client)
+    llm._ollama_chat([{"role": "user", "content": "x"}], "qwen2.5vl:7b",
+                     format_json=True, images=[_png_b64(2560, 1440)], timeout=5.0)
+    assert sent["options"]["num_ctx"] == llm._VISION_NUM_CTX      # not the 4096 default
+    assert _edge(sent["messages"][-1]["images"][0]) == llm._MAX_IMAGE_EDGE

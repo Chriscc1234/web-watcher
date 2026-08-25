@@ -209,16 +209,20 @@ def test_format_verdict_renders_stars_risk_and_flags():
 
 # ── the "top N" list: a photo card + a Vet button per listing ────────────────────
 
-def test_top_n_card_with_an_image_sends_a_photo_with_a_vet_button(monkeypatch, tmp_path):
+def test_top_n_card_with_an_image_uploads_the_photo_with_a_vet_button(monkeypatch, tmp_path):
     """A picture AND a per-listing vet control need one message per listing — Telegram won't
-    attach buttons to a multi-photo album. The card is a sendPhoto with a vet: button."""
+    attach buttons to a multi-photo album. The card UPLOADS the image bytes (Telegram's own fetch
+    of craigslist URLs 400s) and carries a vet: button."""
+    import json
     from web_watcher import notify
     monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: b"JPEGDATA")     # we fetch, not TG
     b = _bridge()
     calls = []
 
     class _Resp:
         status_code = 200
+        text = "ok"
 
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
                         lambda url, **k: calls.append((url, k)) or _Resp())
@@ -230,12 +234,34 @@ def test_top_n_card_with_an_image_sends_a_photo_with_a_vet_button(monkeypatch, t
 
     photo = [c for c in calls if "sendPhoto" in c[0]]
     assert len(photo) == 1
-    body = photo[0][1]["json"]
-    assert body["photo"] == "https://images.craigslist.org/x.jpg"
-    assert "Sea Ray 190" in body["caption"] and "$9,000" in body["caption"]
-    kb = body["reply_markup"]["inline_keyboard"][0]
+    kwargs = photo[0][1]
+    assert kwargs["files"]["photo"][1] == b"JPEGDATA"                # bytes uploaded, not a URL
+    data = kwargs["data"]
+    assert "Sea Ray 190" in data["caption"] and "$9,000" in data["caption"]
+    kb = json.loads(data["reply_markup"])["inline_keyboard"][0]      # markup is a JSON string here
     vet = next(btn for btn in kb if btn.get("callback_data", "").startswith("vet:"))
     assert notify.vet_url_for(vet["callback_data"][4:]) == row["url"]     # token → this listing
+
+
+def test_top_n_card_falls_back_to_text_when_the_image_cant_be_fetched(monkeypatch, tmp_path):
+    """A picture we can't download must never cost the alert — fall back to the text card, which
+    still carries the Vet button."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: None)           # fetch fails
+    b = _bridge()
+    sent = []
+    monkeypatch.setattr(b, "_send",
+                        lambda t, chat_id="", html=False, buttons=None: sent.append((t, buttons)))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda *a, **k: pytest.fail("no photo call when the image can't be fetched"))
+    row = {"url": "https://x/boo/9.html", "title": "Skiff", "source": "craigslist",
+           "image": "https://images.craigslist.org/dead.jpg"}
+    b._send_listing_card(row, "12345")
+    assert len(sent) == 1
+    text, buttons = sent[0]
+    assert "Skiff" in text
+    assert any(btn.get("callback_data", "").startswith("vet:") for btn in buttons[0])
 
 
 def test_top_n_card_without_an_image_falls_back_to_text_but_keeps_vet(monkeypatch, tmp_path):

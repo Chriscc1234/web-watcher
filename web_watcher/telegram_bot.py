@@ -471,7 +471,9 @@ class TelegramBridge:
         Falls back to a text card (still with the Vet button) when there's no image or Telegram
         can't fetch it — a missing picture must never cost the vet control."""
         import html as _h
-        from web_watcher.notify import remember_vet_link, vet_token, source_label
+        import json as _json
+        from web_watcher.notify import (remember_vet_link, vet_token, source_label,
+                                        fetch_image_bytes)
         if not isinstance(row, dict):
             return
         url    = str(row.get("url") or "").strip()
@@ -497,18 +499,25 @@ class TelegramBridge:
                         {"text": "🔍 Vet", "callback_data": f"vet:{vet_token(url)}"}]]
 
         # Photo-card when we have a fetchable image and the caption fits Telegram's 1024 cap.
+        # UPLOAD the bytes rather than handing Telegram the URL — its server-side fetch of
+        # craigslist image URLs 400s, so we fetch (proven to work) and send the bytes.
         if image.startswith("http") and len(cap) <= 1024:
-            body = {"chat_id": chat, "photo": image, "caption": cap, "parse_mode": "HTML"}
-            if buttons:
-                body["reply_markup"] = {"inline_keyboard": buttons}
-            try:
-                r = httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendPhoto",
-                               json=body, timeout=20.0)
-                if r.status_code == 200:
-                    return
-                log.info("Telegram: top-N photo card HTTP %s — text instead", r.status_code)
-            except Exception as exc:
-                log.info("Telegram: top-N photo card failed (%s) — text instead", exc)
+            img = fetch_image_bytes(image)
+            if img:
+                data = {"chat_id": chat, "caption": cap, "parse_mode": "HTML"}
+                if buttons:
+                    data["reply_markup"] = _json.dumps({"inline_keyboard": buttons})
+                try:
+                    r = httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendPhoto",
+                                   data=data,
+                                   files={"photo": ("listing.jpg", img, "image/jpeg")},
+                                   timeout=20.0)
+                    if r.status_code == 200:
+                        return
+                    log.info("Telegram: top-N photo card HTTP %s (%s) — text instead",
+                             r.status_code, r.text[:160])
+                except Exception as exc:
+                    log.info("Telegram: top-N photo card failed (%s) — text instead", exc)
 
         # Text fallback keeps the Vet button so every result is still vettable.
         text = cap

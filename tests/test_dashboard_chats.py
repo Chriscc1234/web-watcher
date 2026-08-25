@@ -212,6 +212,20 @@ def test_lookup_limit_reads_the_number_asked_for():
     assert S._lookup_limit("top 9999") == 30                   # bounded — no whole-DB dump
 
 
+def test_the_latest_match_singular_is_exactly_one():
+    """'Show me the latest match' asks for ONE item — the live bug returned a top-10 list."""
+    for msg in ["show me the latest match for the boat watch", "what's the last match",
+                "the most recent listing", "newest find on the boats", "the latest one"]:
+        assert S._lookup_limit(msg) == 1, msg
+
+
+def test_latest_plural_still_shows_a_page():
+    """'latest matches' / 'last few' is a list, not a single item — keep the default page."""
+    assert S._lookup_limit("show me the latest matches") == 10
+    assert S._lookup_limit("the last few listings") == 10
+    assert S._lookup_limit("latest 5 matches") == 5            # an explicit count still wins
+
+
 # ── a vague lookup gets completed, not obeyed literally ──────────────────────────
 # Live: the model DID produce a listing_query for "show me the matches from the boats watch",
 # but with no watch, no matched-only and no limit — so it returned 200 rows of everything ever

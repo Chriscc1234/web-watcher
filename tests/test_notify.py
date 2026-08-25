@@ -361,6 +361,63 @@ def test_a_missing_stored_record_never_breaks_the_alert(monkeypatch):
     assert "Open listing" in text
 
 
+def test_alert_uploads_the_listing_photo_bytes_not_a_url(monkeypatch):
+    """Telegram's own fetch of craigslist image URLs was 400ing, so every boat alert lost its
+    picture and fell back to text. The alert now DOWNLOADS the image and uploads the bytes via a
+    multipart sendPhoto — it never hands Telegram the URL to fetch."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_known_facts",
+                        lambda url: {"source": "craigslist.org", "image": "https://img/x.jpg"})
+    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: b"JPEGDATA")
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, **kw):
+            calls.append((url, kw)); return _Resp()
+
+    monkeypatch.setattr(notify.httpx, "Client", _Client)
+    ok = send_telegram(_payload(_result(summary="★★★★☆ Boat", link="https://x/1")),
+                       _cfg(email=False))
+    assert ok is True
+    photo = [c for c in calls if "sendPhoto" in c[0]]
+    assert len(photo) == 1                                   # exactly one photo, no screenshot
+    assert photo[0][1]["files"]["photo"][1] == b"JPEGDATA"   # bytes uploaded, not a URL
+    assert "photo" not in (photo[0][1].get("json") or {})    # not the old json-with-URL shape
+    assert not any("sendMessage" in c[0] for c in calls)     # the photo REPLACED the text send
+
+
+def test_alert_falls_back_to_text_when_the_photo_cant_be_downloaded(monkeypatch):
+    """A picture we can't fetch must not cost the alert — send the text message instead."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_known_facts",
+                        lambda url: {"source": "craigslist.org", "image": "https://img/dead.jpg"})
+    monkeypatch.setattr(notify, "fetch_image_bytes", lambda u: None)
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, **kw):
+            calls.append((url, kw)); return _Resp()
+
+    monkeypatch.setattr(notify.httpx, "Client", _Client)
+    ok = send_telegram(_payload(_result(summary="★★★★☆ Boat", link="https://x/1")),
+                       _cfg(email=False))
+    assert ok is True
+    assert any("sendMessage" in c[0] for c in calls)         # text still went out
+    assert not any("sendPhoto" in c[0] for c in calls)       # no photo attempted
+
+
 # ── the baseline burst ───────────────────────────────────────────────────────────
 # A new or changed watch finds hundreds of listings that were already there. Alerting on all of
 # them is a wall of noise, so we bank them silently — but silence looks exactly like a broken

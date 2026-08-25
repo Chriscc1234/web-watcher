@@ -2405,14 +2405,26 @@ def _is_watch_status_request(text: str) -> bool:
     return bool(_WATCH_STATUS_RE.search(text or ""))
 
 
+_SINGULAR_LATEST_RE = re.compile(r"\b(?:latest|last|most recent|newest)\b", re.I)
+# Plural / many-signals that mean the user wants a LIST even alongside "latest" ("latest matches",
+# "last few"). Their presence keeps the default page size instead of collapsing to a single item.
+_MANY_RE = re.compile(r"\b(?:matches|listings|finds|ones|results|few|several|all|some)\b", re.I)
+
+
 def _lookup_limit(text: str, default: int = 10) -> int:
-    """'top 20' / 'show me 5' → that many. Bounded so a stray number can't dump the whole DB."""
-    m = re.search(r"\b(?:top|first|best|show me)\s+(\d{1,6})\b", text or "", re.I)
+    """How many finds to show. 'top 20' / 'show me 5' → that many. 'the latest match' /
+    'most recent listing' (singular) → exactly ONE — that phrasing asks for a single item, not a
+    page. Bounded so a stray number can't dump the whole DB."""
+    t = text or ""
+    m = re.search(r"\b(?:top|first|best|show me|latest|last|newest)\s+(\d{1,6})\b", t, re.I)
     if m:
         try:
             return max(1, min(int(m.group(1)), 30))
         except ValueError:
             pass
+    # "latest / last / most recent / newest <singular>" with no plural in sight → just the one.
+    if _SINGULAR_LATEST_RE.search(t) and not _MANY_RE.search(t):
+        return 1
     return default
 
 

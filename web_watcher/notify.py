@@ -15,6 +15,7 @@ Notification content (spec Section 4.5):
 from __future__ import annotations
 
 import html as _html
+import json as _json
 import logging
 import re
 import smtplib
@@ -96,14 +97,30 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
             sent = False
             if photo.startswith("http") and len(text) <= _TG_CAPTION_MAX:
-                photo_body = {k: v for k, v in body.items() if k != "text"}
-                photo_body.update(photo=photo, caption=text)
-                try:
-                    pr = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendPhoto", json=photo_body)
-                    pr.raise_for_status()
-                    sent = True
-                except Exception as exc:
-                    log.info("Telegram: photo send failed (%s) — sending as text instead", exc)
+                # UPLOAD THE BYTES, don't hand Telegram a URL. Telegram fetching a craigslist
+                # image URL itself returned 400 on every boat alert (the image is fine — curl
+                # gets it — but Telegram's own fetch was rejected), so every alert silently fell
+                # back to a text card with no picture. Fetching the bytes here (which we've proven
+                # works) and multipart-uploading them removes Telegram's fetch step entirely, the
+                # one thing that differed from the text send that always succeeded.
+                img = fetch_image_bytes(photo)
+                if img:
+                    data = {"chat_id": chat_id, "caption": text, "parse_mode": "HTML"}
+                    if body.get("reply_markup"):
+                        data["reply_markup"] = _json.dumps(body["reply_markup"])
+                    try:
+                        pr = client.post(
+                            f"{TELEGRAM_API}/bot{t.bot_token}/sendPhoto",
+                            data=data,
+                            files={"photo": ("listing.jpg", img, "image/jpeg")},
+                        )
+                        pr.raise_for_status()
+                        sent = True
+                    except httpx.HTTPStatusError as exc:
+                        log.info("Telegram: photo upload rejected (%s: %s) — text instead",
+                                 exc.response.status_code, exc.response.text[:160])
+                    except Exception as exc:
+                        log.info("Telegram: photo upload failed (%s) — text instead", exc)
 
             if not sent:
                 r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage", json=body)
@@ -345,6 +362,36 @@ def source_label(source: str) -> str:
         if key in s:
             return name
     return s.replace("www.", "").split("/")[0]        # unknown site: show its host, tidied
+
+
+_IMG_FETCH_MAX = 9_000_000        # Telegram's photo cap is ~10MB; stay under it after headers
+
+
+def fetch_image_bytes(url: str) -> bytes | None:
+    """Download a listing thumbnail so we can UPLOAD it to Telegram instead of handing Telegram
+    the URL to fetch itself. Telegram's server-side fetch of craigslist image URLs was returning
+    400 (rejecting the whole alert's picture); we can fetch the very same URL fine, so we do, and
+    upload the bytes. Returns None (→ caller falls back to a text-only alert) on anything odd — a
+    non-image content-type, an oversized file, a network error. Never raises."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return None
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebWatcher/1.0"}
+        with httpx.Client(timeout=TELEGRAM_TIMEOUT, follow_redirects=True) as c:
+            r = c.get(u, headers=headers)
+            r.raise_for_status()
+            ctype = (r.headers.get("content-type") or "").lower()
+            if "image" not in ctype:
+                log.info("Telegram: %s is %r, not an image — skipping picture", u[:80], ctype)
+                return None
+            data = r.content
+            if not data or len(data) > _IMG_FETCH_MAX:
+                return None
+            return data
+    except Exception as exc:
+        log.info("Telegram: could not fetch listing image (%s) — no picture", exc)
+        return None
 
 
 def _known_facts(url: str) -> dict:

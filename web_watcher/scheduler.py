@@ -1392,6 +1392,12 @@ _RATING_RUBRIC = (
 )
 
 
+# How far over a stated budget a listing may be and still come through — the "on the edge" grace
+# band the user asked to keep. 0.10 = 10%: a $15k watch still surfaces a $16.5k boat, but a $30k
+# one is gone. Sellers routinely take a little less, and the price itself is fuzzy (title vs field).
+_PRICE_TOLERANCE = 0.10
+
+
 def _price_cap_for(watch: Watch) -> int | None:
     """This watch's maximum price, from its URLs or its own words. Cached on the watch object so
     a sweep parses it once. None when the watch never stated a budget — then nothing is dropped
@@ -1419,11 +1425,17 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
     over the title + ad body. Each dropped listing gets .judge_reason set for the log/UI."""
     kw   = [k.lower() for k in (watch.keywords or []) if k.strip()]
     anti = [k.lower() for k in (watch.antikeywords or []) if k.strip()]
-    # A watch with a stated budget must never surface something over it. Whether $30,000 exceeds
-    # $15,000 is arithmetic, not a judgement call — leaving it to the 14b produced exactly the
-    # failure you'd expect: $30k, $29k and $28k boats all "matched" a $15k watch. The site's own
-    # price filter can't be relied on either, since the agent sorts and scrolls its way onto
+    # A watch with a stated budget must never surface something WAY over it. Whether $30,000
+    # exceeds $15,000 is arithmetic, not a judgement call — leaving it to the 14b produced exactly
+    # the failure you'd expect: $30k, $29k and $28k boats all "matched" a $15k watch. The site's
+    # own price filter can't be relied on either, since the agent sorts and scrolls its way onto
     # pages the filter no longer applies to.
+    #
+    # But a HARD cutoff is too sharp: a great $16k boat on a $15k watch is exactly the kind of
+    # "on the edge" post worth seeing — a seller often takes a bit less, and the number itself is
+    # fuzzy (price in the title vs the field). So the gate keeps a small grace band above the cap
+    # (_PRICE_TOLERANCE) and only drops what's clearly over. Edge posts come through on purpose
+    # now, not by luck (before, they slipped through only when the price failed to parse).
     cap = _price_cap_for(watch)
     anchor = _watch_geolocation(watch)
     radius = None
@@ -1433,11 +1445,16 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
     if not kw and not anti and cap is None and not anchor:
         return listings, []
     kept, dropped = [], []
+    from web_watcher.cl_geo import is_placeholder_price
     for l in listings:
         price = getattr(l, "price_value", None)
         if price is None:
             price = (getattr(l, "attributes", None) or {}).get("price_value")
-        if cap is not None and isinstance(price, (int, float)) and price > cap:
+        # A "$12,345" / "$99,999" / "$0" isn't a price — it's "make me an offer". Treat it as
+        # UNKNOWN so an under-budget make-offer post isn't binned as over budget.
+        if is_placeholder_price(price):
+            price = None
+        if cap is not None and isinstance(price, (int, float)) and price > cap * (1 + _PRICE_TOLERANCE):
             l.judge_reason = f"over budget (${int(price):,} > ${cap:,})"
             dropped.append(l); continue
         # Where the listing actually IS. Craigslist honours the radius correctly — the surprise

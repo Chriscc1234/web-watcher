@@ -799,6 +799,38 @@ def watch_price_cap(urls, instruction: str = "") -> int | None:
     return price_cap_from_text(instruction or "")
 
 
+# Keyboard-mash "prices" a seller types to AVOID naming one: a run up the number row, or a fixed
+# digit held down. Kept as a small literal SET on purpose — high precision beats cleverness here,
+# because a false positive silently swallows a real price. len>=5 only, so a plausible real
+# $2,345 or $1,234 is never mistaken for junk.
+_PLACEHOLDER_PRICES = frozenset({
+    "12345", "123456", "1234567", "12345678", "123456789", "1234567890",
+    "54321", "654321", "7654321", "98765", "987654", "9876543",
+})
+
+
+def is_placeholder_price(value) -> bool:
+    """True when a 'price' is really "make me an offer / call / negotiate", not a number.
+
+    Sellers who don't want to commit type a sequence ("$12,345", "$123456"), hold one key
+    ("$99,999", "$11111"), or put 0. Treating that as a real number wrongly DROPS a make-offer
+    listing from an under-budget watch (an $8k car watch would bin a "$12,345 — obo" post as "over
+    budget"). Deliberately conservative: only unmistakable junk (>=5 digits), never a believable
+    real price like $2,345 or $9,500."""
+    try:
+        n = int(float(str(value).replace(",", "").replace("$", "").strip()))
+    except (TypeError, ValueError):
+        return False
+    if n <= 0:
+        return True
+    d = str(abs(n))
+    if len(d) < 5:
+        return False                      # short numbers are almost always real prices
+    if len(set(d)) == 1:                  # 11111, 99999, 5555555 — one digit held down
+        return True
+    return d in _PLACEHOLDER_PRICES       # a run up or down the number row
+
+
 # "under 30-foot motor boats" is a SIZE, not a budget — reading it as a $30 cap would reject
 # every boat ever posted. So a bare number only counts as money when nothing unit-like follows it.
 _CAP_UNIT_RE = (

@@ -10,7 +10,8 @@ See cl_geo.watch_price_cap / cl_geo.place_from_text / scheduler._keyword_prefilt
 
 from __future__ import annotations
 
-from web_watcher.cl_geo import place_from_text, price_cap_from_text, watch_price_cap
+from web_watcher.cl_geo import (is_placeholder_price, place_from_text, price_cap_from_text,
+                                watch_price_cap)
 from web_watcher.config import Watch
 from web_watcher.scheduler import _keyword_prefilter, _price_cap_for, _watch_geolocation
 
@@ -83,6 +84,47 @@ def test_over_budget_listings_are_dropped_before_the_judge():
 def test_a_listing_exactly_at_the_cap_is_kept():
     kept, _ = _keyword_prefilter([_L("At the cap", 15000)], _watch())
     assert len(kept) == 1
+
+
+def test_a_listing_slightly_over_the_cap_is_kept():
+    """The "on the edge" grace band: a $16k boat on a $15k watch is worth seeing — a seller often
+    takes a bit less. Within 10% of the cap comes through on PURPOSE now, not by luck."""
+    kept, dropped = _keyword_prefilter(
+        [_L("Just over", 16000), _L("Right at the edge", 16500)], _watch())   # cap*1.10 = 16,500
+    assert [l.title for l in kept] == ["Just over", "Right at the edge"]
+    assert not dropped
+
+
+def test_a_listing_past_the_grace_band_is_still_dropped():
+    """Grace is small: $17k is past the 10% band on a $15k watch, and $30k is nowhere near."""
+    kept, dropped = _keyword_prefilter(
+        [_L("Too far over", 17000), _L("Way over", 30000)], _watch())
+    assert kept == []
+    assert len(dropped) == 2 and "over budget" in dropped[0].judge_reason
+
+
+# ── placeholder "make me an offer" prices ─────────────────────────────────────────
+
+def test_placeholder_prices_are_recognised():
+    for junk in (12345, 123456, 1234567, 99999, 11111, 555555, 0, -1, "12345", "99,999"):
+        assert is_placeholder_price(junk) is True, junk
+
+
+def test_real_prices_are_not_mistaken_for_placeholders():
+    for real in (2345, 9500, 15000, 8800, 1234, 1111, 12000, 4250, 6200, 750):
+        assert is_placeholder_price(real) is False, real
+    assert is_placeholder_price(None) is False and is_placeholder_price("call") is False
+
+
+def test_a_placeholder_price_is_not_dropped_as_over_budget():
+    """A '$12,345 — obo' post on a $15k watch used to survive by luck; on a lower-budget watch it
+    was WRONGLY dropped as over budget. Now it's treated as unknown and the judge gets to look."""
+    w = _watch(urls=["https://skagit.craigslist.org/search/boo?max_price=8000"],
+               instruction="cars under 8k")
+    kept, dropped = _keyword_prefilter(
+        [_L("Make offer boat", 12345), _L("Real over-budget", 20000)], w)
+    assert [l.title for l in kept] == ["Make offer boat"]     # placeholder kept
+    assert [l.title for l in dropped] == ["Real over-budget"]  # a real over-budget price still goes
 
 
 def test_a_listing_with_no_price_is_never_dropped_on_price():

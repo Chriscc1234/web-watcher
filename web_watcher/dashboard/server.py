@@ -2283,6 +2283,36 @@ def _looks_like_a_blank_template(text: str) -> bool:
     return len(_PLACEHOLDER_RE.findall(text or "")) >= 3
 
 
+# A reply that walks through listings item by item: "**Match 1:** … Title: … Price: $12,000".
+_ENUM_LINE_RE = re.compile(r"^\s*(?:[-*•‣]|\d+[.)])\s+\S", re.M)
+_ITEM_FIELD_RE = re.compile(r"\b(?:title|price|location|description|link|url|match\s*\d)\s*[:：]", re.I)
+
+
+def _prose_enumerates_listings(text: str) -> bool:
+    """True when the reply is itself walking through a list of items.
+
+    This is the guard against the worst failure this assistant has: asked for the matches, the
+    small model writes out plausible listings it INVENTED — "20ft Motor Boat with Outboard
+    Engine, $12,000, Everett" — while the real rows travel alongside it. Blank placeholders are
+    obviously wrong to a reader; convincing fabrications are not, and someone could drive to
+    Everett for a boat that never existed.
+
+    So whenever we hold the real rows, the model does not get to narrate them. It needs a
+    genuine list shape (several bulleted/numbered items, or repeated Title:/Price: fields) —
+    ordinary prose that merely mentions one price is left alone."""
+    t = text or ""
+    if len(_ITEM_FIELD_RE.findall(t)) >= 3:
+        return True
+    bullets = [m for m in _ENUM_LINE_RE.findall(t)]
+    if len(bullets) < 2:
+        return False
+    # Bulleted lines that carry a price or a listing field — a plain bulleted answer is fine.
+    listish = sum(1 for line in t.splitlines()
+                  if _ENUM_LINE_RE.match(line) and (re.search(r"\$\s?\d", line)
+                                                    or _ITEM_FIELD_RE.search(line)))
+    return listish >= 2
+
+
 def _lookup_limit(text: str, default: int = 10) -> int:
     """'top 20' / 'show me 5' → that many. Bounded so a stray number can't dump the whole DB."""
     m = re.search(r"\b(?:top|first|best|show me)\s+(\d{1,6})\b", text or "", re.I)
@@ -3671,12 +3701,14 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                     message = (f"{act.title()}ing your {len(watch_actions)} watch(es)."
                                if watch_actions else "You don't have any watches yet.")
 
-        # The model sometimes answers "show me the matches" by inventing a BLANK TEMPLATE —
-        # "**Title:** [Boat Title] … **Price:** $XX,XXX … **URL:** [Link to Listing]" — and the
-        # real listings then arrive underneath it. The reader gets a screenful of fill-in-the-
-        # blanks before anything useful. When we have the actual rows, that scaffolding is
-        # replaced with a plain lead-in; the listings themselves are the answer.
-        if listings and _looks_like_a_blank_template(message):
+        # WE HOLD THE REAL ROWS, SO THE MODEL DOES NOT GET TO NARRATE THEM. Asked for the
+        # matches, the small model either writes a blank template ("**Title:** [Boat Title] …
+        # $XX,XXX") or — far worse — invents convincing ones ("20ft Motor Boat with Outboard
+        # Engine, $12,000, Everett") while the genuine listings travel alongside it. A reader can
+        # see through blanks; they cannot see through a fabrication, and someone could drive to
+        # Everett for a boat that never existed. Either shape is replaced with a plain lead-in.
+        if listings and (_looks_like_a_blank_template(message)
+                         or _prose_enumerates_listings(message)):
             what = (lq or {}).get("watch") or "your watches"
             message = f"Here {'is' if len(listings) == 1 else 'are'} " \
                       f"{len(listings)} match{'' if len(listings) == 1 else 'es'} for “{what}”:"

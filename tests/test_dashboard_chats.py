@@ -280,3 +280,79 @@ def test_real_prose_is_never_mistaken_for_a_template():
 def test_one_bracketed_phrase_is_not_scaffolding():
     """A single bracket is ordinary writing; a repeated pattern of them is a template."""
     assert S._looks_like_a_blank_template("The best one is [see the list below].") is False
+
+
+# ── the model does not narrate listings we already hold ──────────────────────────
+# The worst failure this assistant has produced: asked for the matches, it wrote out plausible
+# listings it INVENTED — "20ft Motor Boat with Outboard Engine, $12,000, Everett" — while the
+# genuine rows travelled alongside. Blank placeholders are obviously wrong to a reader;
+# convincing fabrications are not, and someone could drive to Everett for a boat that never was.
+
+_FABRICATED = """Sure, here's a full list of all the matches found so far:
+
+- **Match 1:**
+  - Title: "20ft Motor Boat with Outboard Engine"
+  - Price: $12,000
+  - Location: Everett
+
+- **Match 2:**
+  - Title: "Used 25ft Motor Boat for Sale"
+  - Price: $14,500
+"""
+
+
+def test_invented_listings_are_recognised_as_an_enumeration():
+    assert S._prose_enumerates_listings(_FABRICATED) is True
+
+
+def test_a_blank_template_is_also_an_enumeration():
+    assert S._prose_enumerates_listings(
+        "1. **Title:** [Boat Title]\n   **Price:** $XX,XXX\n"
+        "2. **Title:** [Boat Title]\n   **Price:** $XX,XXX") is True
+
+
+def test_ordinary_prose_about_the_finds_is_kept():
+    for good in ("Here are the 10 matches — the Sea Ray at $14,500 looks like the best value.",
+                 "I pulled up 10 boats. A couple are over your budget.",
+                 "The best one is the 1983 Bayliner at $15,000.",
+                 "Nothing new since yesterday."):
+        assert S._prose_enumerates_listings(good) is False, good
+
+
+def test_a_plain_bulleted_answer_is_not_an_enumeration():
+    """Listing the WATCHES is fine — the guard is about narrating listing rows."""
+    assert S._prose_enumerates_listings(
+        "You have two watches:\n- Anacortes cars\n- Anacortes boats") is False
+
+
+def test_the_guard_only_applies_when_we_hold_the_real_rows(monkeypatch):
+    """With no listings to show, the model's prose is all there is — never discard it."""
+    ran = {}
+    monkeypatch.setattr(S, "_chat_reply_natural", lambda *a, **k: (_FABRICATED, 0, 0, 0))
+    monkeypatch.setattr(S, "_extract_watch_action", lambda *a, **k: {})
+    monkeypatch.setattr(S, "_run_listing_query", lambda p, **k: ran.update(p) or [])
+    monkeypatch.setattr(S, "_persist_chat_turn", lambda *a, **k: None)
+    cfg = AppConfig(watches=[Watch(name="Boats", urls=["https://x"], instruction="boats",
+                                   interval_minutes=30, owner="")])
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "show me the matches"}],
+                                     cfg, "m", owner=None)
+    assert out["message"] == _FABRICATED          # nothing better to offer, so it stands
+
+
+def test_fabricated_prose_is_replaced_when_rows_exist(monkeypatch):
+    rows = [{"title": "1983 Bayliner Explorer 2070", "price_text": "$15,000", "url": "https://x/1"},
+            {"title": "1998 Scarab 22'", "price_text": "$12,500", "url": "https://x/2"}]
+    monkeypatch.setattr(S, "_chat_reply_natural", lambda *a, **k: (_FABRICATED, 0, 0, 0))
+    monkeypatch.setattr(S, "_extract_watch_action", lambda *a, **k: {})
+    monkeypatch.setattr(S, "_run_listing_query", lambda p, **k: rows)
+    monkeypatch.setattr(S, "_persist_chat_turn", lambda *a, **k: None)
+    cfg = AppConfig(watches=[Watch(name="Boats", urls=["https://x"], instruction="boats",
+                                   interval_minutes=30, owner="")])
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    out = S._complete_assistant_turn("sys", [{"role": "user", "content": "show me the matches"}],
+                                     cfg, "m", owner=None)
+    assert "Everett" not in out["message"]        # the invented boat is gone
+    assert "12,000" not in out["message"]
+    assert "2 matches" in out["message"] and "Boats" in out["message"]
+    assert out["listings"] == rows                # the real rows are what's shown

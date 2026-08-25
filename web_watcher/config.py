@@ -109,6 +109,15 @@ class CloudConfig(BaseModel):
     # month's estimated spend reaches it, cloud calls stop and fall back to the LOCAL models
     # for the rest of the month — so the bill can't run past what you set. See web_watcher/llm.py.
     monthly_budget_usd: float = 0.0
+    # A second, tighter ceiling on ONE DAY's spend. The monthly cap alone can be emptied in an
+    # afternoon by a loop nobody noticed; the daily cap turns "I lost the month" into "I lost a
+    # day" and it heals itself at midnight. 0 = no daily cap.
+    daily_budget_usd: float = 0.0
+    # AUTO ROUTING (the default, and what the UI exposes instead of a model chooser). Every call
+    # runs on the LOCAL model first; cloud is used only when the local answer objectively fails a
+    # check, and then it climbs the cheapest-first ladder. Nothing is routed on a guess, so a
+    # working local model costs nothing. Set False to use the explicit `roles` map instead.
+    auto: bool = True
 
 
 class ModelsConfig(BaseModel):

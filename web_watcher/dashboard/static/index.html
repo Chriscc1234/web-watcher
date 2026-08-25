@@ -449,27 +449,40 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
           <span id="cred-an-chat-label" style="font-size:13px;color:var(--dim)">Off</span>
         </label>
       </div>
+      <!-- No model chooser on purpose. Picking a model per task is a guess a person shouldn't
+           have to make; the app runs your local model first and only pays for Claude when that
+           answer actually fails, climbing from the cheapest model up. -->
+      <div class="service-card" style="padding:12px 14px;margin-top:12px;background:var(--bg)">
+        <div style="font-weight:600;margin-bottom:4px">How it picks a model</div>
+        <div style="font-size:12px;color:var(--dim);line-height:1.55">
+          Automatic — there's nothing to choose. Every request runs on your <b>local model first</b>,
+          free. The app then checks that answer, and only if it actually failed does it pay for
+          Claude, starting at the <b>cheapest</b> model and going up only if that one fails too.
+          So a working local model costs you nothing, and you never pay on a guess about whether
+          a question was "hard". Rating listings always stays local — it runs on every listing of
+          every sweep, which is how a budget disappears overnight.
+        </div>
+      </div>
       <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
         <div style="flex:1;min-width:160px">
-          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Chat model</label>
-          <select id="cred-an-chat-model" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
-            <option value="claude-haiku-4-5">Haiku — cheapest, fast</option>
-            <option value="claude-sonnet-5">Sonnet — nicer replies, a bit more</option>
-            <option value="claude-opus-5">Opus — best, priciest</option>
-          </select>
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Monthly cap (USD)</label>
+          <input id="cred-an-budget" type="number" min="0" step="1" placeholder="e.g. 10 (0 = no cap)"
+                 style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
         </div>
         <div style="flex:1;min-width:160px">
-          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Monthly spending cap (USD)</label>
-          <input id="cred-an-budget" type="number" min="0" step="1" placeholder="e.g. 40 (0 = no cap)"
+          <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Daily cap (USD)</label>
+          <input id="cred-an-daily" type="number" min="0" step="0.5" placeholder="e.g. 1 (0 = no cap)"
                  style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border,#333);border-radius:6px;font-size:13px">
         </div>
       </div>
       <div style="font-size:12px;color:var(--dim);margin-top:6px">
-        When the month's estimated Claude spend hits your cap, Web Watcher automatically switches
-        back to the local models for the rest of the month — so the bill can't run past it. You can
-        also just ask The Watcher "how much have I spent this month?"
+        Hit either cap and Web Watcher falls back to the local models until it resets — so the bill
+        can't run past it. Set the monthly cap <b>below</b> what you've actually loaded: a cap equal
+        to your balance only stops you once the money's already gone. The daily cap is the one that
+        turns a runaway afternoon into a lost afternoon instead of a lost month.
       </div>
       <div id="cred-an-spend" style="font-size:12px;color:var(--dim);margin-top:10px"></div>
+      <div id="cred-an-esc" style="font-size:12px;color:var(--dim);margin-top:10px"></div>
     </div>
 
     <!-- Email -->
@@ -3323,10 +3336,10 @@ async function loadCredentials() {
   if (chk) chk.value = (tg.checkin_hours === undefined || tg.checkin_hours === null) ? '' : tg.checkin_hours;
   const cchk = document.getElementById('cred-an-chat-chk');
   if (cchk) { cchk.checked = !!an.chat_enabled; _applyChatToggle(!!an.chat_enabled); }
-  const cm = document.getElementById('cred-an-chat-model');
-  if (cm && an.chat_model) cm.value = an.chat_model;
   const bud = document.getElementById('cred-an-budget');
   if (bud) bud.value = (an.monthly_budget_usd && an.monthly_budget_usd > 0) ? an.monthly_budget_usd : '';
+  const day = document.getElementById('cred-an-daily');
+  if (day) day.value = (an.daily_budget_usd && an.daily_budget_usd > 0) ? an.daily_budget_usd : '';
   const spend = document.getElementById('cred-an-spend');
   if (spend) {
     if (sp.cap && sp.cap > 0)
@@ -3335,12 +3348,46 @@ async function loadCredentials() {
     else if (sp.month_spent > 0)
       spend.textContent = `This month: ~$${(sp.month_spent||0).toFixed(2)} on Claude (no cap set).`;
     else spend.textContent = '';
+    if (spend.textContent && sp.today !== undefined)
+      spend.textContent += `  Today: $${(sp.today||0).toFixed(2)}.`;
   }
+  loadEscalations();
   const setV = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; };
   setV('cred-em-server', em.smtp_server); setV('cred-em-port', em.smtp_port);
   setV('cred-em-from', em.from_address); setV('cred-em-to', em.to_address);
   const emPass = document.getElementById('cred-em-pass');
   if (emPass) emPass.placeholder = em.password_set ? '•••• saved — leave blank to keep' : '••••••••';
+}
+
+// What has actually needed Claude — the running list of what the local model couldn't do.
+// This is the evidence for every dollar, and the to-do list for what to improve locally.
+async function loadEscalations() {
+  const el = document.getElementById('cred-an-esc');
+  if (!el) return;
+  try {
+    const d = await api('/api/cloud/escalations?limit=8');
+    const s = d.summary || {};
+    if (!s.count) {
+      el.innerHTML = '<span style="color:var(--dim)">Nothing has needed Claude yet — '
+                   + 'your local model has handled every request.</span>';
+      return;
+    }
+    const reasons = Object.entries(s.by_reason || {})
+      .sort((a,b) => b[1]-a[1])
+      .map(([why,n]) => `${n}× ${escapeHtml(why)}`).join(' · ');
+    const rows = (d.recent || []).map(r => {
+      const when = new Date((r.ts||0)*1000).toLocaleString();
+      return `<div style="padding:6px 0;border-top:1px solid var(--border)">
+        <div style="color:var(--text)">${escapeHtml((r.prompt||'').slice(0,110))}</div>
+        <div style="color:var(--dim);font-size:11px">${when} · ${escapeHtml(r.used||'')}
+          · $${(r.cost_usd||0).toFixed(4)} · ${escapeHtml(r.why||'')}</div>
+      </div>`;
+    }).join('');
+    el.innerHTML = `<details><summary style="cursor:pointer;color:var(--blue)">
+        ${s.count} request${s.count===1?'':'s'} needed Claude
+        (~$${(s.cost_usd||0).toFixed(4)} total, $${(s.avg_cost_usd||0).toFixed(4)} each) — see them</summary>
+      <div style="margin-top:6px">${reasons}</div>${rows}</details>`;
+  } catch(e) { el.textContent = ''; }
 }
 
 async function saveCredentials(btn) {
@@ -3354,8 +3401,8 @@ async function saveCredentials(btn) {
     anthropic: { api_key: document.getElementById('cred-an-key').value.trim(),
                  judge_enabled: document.getElementById('cred-an-judge-chk').checked,
                  chat_enabled: document.getElementById('cred-an-chat-chk').checked,
-                 chat_model: document.getElementById('cred-an-chat-model').value,
-                 monthly_budget_usd: document.getElementById('cred-an-budget').value.trim() || 0 },
+                 monthly_budget_usd: document.getElementById('cred-an-budget').value.trim() || 0,
+                 daily_budget_usd: document.getElementById('cred-an-daily').value.trim() || 0 },
     email: { smtp_server: document.getElementById('cred-em-server').value.trim(),
              smtp_port: document.getElementById('cred-em-port').value.trim(),
              from_address: document.getElementById('cred-em-from').value.trim(),

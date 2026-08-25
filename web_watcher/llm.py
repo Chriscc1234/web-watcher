@@ -38,7 +38,7 @@ import os
 import re
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -388,9 +388,15 @@ def _add_month_spend(cost: float, data_dir=None) -> None:
     if cost <= 0:
         return
     month = _current_month()
+    day = "day:" + _current_day()
     with _spend_lock:
         led = _read_ledger(data_dir)
         led[month] = round(float(led.get(month, 0.0)) + float(cost), 6)
+        led[day] = round(float(led.get(day, 0.0)) + float(cost), 6)
+        # Keep the file from growing forever: only the last ~40 daily rows are useful.
+        days = sorted(k for k in led if k.startswith("day:"))
+        for stale in days[:-40]:
+            led.pop(stale, None)
         try:
             p = _spend_path(data_dir)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -411,12 +417,252 @@ def budget_state(cfg, data_dir=None) -> dict:
         cap = float(getattr(cfg.models.cloud, "monthly_budget_usd", 0.0) or 0.0)
     except Exception:
         cap = 0.0
+    try:
+        day_cap = float(getattr(cfg.models.cloud, "daily_budget_usd", 0.0) or 0.0)
+    except Exception:
+        day_cap = 0.0
     spent = month_spend(data_dir)
+    today = day_spend(data_dir)
     remaining = round(cap - spent, 4) if cap > 0 else None
     return {"month": _current_month(), "spent": round(spent, 4), "cap": cap,
-            "remaining": remaining, "over": bool(cap > 0 and spent >= cap)}
+            "remaining": remaining, "over": bool(cap > 0 and spent >= cap),
+            "today": round(today, 4), "day_cap": day_cap,
+            "over_today": bool(day_cap > 0 and today >= day_cap)}
 
 
 def over_budget(cfg, data_dir=None) -> bool:
-    """True when this month's estimated spend has reached the configured cap (cap 0 = never)."""
-    return budget_state(cfg, data_dir)["over"]
+    """True when this month's OR today's estimated spend has reached its cap (cap 0 = never)."""
+    st = budget_state(cfg, data_dir)
+    return bool(st["over"] or st.get("over_today"))
+
+
+def _current_day() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def day_spend(data_dir=None) -> float:
+    """Estimated cloud spend so far TODAY (USD)."""
+    return float(_read_ledger(data_dir).get("day:" + _current_day(), 0.0))
+
+
+# ---------------------------------------------------------------------------
+# Auto routing — local first, cloud only when local demonstrably failed
+# ---------------------------------------------------------------------------
+#
+# The money question is "when is Claude worth paying for?", and the tempting answer — have a
+# model predict which turns are hard — is the wrong one twice over: it spends a GPU call BEFORE
+# every decision, and a prediction is exactly as unreliable as the local answer it's trying to
+# pre-empt. So we don't predict. We let the local model actually do the work, CHECK the result,
+# and escalate only what objectively failed. A local model that's coping costs nothing at all,
+# and we never pay for a guess.
+#
+# When we do escalate, we climb cheapest-first and stop at the first rung that produces a usable
+# answer, so the expensive models are reached only by the handful of calls that truly need them.
+CLOUD_LADDER: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5")
+
+# Roles allowed to escalate at all. The per-sweep JUDGE is deliberately absent: it runs on every
+# listing of every sweep, so routing it to cloud is how a budget disappears overnight — and a
+# local probe found the 14b's ratings as good as a 32b's anyway. Vision is absent because the
+# cloud vision path isn't wired. The slow local quality tier (inspect/review/comprehend) is
+# absent because it already has the biggest local model and all the time it wants.
+ESCALATABLE_ROLES: frozenset = frozenset({"chat", "extract", "vet", "terms"})
+
+
+def cloud_ready(cfg, role: str) -> tuple[bool, str]:
+    """(can this role escalate to cloud right now?, why not). Never raises."""
+    try:
+        cloud = cfg.models.cloud
+    except Exception:
+        return (False, "no cloud config")
+    if not getattr(cloud, "auto", True):
+        return (False, "auto routing is off")
+    key = (getattr(cloud, "anthropic_api_key", "") or "").strip() or \
+        os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        return (False, "no API key")
+    if role not in ESCALATABLE_ROLES:
+        return (False, f"role {role!r} never escalates")
+    if over_budget(cfg):
+        return (False, "budget cap reached")
+    return (True, "")
+
+
+def looks_usable(text: str, format_json: bool = False) -> bool:
+    """Did the model actually produce an answer? The cheap, deterministic check that decides
+    whether we pay for a better one. Conservative on purpose: it must catch real failures
+    (empty, truncated JSON, a leaked prompt) without calling a short-but-correct reply broken."""
+    t = (text or "").strip()
+    if len(t) < 2:
+        return False
+    if format_json:
+        try:
+            data = json.loads(_extract_json_text(t))
+        except Exception:
+            return False
+        return isinstance(data, (dict, list))
+    # Prose: reject a reply that's really machine output leaking into the chat, or one that
+    # just parrots the instructions back.
+    if t.startswith("{") or t.startswith("["):
+        return False
+    if re.match(r"^\s*(system|assistant|user)\s*:", t, re.I):
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# The escalation log — every dollar, with the evidence for why it was spent
+# ---------------------------------------------------------------------------
+#
+# Each escalation is appended here with BOTH answers: what the local model produced, why that
+# failed the check, and what the cloud model said instead. That makes the log three things at
+# once — an audit trail for the bill, a growing corpus of exactly what the local model can't do
+# (which is what tells us where to fix a prompt or pull a better local model), and the evidence
+# for whether paying is even buying anything.
+#
+# It is deliberately NOT wired back into routing. Feeding it into a predictor would quietly
+# reinstate the guess-first design this replaced. It's for people to read and act on.
+_ESC_FILENAME = "cloud_escalations.jsonl"
+_ESC_KEEP = 500
+
+
+def _esc_path(data_dir=None):
+    from pathlib import Path
+    if data_dir is not None:
+        return Path(data_dir) / _ESC_FILENAME
+    from web_watcher import paths
+    return paths.data_dir() / _ESC_FILENAME
+
+
+def record_escalation(role: str, why: str, used: str, cost: float,
+                      local_text: str = "", cloud_text: str = "", prompt: str = "",
+                      data_dir=None) -> None:
+    """Append one escalation. Never raises — logging must not break a reply."""
+    entry = {
+        "ts": time.time(), "role": role, "why": why, "used": used,
+        "cost_usd": round(float(cost), 6),
+        "prompt": (prompt or "")[-400:],
+        "local": (local_text or "")[:400],
+        "cloud": (cloud_text or "")[:400],
+    }
+    try:
+        p = _esc_path(data_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _spend_lock:
+            lines = []
+            if p.exists():
+                lines = p.read_text(encoding="utf-8").splitlines()[-(_ESC_KEEP - 1):]
+            lines.append(json.dumps(entry, ensure_ascii=False))
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as exc:
+        log.debug("could not record the escalation: %s", exc)
+
+
+def escalations(limit: int = 50, data_dir=None) -> list[dict]:
+    """The most recent escalations, newest first."""
+    try:
+        p = _esc_path(data_dir)
+        if not p.exists():
+            return []
+        rows = []
+        for line in p.read_text(encoding="utf-8").splitlines()[-limit:]:
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+        return list(reversed(rows))
+    except Exception:
+        return []
+
+
+def escalation_summary(data_dir=None) -> dict:
+    """What has actually needed Claude, aggregated — the answer to "is this worth paying for,
+    and what should I fix so it isn't?"."""
+    rows = escalations(_ESC_KEEP, data_dir)
+    by_reason: dict[str, int] = {}
+    by_role: dict[str, int] = {}
+    by_model: dict[str, int] = {}
+    total = 0.0
+    for r in rows:
+        by_reason[r.get("why", "?")] = by_reason.get(r.get("why", "?"), 0) + 1
+        by_role[r.get("role", "?")] = by_role.get(r.get("role", "?"), 0) + 1
+        by_model[r.get("used", "?")] = by_model.get(r.get("used", "?"), 0) + 1
+        total += float(r.get("cost_usd", 0.0) or 0.0)
+    return {"count": len(rows), "cost_usd": round(total, 4), "by_reason": by_reason,
+            "by_role": by_role, "by_model": by_model,
+            "avg_cost_usd": round(total / len(rows), 6) if rows else 0.0}
+
+
+def chat_smart(messages: list[dict], *, role: str, local_model: str, cfg=None,
+               validate: Optional[Callable[[str], bool]] = None, format_json: bool = False,
+               timeout: float = 90.0, num_ctx: int = 0, max_tokens: int = 4096,
+               cache_system: bool = False, images: Optional[list[str]] = None) -> dict:
+    """Run a call the thrifty way: LOCAL first, then climb the cloud ladder only if the local
+    answer fails the check.
+
+    Returns {"text", "used", "escalated", "why"} — `used` is "local" or the cloud model id, so
+    callers and the UI can show what actually answered and the log can explain every dollar.
+
+    validate: text -> bool. Defaults to looks_usable(). Pass a stricter one when the caller knows
+    what a good answer looks like (required JSON fields, a non-empty list) — the stricter this
+    check, the better the escalation decision, because it's judging the REAL answer.
+    """
+    if cfg is None:
+        try:
+            from web_watcher.config import load as load_config
+            cfg = load_config()
+        except Exception:
+            cfg = None
+
+    check = validate or (lambda t: looks_usable(t, format_json))
+
+    # 1. Local always gets first refusal. It's free and, on this hardware, usually right.
+    local_text = ""
+    try:
+        local_text = chat(messages, role=role, local_model=local_model, cfg=cfg,
+                          format_json=format_json, images=images, timeout=timeout,
+                          cache_system=cache_system, max_tokens=max_tokens,
+                          force_local=True, num_ctx=num_ctx)
+        if check(local_text):
+            return {"text": local_text, "used": "local", "escalated": False, "why": ""}
+        why = "the local answer failed the check"
+    except Exception as exc:
+        why = f"the local model errored ({type(exc).__name__})"
+        log.warning("chat_smart: local failed for role %r: %s", role, exc)
+
+    ok, blocked = cloud_ready(cfg, role)
+    if not ok:
+        log.info("chat_smart: %s for role %r but not escalating — %s", why, role, blocked)
+        return {"text": local_text, "used": "local", "escalated": False, "why": blocked}
+    if images:                       # cloud vision isn't wired — nothing to escalate TO
+        return {"text": local_text, "used": "local", "escalated": False, "why": "no cloud vision"}
+
+    # 2. Climb the ladder, cheapest first, stopping at the first rung that works.
+    _, _, key = ("", "", (getattr(cfg.models.cloud, "anthropic_api_key", "") or "").strip()
+                 or os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    system_text, user_messages = _split_system(messages)
+    for model in CLOUD_LADDER:
+        if over_budget(cfg):
+            log.warning("chat_smart: stopping at the budget cap mid-escalation")
+            break
+        try:
+            before = usage_snapshot()["cost_usd"]
+            text = _anthropic_chat(system_text, user_messages, model, key,
+                                   max_tokens=max_tokens, timeout=timeout,
+                                   cache_system=cache_system)
+            text = _extract_json_text(text) if format_json else text
+            cost = round(usage_snapshot()["cost_usd"] - before, 6)
+            if check(text):
+                log.info("chat_smart: role %r escalated to %s (%s) — $%.4f", role, model, why, cost)
+                record_escalation(role, why, model, cost, local_text, text,
+                                  prompt=(user_messages[-1]["content"] if user_messages else ""))
+                return {"text": text, "used": model, "escalated": True, "why": why,
+                        "cost_usd": cost}
+            log.info("chat_smart: %s also failed the check for role %r — trying the next rung",
+                     model, role)
+        except Exception as exc:
+            log.warning("chat_smart: %s failed for role %r: %s", model, role, exc)
+
+    # 3. Nothing did better than local. Return what we have rather than nothing.
+    return {"text": local_text, "used": "local", "escalated": False,
+            "why": "cloud could not do better"}

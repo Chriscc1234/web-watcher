@@ -856,6 +856,15 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         report = (manager.review_status().get("report")) or _review.latest_report()
         return _review.render_report(report or {})
 
+    @app.get("/api/cloud/escalations")
+    def cloud_escalations(limit: int = 50):
+        """Every call that needed Claude, with both answers and what it cost — the audit trail
+        for the bill and the list of what the local model can't do yet."""
+        from web_watcher import llm
+        return {"summary": llm.escalation_summary(),
+                "budget": llm.budget_state(_load_cfg()),
+                "recent": llm.escalations(max(1, min(limit, 200)))}
+
     # ------------------------------------------------------------------
     # Site drill — can we actually use this site?
     # ------------------------------------------------------------------
@@ -1328,7 +1337,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             "spend": {"cost_usd": round(spend.get("cost_usd", 0.0), 4),
                       "calls": spend.get("calls", 0),
                       "month_spent": budget["spent"], "cap": budget["cap"],
-                      "remaining": budget["remaining"]},
+                      "remaining": budget["remaining"],
+                      "today": budget.get("today", 0.0), "day_cap": budget.get("day_cap", 0.0)},
             "telegram": {"chat_id": tg.chat_id, "token_set": bool(tg.bot_token),
                          "token_hint": _mask(tg.bot_token),
                          "two_way": bool(getattr(tg, "two_way", False)),
@@ -1346,6 +1356,8 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "chat_enabled": chat_on,
                 "chat_model": (chat_route.model if chat_route else "") or "claude-haiku-4-5",
                 "monthly_budget_usd": budget["cap"],
+                "daily_budget_usd": budget.get("day_cap", 0.0),
+                "auto": bool(getattr(cloud, "auto", True)),
             },
         }
 
@@ -1407,6 +1419,11 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             else:
                 roles.pop("chat", None)
         cfg.models.cloud.roles = roles
+        if "daily_budget_usd" in an:
+            try:
+                cfg.models.cloud.daily_budget_usd = max(0.0, float(an["daily_budget_usd"] or 0))
+            except (TypeError, ValueError):
+                pass
         if "monthly_budget_usd" in an:
             try:
                 cfg.models.cloud.monthly_budget_usd = max(0.0, float(an["monthly_budget_usd"] or 0))
@@ -3222,11 +3239,20 @@ def _chat_reply_natural(system: str, messages: list, model: str, force_local: bo
     # only the hard turns escalate to cloud when it's on (force_local=False). Falls back to local
     # automatically on any cloud error. See llm.py and _is_hard_chat_turn.
     from web_watcher import llm
-    text = llm.chat(
-        [{"role": "system", "content": system + "\n\n" + _CONVERSE_OVERRIDE}, *messages],
-        role="chat", local_model=model, cfg=_load_cfg(), timeout=90.0, cache_system=True,
-        force_local=force_local,
-    )
+    cfg = _load_cfg()
+    msgs = [{"role": "system", "content": system + "\n\n" + _CONVERSE_OVERRIDE}, *messages]
+
+    # AUTO (the default): run local, check the answer, and pay for Claude only if the local one
+    # actually failed. force_local is honoured as a hard "never escalate this turn".
+    if getattr(getattr(cfg.models, "cloud", None), "auto", True) and not force_local:
+        got = llm.chat_smart(msgs, role="chat", local_model=model, cfg=cfg,
+                             timeout=90.0, cache_system=True)
+        if got["escalated"]:
+            log.info("chat: escalated to %s — %s", got["used"], got["why"])
+        return (_prose(got["text"]), 0, 0, 0)
+
+    text = llm.chat(msgs, role="chat", local_model=model, cfg=cfg, timeout=90.0,
+                    cache_system=True, force_local=force_local)
     # Token counts are an Ollama-only diagnostic; the cloud path simply reports none.
     return (_prose(text), 0, 0, 0)
 

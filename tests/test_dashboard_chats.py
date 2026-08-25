@@ -446,3 +446,51 @@ def test_an_empty_reply_is_replaced():
 def test_the_shapes_caught_before_are_still_caught():
     assert S._should_replace_prose(_FABRICATED) is True
     assert S._should_replace_prose("1. **Title:** [Boat Title]\n   **Price:** $XX,XXX") is True
+
+
+# ── a model-emitted lookup on a non-lookup message must not dump the store ────────
+# Live: "What's currently on my watchlist?" — not a lookup — was answered with "200 matches for
+# 'your watches'". The classifier correctly said not-a-lookup, so the scoping code was skipped and
+# the model's own raw, unscoped listing_query ran with the 200-row default. Both paths must scope.
+
+def _lookup_ran(monkeypatch, text, model_lq, cfg, owner=None):
+    ran = {"called": False, "params": None}
+    monkeypatch.setattr(S, "_chat_reply_natural", lambda *a, **k: ("ok", 0, 0, 0))
+    monkeypatch.setattr(S, "_extract_watch_action",
+                        lambda *a, **k: ({"listing_query": model_lq} if model_lq else {}))
+    def run(p, **k):
+        ran["called"] = True; ran["params"] = p; return []
+    monkeypatch.setattr(S, "_run_listing_query", run)
+    monkeypatch.setattr(S, "_persist_chat_turn", lambda *a, **k: None)
+    monkeypatch.setattr(S, "_load_cfg", lambda: cfg)
+    S._complete_assistant_turn("sys", [{"role": "user", "content": text}], cfg, "m", owner=owner)
+    return ran
+
+
+def test_a_watchlist_question_does_not_trigger_a_listing_dump(monkeypatch):
+    """The exact live case: not a lookup + a raw model query + two watches → drop it."""
+    cfg = _two_watches()
+    ran = _lookup_ran(monkeypatch, "What's currently on my watchlist?", {}, cfg)
+    assert ran["called"] is False          # no unscoped 200-row dump
+
+
+def test_a_watchlist_question_is_not_a_lookup():
+    assert S._is_lookup_request("What's currently on my watchlist?") is False
+    assert S._is_lookup_request("what watches do I have") is False
+    assert S._is_lookup_request("are there any watches running") is False
+
+
+def test_a_model_lookup_naming_a_watch_still_runs(monkeypatch):
+    """If the user's own words name a watch, a model lookup is legitimate even off a loose phrasing."""
+    cfg = _two_watches()
+    ran = _lookup_ran(monkeypatch, "anything from the boats?", {}, cfg)
+    assert ran["called"] is True
+    assert ran["params"]["watch"] == "Anacortes Under 30' Motor Boats Watch"
+    assert ran["params"]["limit"] == 10        # capped, not the 200 default
+
+
+def test_a_real_lookup_still_works_after_the_restructure(monkeypatch):
+    cfg = _two_watches()
+    ran = _lookup_ran(monkeypatch, "show me the matches for boats", {}, cfg)
+    assert ran["called"] is True
+    assert ran["params"]["watch"] == "Anacortes Under 30' Motor Boats Watch"

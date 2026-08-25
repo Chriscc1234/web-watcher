@@ -3606,24 +3606,36 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         #     because the model omitted the watch, the matched-only flag and the limit.
         # So we fill a missing query AND complete a vague one, without overriding anything the
         # model actually decided.
-        if _is_lookup_request(latest := _latest_user_text(conv)):
+        # A lookup runs when EITHER the user plainly asked to see finds OR the model emitted a
+        # listing_query on its own. Both paths go through the SAME scoping+capping here, because
+        # the raw model query is the dangerous one: "what's on my watchlist?" isn't a lookup, but
+        # the model answered it with an unscoped, uncapped query that dumped 200 rows of
+        # everything. Whatever produced the query, it leaves this block scoped to a watch and
+        # capped — or dropped.
+        is_lookup = _is_lookup_request(latest := _latest_user_text(conv))
+        if is_lookup or isinstance(lq, dict):
             target = focus if (focus and focus != PENDING_CREATE) else ""
             if not target:
                 target = _watch_named_in(latest, cfg, owner)    # "…matches for boats"
-            if not target:
+            if not target and is_lookup:
                 mine = _watches_for_owner(cfg, owner)
                 if len(mine) == 1:
-                    target = mine[0].name           # only one watch — no ambiguity to resolve
+                    target = mine[0].name    # sole watch — safe to assume, but only for a real lookup
             if not isinstance(lq, dict):
                 lq = {}
-                log.info("chat: the user asked to see finds but the model produced no lookup")
             if not (lq.get("watch") or "").strip() and target:
                 lq["watch"] = target
             if lq.get("matched_only") is None:
                 lq["matched_only"] = True           # "show me the matches" means the MATCHES
             if not lq.get("limit"):
                 lq["limit"] = _lookup_limit(latest)
-            if lq.get("watch"):
+            # The model hallucinated a lookup for a message that never asked to SEE listings, and
+            # we can't pin it to a watch the user referenced — running it would dump the whole
+            # store. Drop it; the model's own prose (which has the watch context) answers.
+            if not is_lookup and not (lq.get("watch") or "").strip():
+                lq = None
+                log.info("chat: dropped an unscoped model lookup for a non-lookup message")
+            elif isinstance(lq, dict) and lq.get("watch"):
                 log.info("chat: listing lookup scoped to %r (matched_only=%s, limit=%s)",
                          lq["watch"], lq["matched_only"], lq["limit"])
         if isinstance(lq, dict):

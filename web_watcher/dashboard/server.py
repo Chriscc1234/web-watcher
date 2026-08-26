@@ -984,6 +984,27 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             "max_mileage": max_mileage, "limit": limit,
         })
 
+    @app.post("/api/watches/{watch_name}/antikeyword")
+    def add_antikeyword(watch_name: str, body: dict, bg: BackgroundTasks):
+        """Append ONE antikeyword to a watch (dedup, case-insensitive) — an APPEND, not a replace,
+        so we never wipe the watch's existing filters. Feeds the 'not a match → skip ones like
+        this' flow. Body: {word}."""
+        from web_watcher.config import load, save
+        word = (body.get("word") or "").strip().lower()
+        cfg = load()
+        watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
+        w = next((x for x in cfg.watches if x.name == watch_name), None)
+        if w is None:
+            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+        if not word:
+            raise HTTPException(400, detail="no word given")
+        existing = [a for a in (w.antikeywords or [])]
+        if word not in [a.lower() for a in existing]:
+            w.antikeywords = existing + [word]
+            save(cfg)
+            bg.add_task(manager.reload_scheduler)
+        return {"ok": True, "name": watch_name, "antikeywords": w.antikeywords}
+
     @app.post("/api/listings/exclude")
     def exclude_listing_ep(body: dict):
         """Hand-remove a bad match. Marks the listing excluded+unmatched for every watch that

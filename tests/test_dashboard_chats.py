@@ -360,6 +360,22 @@ def test_reset_intent_is_recognised():
         assert not S._RESET_RE.search(msg), msg
 
 
+def test_antikeyword_append_is_additive_and_deduped(monkeypatch, isolated):
+    from web_watcher import config as _config
+    cfg = AppConfig(watches=[Watch(name="Boats", urls=["https://x"], instruction="boats",
+                                   interval_minutes=30, antikeywords=["kayak"])])
+    saved = {}
+    monkeypatch.setattr(_config, "load", lambda: cfg)
+    monkeypatch.setattr(_config, "save", lambda c: saved.update(anti=list(c.watches[0].antikeywords)))
+    client = TestClient(create_app(MagicMock()))
+    r = client.post("/api/watches/Boats/antikeyword", json={"word": "Utility"})
+    assert r.status_code == 200
+    assert saved["anti"] == ["kayak", "utility"]       # appended, lowercased, not replaced
+    saved.clear()
+    r2 = client.post("/api/watches/Boats/antikeyword", json={"word": "KAYAK"})
+    assert r2.status_code == 200 and "anti" not in saved   # dup → no re-save
+
+
 def test_reset_action_clears_results_and_reenables(monkeypatch, isolated):
     from web_watcher import config as _config, storage as _storage
     cfg = AppConfig(watches=[Watch(name="Boats", urls=["https://x"], instruction="boats",

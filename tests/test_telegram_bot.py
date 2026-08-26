@@ -211,6 +211,49 @@ def test_not_a_match_in_chat_removes_the_last_shown_listing(monkeypatch):
     assert "111" not in b._last_listing            # cleared after removal
 
 
+def test_not_a_match_offers_an_antikeyword_when_the_watch_is_known(monkeypatch):
+    b = _bridge("111")
+    b._last_listing["111"] = {"url": "https://x/bad", "title": "Jeep (Sport Utility)", "watch": "Cars"}
+    sent = []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+
+    class _R:
+        status_code = 200
+        def json(self): return {"removed": 1}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda url, **k: _R())
+    b._handle_message("that's not a match", "111", "Chris")
+    assert b._pending_antikeyword and b._pending_antikeyword["watch"] == "Cars"
+    assert any("skip ones like it" in s.lower() for s in sent)
+
+
+def test_an_antikeyword_word_is_appended_to_the_watch(monkeypatch):
+    b = _bridge("111")
+    b._pending_antikeyword = {"watch": "Cars"}
+    posted, sent = [], []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.append((url, k.get("json")))
+                        or type("R", (), {"status_code": 200})())
+    b._handle_message("utility", "111", "Chris")
+    assert posted and "antikeyword" in posted[0][0] and posted[0][1]["word"] == "utility"
+    assert any("skip listings mentioning" in s.lower() for s in sent)
+    assert b._pending_antikeyword is None
+
+
+def test_declining_the_antikeyword_adds_nothing(monkeypatch):
+    b = _bridge("111")
+    b._pending_antikeyword = {"watch": "Cars"}
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda *a, **k: pytest.fail("declining must not add a filter"))
+    b._handle_message("no", "111", "Chris")
+    assert b._pending_antikeyword is None and sent
+
+
 def test_not_a_match_without_a_shown_listing_asks_which_one(monkeypatch):
     b = _bridge("111")
     sent = []

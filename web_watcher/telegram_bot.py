@@ -137,8 +137,11 @@ class TelegramBridge:
         # tapping 10 then 20 (or double-tapping) would spam two overlapping bursts. chat_id -> ts.
         self._top_cooldown: dict[str, float] = {}
         # The last single listing we showed each chat (a vet verdict, or a one-match lookup), so
-        # "that's not a match" can remove THAT one without a per-card button. chat_id -> {url,title}.
+        # "that's not a match" can remove THAT one without a per-card button. chat_id -> {url,title,watch}.
         self._last_listing: dict[str, dict] = {}
+        # After removing a bad match, we offer to add an antikeyword so similar ones auto-filter.
+        # Held until they answer with a word (or "no"). chat_id -> {"watch": name}.
+        self._pending_antikeyword: dict | None = None
         # Proactive check-in bookkeeping. Seed "last contact" at startup so we don't fire the
         # moment the app launches; a real check-in is a full interval of quiet away.
         self._start_ts = time.time()
@@ -306,6 +309,34 @@ class TelegramBridge:
                 return
             # Anything else: not an answer to the question — fall through and just chat.
 
+        # Answer to "want me to skip ones like this?" — a word to add as an antikeyword, or "no".
+        if self._pending_antikeyword:
+            pend, self._pending_antikeyword = self._pending_antikeyword, None
+            if _is_negative(text):
+                self._send("No problem — I just removed that one.", to)
+                return
+            word = text.strip().strip('"“”\'').lower()
+            if _is_affirmative(text) or not word:
+                self._pending_antikeyword = pend      # they said yes but no word — ask for it
+                self._send("Sure — what word should I avoid? A make, model or type "
+                           "(e.g. “utility”, “diesel”, “project”).", to)
+                return
+            if len(word.split()) <= 3 and len(word) <= 30:
+                self._typing(to)
+                ok = False
+                try:
+                    r = httpx.post(
+                        f"{self.dashboard_url}/api/watches/{quote(pend['watch'])}/antikeyword",
+                        json={"word": word}, timeout=20.0)
+                    ok = r.status_code < 300
+                except Exception as exc:
+                    log.warning("Telegram: add antikeyword failed: %s", exc)
+                self._send(
+                    f"👍 Done — I'll skip listings mentioning “{word}” for “{pend['watch']}”."
+                    if ok else "I couldn't add that filter just now — try again in a moment.", to)
+                return
+            # A longer message — not a word. Drop the offer and treat it as a normal turn.
+
         # "That's not a match" — remove the last match we showed this chat, no button needed.
         if _NOT_A_MATCH_RE.search(text):
             last = self._last_listing.get(to)
@@ -319,8 +350,15 @@ class TelegramBridge:
                 except Exception as exc:
                     log.warning("Telegram: chat exclude failed: %s", exc)
                 name = last.get("title") or "that listing"
+                watch = last.get("watch")
                 if ok:
                     self._last_listing.pop(to, None)
+                # Offer the feedback loop: add an antikeyword so similar ones never match again.
+                if ok and watch:
+                    self._pending_antikeyword = {"watch": watch}
+                    self._send(f"🚫 Removed “{name}”. Want me to skip ones like it? Send a word to "
+                               "avoid (a make, model or type — e.g. “utility”), or “no”.", to)
+                    return
                 self._send(f"🚫 Removed “{name}” from your matches — I won't show it again."
                            if ok else "I couldn't remove that one just now — try again in a moment.",
                            to)
@@ -389,10 +427,14 @@ class TelegramBridge:
                 if i < len(listings) - 1:
                     time.sleep(0.3)
             # Remember a SINGLE shown match so "that's not a match" can target it (ambiguous with
-            # several on screen, so only when there's exactly one).
+            # several on screen, so only when there's exactly one). The watch that surfaced it comes
+            # from the row, so we can offer an antikeyword for the right watch.
             if len(listings) == 1 and str(listings[0].get("url") or "").strip():
-                self._last_listing[to] = {"url": str(listings[0]["url"]).strip(),
-                                          "title": str(listings[0].get("title") or "").strip()}
+                row0 = listings[0]
+                watch0 = str(row0.get("watches") or "").split(",")[0].strip()
+                self._last_listing[to] = {"url": str(row0["url"]).strip(),
+                                          "title": str(row0.get("title") or "").strip(),
+                                          "watch": watch0}
         else:
             self._send(reply or "(no reply)", to, html=as_html)
 

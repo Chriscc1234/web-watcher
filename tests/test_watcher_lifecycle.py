@@ -39,6 +39,69 @@ def test_admin_owner_check():
     assert S._is_admin_owner("999", cfg) is False         # a buddy
 
 
+def _cfg_one_macgregor(owner="111"):
+    ws = [Watch(name="Anacortes MacGregor Sailboats Watch", urls=["https://x"], instruction="x",
+                interval_minutes=30, owner=owner)]
+    return AppConfig(notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+                     watches=ws)
+
+
+def test_named_lifecycle_action_helper():
+    # A plain "start/stop the <name> watch" is decided in code — the 14b whiffed on it (it answered
+    # with an edit card), and the bare handler then asked the admin "whole Watcher or just yours?".
+    cfg = _cfg_one_macgregor("111")
+    NAME = "Anacortes MacGregor Sailboats Watch"
+    assert S._named_lifecycle_action("Start up the macgregor watch", cfg, "111") == {"action": "start", "name": NAME}
+    assert S._named_lifecycle_action("stop the macgregor watch", cfg, "111") == {"action": "stop", "name": NAME}
+    assert S._named_lifecycle_action("Macgregor watch start", cfg, "111") == {"action": "start", "name": NAME}
+    # Not a command / not scoped to one named owned watch → leave it for the other handlers.
+    assert S._named_lifecycle_action("is the macgregor watch running?", cfg, "111") is None   # question
+    assert S._named_lifecycle_action("start everything", cfg, "111") is None                  # program
+    assert S._named_lifecycle_action("start all my watches", cfg, "111") is None              # all-mine
+    assert S._named_lifecycle_action("stop and restart the macgregor watch", cfg, "111") is None  # restart
+    assert S._named_lifecycle_action("start up the macgregor watch", cfg, "999") is None      # not owner
+
+
+def test_named_watch_start_fires_even_when_llm_emits_nothing(monkeypatch):
+    # The real bug: 14b produced no action, so "Start up the macgregor watch" got treated as a bare
+    # start and the admin was asked to disambiguate instead of the watch just starting.
+    out = _turn(monkeypatch, "Start up the macgregor watch", "111", _cfg_one_macgregor("111"))
+    assert out["watch_actions"] == [{"action": "start", "name": "Anacortes MacGregor Sailboats Watch"}]
+    assert "whole" not in out["message"].lower()          # did NOT fall through to the bare question
+
+
+def test_named_watch_running_question_takes_no_action(monkeypatch):
+    out = _turn(monkeypatch, "Is the macgregor watch running?", "111", _cfg_one_macgregor("111"))
+    assert not out["watch_actions"]
+
+
+def test_lookup_limit_counts_a_leading_number():
+    # "5 most recent" put the count BEFORE the noun, which the keyword-first regex missed — it used
+    # to collapse to 1 (singular rule) or the model's guessed 10.
+    assert S._lookup_limit("The 5 most recent", default=None) == 5
+    assert S._lookup_limit("Let's see the 5 most recent macgregor matches", default=None) == 5
+    assert S._lookup_limit("show me 3 recent ones", default=None) == 3
+    assert S._lookup_limit("top 20", default=None) == 20
+    assert S._lookup_limit("the latest match", default=None) == 1
+    assert S._lookup_limit("show me the matches", default=None) is None
+
+
+def test_global_status_detection_and_counts_only_render():
+    assert S._is_global_status_request("Is the whole watcher running?")
+    assert S._is_global_status_request("Globally how many watches are there?")
+    assert S._is_global_status_request("are any other watches running?")
+    assert not S._is_global_status_request("what watches do I have")
+    assert not S._is_global_status_request("start up the macgregor watch")
+    # Counts only — never another user's watch titles (a buddy must not learn what others watch).
+    cfg = _cfg_with("111", "999", "111")                  # 3 watches across two people, all enabled
+    mgr = MagicMock(); mgr.is_paused.return_value = False
+    msg = S._render_global_running(cfg, mgr)
+    assert "3 of 3" in msg
+    assert "W0" not in msg and "W1" not in msg and "W2" not in msg
+    mgr.is_paused.return_value = True
+    assert "paused" in S._render_global_running(cfg, mgr).lower()
+
+
 # ── lifecycle injection inside a full turn (LLM stubbed out) ──────────────────────
 
 def _turn(monkeypatch, text, owner, cfg, reply="ok"):

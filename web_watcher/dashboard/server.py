@@ -1191,9 +1191,15 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         # "what watches do I have / what's running" is answered directly from real state too — a
         # clean, well-spaced block instead of the model running the titles together in a paragraph
         # (and mis-reporting run-state). A lookup ("show me the matches") is NOT caught here.
-        if _is_watch_status_request(_latest) and not _is_lookup_request(_latest):
-            result = {"message": _render_watch_status(cfg, manager, owner),
-                      "watch_suggestion": None, "html": True, "raw": None}
+        _glob = _is_global_status_request(_latest)
+        if (_is_watch_status_request(_latest) or _glob) and not _is_lookup_request(_latest):
+            # A global-scoped question ("is the whole watcher running?", "globally how many?") leads
+            # with a counts-only line spanning ALL users, then the speaker's own watches. A buddy
+            # gets a real global number without ever seeing another person's watch titles.
+            msg = _render_watch_status(cfg, manager, owner)
+            if _glob:
+                msg = _render_global_running(cfg, manager) + "\n\n" + msg
+            result = {"message": msg, "watch_suggestion": None, "html": True, "raw": None}
             result["raw"] = result["message"]
             _persist_chat_turn(messages, result, owner)
             result.pop("raw", None)
@@ -2578,6 +2584,16 @@ def _lookup_limit(text: str, default=10):
             return max(1, min(int(m.group(1)), 30))
         except ValueError:
             pass
+    # The count can also come BEFORE the noun/recency word — "the 5 most recent", "5 matches",
+    # "5 recent ones". The keyword-first regex above misses these, so "5 most recent" used to fall
+    # through to the singular rule and return 1 (or the model's guessed 10). Catch a leading number.
+    m2 = re.search(r"\b(\d{1,6})\s+(?:most\s+recent|recent|latest|newest|"
+                   r"matches?|listings?|finds?|results?|ones?|items?)\b", t, re.I)
+    if m2:
+        try:
+            return max(1, min(int(m2.group(1)), 30))
+        except ValueError:
+            pass
     # "latest / last / most recent / newest <singular>" with no plural in sight → just the one.
     if _SINGULAR_LATEST_RE.search(t) and not _MANY_RE.search(t):
         return 1
@@ -2648,6 +2664,46 @@ def _render_watch_status(cfg, manager, owner: str | None) -> str:
 
     # A blank line between each block is what makes the titles stand apart.
     return "\n\n".join(blocks)
+
+
+# A status question scoped to the WHOLE Watcher, not just the speaker's own watches — "is the
+# whole watcher running?", "globally how many watches?", "are any OTHER watches running?". The
+# normal _WATCH_STATUS_RE misses these ("watcher" isn't "watches"; "globally" carries no verb),
+# so they used to fall through to the 14b and come back messy.
+_GLOBAL_STATUS_RE = re.compile(
+    r"\b("
+    r"whole\s+watcher|entire\s+watcher|the\s+watcher\s+(running|going|on|working|up)|"
+    r"is\s+(the\s+)?watcher\s+(running|on|going|up|working)|"
+    r"any(thing)?\s+(else\s+)?(watches?\s+)?running|other\s+watches?|"
+    r"global\w*|overall|in\s+total\b|across\s+(all|everyone|users)|"
+    r"how\s+many\s+watches?\s+(are\s+there|in\s+total|total|globally|overall|running)|"
+    r"total\s+(number\s+of\s+)?watches?"
+    r")\b", re.I)
+
+
+def _is_global_status_request(text: str) -> bool:
+    return bool(_GLOBAL_STATUS_RE.search(text or ""))
+
+
+def _render_global_running(cfg, manager) -> str:
+    """COUNTS only — how many watches exist and how many are running across ALL users. Never lists
+    another person's watch titles or details (a buddy must not learn what others watch); the admin
+    already sees the per-watch detail through the normal status block. This is mainly so a buddy
+    asking "is anything else running?" gets a real number instead of only their own."""
+    all_w = list(getattr(cfg, "watches", []) or [])
+    total = len(all_w)
+    try:
+        paused = bool(manager.is_paused())
+    except Exception:
+        paused = False
+    running = 0 if paused else sum(1 for w in all_w if getattr(w, "enabled", True))
+    if total == 0:
+        return "No watches exist yet across the whole Watcher."
+    if paused:
+        return (f"⏸ <b>The whole Watcher is paused</b> — nothing is sweeping right now. "
+                f"{total} watch(es) exist across everyone.")
+    return (f"🟢 <b>{running} of {total} watch(es) running</b> right now across everyone "
+            f"(all users combined).")
 
 
 def _render_settings(cfg, manager, owner: str | None) -> str:
@@ -3605,6 +3661,38 @@ def _classify_lifecycle(text: str):
     return (verb, "bare")
 
 
+def _named_lifecycle_action(text: str, cfg, owner):
+    """A plain "start/stop the <name> watch" → the concrete {action, name}, decided in code.
+
+    The 14b is unreliable at turning this into a structured action: it answered "start up the
+    macgregor watch" with an EDIT card (dropped as ungrounded), so nothing ran — and then
+    _classify_lifecycle, which deliberately ignores named watches, treated the turn as a BARE
+    start and asked the admin "the whole Watcher, or just yours?" instead of just starting it.
+    So we detect it ourselves, mirroring the deterministic reset short-circuit.
+
+    Fires only when the message is a COMMAND (not a question), carries a start/stop verb, is NOT
+    program- or all-mine-scoped (those have their own handlers), and names EXACTLY ONE watch the
+    speaker owns. Focus is intentionally not used — a bare "stop" with a focused watch stays with
+    the existing bare handler. Returns {"action", "name"} or None."""
+    t = (text or "").strip()
+    if not t or t.endswith("?"):
+        return None                                   # a question is not a command
+    if _WHOLE_PROGRAM_RE.search(t) or _ALL_MINE_RE.search(t):
+        return None                                   # whole-program / all-mine handled elsewhere
+    stop, start = bool(_STOP_VERB_RE.search(t)), bool(_START_VERB_RE.search(t))
+    if stop == start:                                 # neither, or both ("stop and restart") — skip
+        return None
+    # "stop and restart" / "restart it" reads a restart, not a plain stop — _START_VERB_RE misses
+    # the "restart"/"again" cue, so guard it here rather than half-executing (a lone stop).
+    if stop and re.search(r"\b(re-?start|start\s+(it\s+)?(again|over)|again)\b", t, re.I):
+        return None
+    named = _watch_named_in(t, cfg, owner)            # the watch called out in the user's words
+    real = _resolve_watch_name(named or "", cfg)
+    if real and _is_owned(real, cfg, owner):
+        return {"action": "stop" if stop else "start", "name": real}
+    return None
+
+
 def _is_admin_owner(owner, cfg) -> bool:
     """The admin is the desktop dashboard (owner=None) or the main configured Telegram chat. Only
     the admin may flip the global master switch; a buddy can only touch their own watches."""
@@ -4072,6 +4160,18 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                        f"Got it — I'll check in about every {checkin_hours:g} hour"
                        f"{'' if checkin_hours == 1 else 's'} when there's nothing new.")
             suggestions, watch_actions = [], None
+
+        # ── Deterministic NAMED start/stop ("start up the macgregor watch") ──
+        # Same reason as the reset short-circuit above: the 14b is unreliable at emitting the
+        # action, and when it whiffs the bare handler below asks the admin "whole Watcher or just
+        # yours?" instead of just doing it. If the user's own words name a single owned watch with
+        # a clear start/stop verb, carry it out. Only fills a gap — never overrides a real action.
+        if not watch_actions:
+            _life = _named_lifecycle_action(latest_user, cfg, owner)
+            if _life:
+                watch_actions = [_life]
+                message = ("Starting it now." if _life["action"] == "start" else "Stopping it now.")
+                log.info("chat: deterministic %s of %r", _life["action"], _life["name"])
 
         # ── Master switch vs "my watches" (deterministic — too consequential for the 14b) ──
         # The whole-Watcher pause/resume is admin-only; a person's bare "stop" is scoped to their

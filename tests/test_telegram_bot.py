@@ -176,6 +176,7 @@ def test_vet_token_roundtrip_and_fits_callback_data(tmp_path, monkeypatch):
 def test_vet_button_runs_inspect_and_replies(monkeypatch, tmp_path):
     from web_watcher import notify
     monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    monkeypatch.setattr(notify, "image_bytes_for_listing", lambda img, link="": None)  # no photo → text
     url = "https://offerup.com/item/detail/x"
     tok = notify.remember_vet_link(url)
 
@@ -185,10 +186,33 @@ def test_vet_button_runs_inspect_and_replies(monkeypatch, tmp_path):
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
     monkeypatch.setattr(b, "_vet_listing", lambda u: f"VERDICT for {u}")
-    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     b._handle_callback({"id": "1", "data": f"vet:{tok}",
                         "message": {"chat": {"id": "111"}}})
     assert sent and f"VERDICT for {url}" in sent[0]
+
+
+def test_vet_verdict_is_sent_as_a_photo_card_when_an_image_exists(monkeypatch):
+    """The verdict can land after other chatting, so the listing's picture makes it unmistakable
+    which listing it's about."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "image_bytes_for_listing", lambda img, link="": b"JPEGDATA")
+    b = _bridge("111")
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: calls.append((url, k)) or _Resp())
+    monkeypatch.setattr(b, "_send", lambda *a, **k: pytest.fail("a photo verdict must not fall back"))
+    b._send_verdict("111", "1998 Tacoma", "★★★★☆ great deal, low scam risk",
+                    "https://x/view/d/tacoma/abc")
+    photo = [c for c in calls if "sendPhoto" in c[0]]
+    assert len(photo) == 1
+    assert photo[0][1]["files"]["photo"][1] == b"JPEGDATA"
+    assert "1998 Tacoma" in photo[0][1]["data"]["caption"]
+    assert "great deal" in photo[0][1]["data"]["caption"]
 
 
 def test_vet_button_ignores_unauthorized_chat(monkeypatch):

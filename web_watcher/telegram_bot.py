@@ -600,14 +600,39 @@ class TelegramBridge:
             return
         with self._typing_until_sent(str(chat)):   # vetting can take a minute+ — keep it visible
             verdict = self._vet_listing(url)
-        # RESTATE what was judged: the verdict can land long after the alert scrolled away, so a
-        # bare rating is meaningless on its own. Lead with the title, then the verdict, then the
-        # link again — with the same Open button, so it's self-contained.
+        # RESTATE what was judged, WITH THE PICTURE. A verdict can land long after the alert
+        # scrolled away — and after other chatting — so a bare rating is easy to misattach to the
+        # wrong listing. Leading with the listing's photo makes it unmistakable which one this is.
+        self._send_verdict(str(chat), title, verdict, url)
+
+    def _send_verdict(self, chat: str, title: str, verdict: str, url: str) -> None:
+        """Deliver a vet verdict as a photo-card — the listing's image up top, the title, the
+        verdict, and its Open button — so it's self-contained and clearly tied to one listing.
+        Falls back to a text message when there's no image, the caption won't fit, or the upload
+        fails; the verdict is never lost to a missing picture."""
         import html as _h
+        import json as _json
+        from web_watcher.notify import image_bytes_for_listing
         head = f"🔍 <b>{_h.escape(title)}</b>\n\n" if title else "🔍 <b>Vetted</b>\n\n"
-        body = head + _h.escape(verdict) + f'\n\n<a href="{_h.escape(url, quote=True)}">{_h.escape(url)}</a>'
-        self._send(body, str(chat), html=True,
-                   buttons=[[{"text": "🔗 Open listing", "url": url}]])
+        caption = head + _h.escape(verdict) + f'\n\n<a href="{_h.escape(url, quote=True)}">{_h.escape(url)}</a>'
+        buttons = [[{"text": "🔗 Open listing", "url": url}]]
+
+        if len(caption) <= 1024:
+            img = image_bytes_for_listing("", url)      # recovers the thumbnail from the listing page
+            if img:
+                data = {"chat_id": chat, "caption": caption, "parse_mode": "HTML",
+                        "reply_markup": _json.dumps({"inline_keyboard": buttons})}
+                try:
+                    r = httpx.post(f"{TELEGRAM_API}/bot{self.bot_token}/sendPhoto",
+                                   data=data, files={"photo": ("listing.jpg", img, "image/jpeg")},
+                                   timeout=20.0)
+                    if r.status_code == 200:
+                        return
+                    log.info("Telegram: verdict photo HTTP %s (%s) — text instead",
+                             r.status_code, r.text[:160])
+                except Exception as exc:
+                    log.info("Telegram: verdict photo failed (%s) — text instead", exc)
+        self._send(caption, chat, html=True, buttons=buttons)
 
     def _handle_top_request(self, payload: str, chat: str) -> None:
         """'<token>:<n>' → the best N already-recorded matches for that watch. Reads what the

@@ -434,6 +434,56 @@ def test_no_nudge_without_the_opt_in(monkeypatch):
     assert sent == []
 
 
+# ── approving a new user from the chat ───────────────────────────────────────────
+
+def test_admin_can_allow_a_user_from_the_chat(monkeypatch):
+    b = _bridge("111")                              # 111 is the admin (main configured chat)
+    posted, sent = [], []
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+
+    class _Get:
+        def json(self): return [{"chat_id": "999", "name": "Dave"}]
+
+    class _Post:
+        status_code = 200
+        def json(self): return {"ok": True}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.get", lambda url, **k: _Get())
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.append((url, k.get("json"))) or _Post())
+    b._handle_callback({"id": "1", "data": "allow:999", "message": {"chat": {"id": "111"}}})
+    allow = [p for p in posted if "allow" in p[0]]
+    assert allow and allow[0][1]["chat_id"] == "999" and allow[0][1]["name"] == "Dave"
+    assert any("is in" in s for s in sent)
+
+
+def test_deny_dismisses_the_request(monkeypatch):
+    b = _bridge("111")
+    posted = []
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: None)
+
+    class _Post:
+        status_code = 200
+        def json(self): return {}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.append(url) or _Post())
+    b._handle_callback({"id": "1", "data": "deny:999", "message": {"chat": {"id": "111"}}})
+    assert any("dismiss" in u for u in posted)
+
+
+def test_a_non_admin_buddy_cannot_approve_people(monkeypatch):
+    b = TelegramBridge("tok", "111", "u", allowed_chat_ids=["222"])   # 222 is a buddy, not admin
+    answered = []
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": answered.append(text))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda *a, **k: pytest.fail("a non-admin must never let someone in"))
+    b._handle_callback({"id": "1", "data": "allow:999", "message": {"chat": {"id": "222"}}})
+    assert answered and "owner" in answered[0].lower()
+
+
 # ── applying a proposed watch: "already exists" is not an error ──────────────────
 
 def test_already_exists_reads_as_friendly_not_a_failure(monkeypatch):

@@ -515,11 +515,13 @@ class TelegramBridge:
             return
         self._access_notified.add(chat_id)
         who = name or "Someone"
+        # Approve right here in the chat — a tap on "Let them in" adds them, no trip to the app.
         self._send(
-            f"🔔 Access request\n{who} (chat id {chat_id}) messaged your Web Watcher bot but "
-            f"isn't on your allow-list. Open the app → Chats to let them in, or add {chat_id} "
-            f"under Settings → Notifications & Keys.",
+            f"🔔 **Access request**\n{who} (chat id {chat_id}) messaged your Web Watcher bot but "
+            f"isn't on your allow-list yet.",
             self.chat_id,                      # the owner/admin alert chat
+            buttons=[[{"text": "✅ Let them in", "callback_data": f"allow:{chat_id}"},
+                      {"text": "🚫 Ignore", "callback_data": f"deny:{chat_id}"}]],
         )
         # Park it for one-click approval in the console (best-effort; the phone alert is primary).
         try:
@@ -580,6 +582,45 @@ class TelegramBridge:
         if not self._authorized(chat):
             log.warning("Telegram: ignoring button from unauthorized chat %s", chat)
             return
+
+        # Approve / ignore a new user, right from the chat. Only the ADMIN (the main configured
+        # chat) may — another allow-listed buddy can't let in strangers.
+        if data.startswith("allow:") or data.startswith("deny:"):
+            if str(chat) != str(self.chat_id):
+                self._answer_callback(cb.get("id"), "Only the owner can approve people.")
+                return
+            target = data.split(":", 1)[1]
+            if data.startswith("deny:"):
+                self._answer_callback(cb.get("id"), "Ignored.")
+                try:
+                    httpx.post(f"{self.dashboard_url}/api/telegram/access-requests/dismiss",
+                               json={"chat_id": target}, timeout=15.0)
+                except Exception as exc:
+                    log.warning("Telegram: dismiss of %s failed: %s", target, exc)
+                self._send(f"🚫 Ignored the request from {target}.", str(chat))
+                return
+            self._answer_callback(cb.get("id"), "Adding them…")
+            name = ""                                   # carry their name into the welcome, if parked
+            try:
+                reqs = httpx.get(f"{self.dashboard_url}/api/telegram/access-requests",
+                                 timeout=15.0).json() or []
+                name = next((str(r.get("name") or "") for r in reqs
+                             if str(r.get("chat_id")) == target), "")
+            except Exception:
+                pass
+            ok = False
+            try:
+                r = httpx.post(f"{self.dashboard_url}/api/telegram/access-requests/allow",
+                               json={"chat_id": target, "name": name}, timeout=30.0)
+                ok = r.status_code < 300 and bool((r.json() or {}).get("ok"))
+            except Exception as exc:
+                log.warning("Telegram: allow of %s failed: %s", target, exc)
+            self._send(
+                f"✅ {name or target} is in — they can talk to the bot now and set up their own "
+                "watches. Their finds go to their phone, and they can't see or touch yours."
+                if ok else "Couldn't add them just now — try again, or use the app.", str(chat))
+            return
+
         # "Show top N" from a baseline briefing — the backlog we deliberately didn't alert on.
         if data.startswith("top:"):
             # Debounce: one burst at a time. A second tap while a burst is still going (or right

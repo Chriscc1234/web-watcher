@@ -332,6 +332,35 @@ def test_what_the_model_did_decide_is_respected(monkeypatch):
     assert ran["matched_only"] is False and ran["limit"] == 20   # not overridden
 
 
+def test_reset_intent_is_recognised():
+    for msg in ["remake the macgregor watch", "reset it", "start it over", "rebuild the boats watch",
+                "recreate it", "redo that watch", "start over", "wipe it and start fresh"]:
+        assert S._RESET_RE.search(msg), msg
+    for msg in ["show me the matches", "what's running", "stop it", "add a keyword"]:
+        assert not S._RESET_RE.search(msg), msg
+
+
+def test_reset_action_clears_results_and_reenables(monkeypatch, isolated):
+    from web_watcher import config as _config, storage as _storage
+    cfg = AppConfig(watches=[Watch(name="Boats", urls=["https://x"], instruction="boats",
+                                   interval_minutes=30, enabled=False, mode="continuous")])
+    saved = {"enabled": None}
+    monkeypatch.setattr(_config, "load", lambda: cfg)
+    monkeypatch.setattr(_config, "save",
+                        lambda c: saved.update(enabled=c.watches[0].enabled))
+    cleared = {}
+    monkeypatch.setattr(_storage, "clear_watch_results",
+                        lambda watch_id=None, watch_name=None: cleared.update(name=watch_name) or 7)
+    mgr = MagicMock(); mgr.is_paused.return_value = False
+    client = TestClient(create_app(mgr))
+    r = client.post("/api/watches/Boats/action", json={"action": "reset"})
+    body = r.json()
+    assert body["ok"] and body["action"] == "reset" and body["removed"] == 7
+    assert cleared["name"] == "Boats"          # its finds were wiped
+    assert saved["enabled"] is True            # and it was re-enabled
+    mgr.start_continuous.assert_called()       # and restarted
+
+
 def test_latest_match_overrides_a_model_supplied_limit(monkeypatch):
     """The live bug: 'show me the latest match' still returned ten because the model's
     listing_query already carried limit=10, so our singular-latest rule never applied. The user's

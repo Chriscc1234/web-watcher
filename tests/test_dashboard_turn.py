@@ -450,6 +450,21 @@ def test_merge_watch_update_preserves_mode_and_id():
     assert w.instruction == "manual sports cars in good shape"
 
 
+def test_remake_a_watch_triggers_a_deterministic_reset(monkeypatch):
+    """The live bug: 'remake the macgregor watch' got a clarifying question, not an action. Reset
+    is now detected in code and issued even when the model returns no action."""
+    import types
+    from web_watcher.dashboard import server as S
+    w = types.SimpleNamespace(name="Anacortes MacGregor Sailboats Watch", owner="")
+    cfg = types.SimpleNamespace(watches=[w])
+    _mock_two_phase(monkeypatch, "Sure — I'll start it over fresh.", {"intent": "none"})
+    monkeypatch.setattr(S, "_expand_watch_search", lambda *a, **k: [])
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "remake the macgregor watch"}], cfg, "m")
+    acts = out.get("watch_actions") or []
+    assert any(a["action"] == "reset" and "MacGregor" in a["name"] for a in acts)
+
+
 def test_two_items_become_two_watch_cards(monkeypatch):
     """#68: 'watch for a <thing A> and a <thing B>' must ship BOTH watches, not just one."""
     import types

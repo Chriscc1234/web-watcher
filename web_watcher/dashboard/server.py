@@ -750,6 +750,21 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             # If the whole Watcher is paused, a single start won't actually sweep — surface that so
             # the caller can tell the user to resume the master switch first.
             return {"ok": True, "name": watch_name, "action": action, "paused": manager.is_paused()}
+        if action in ("reset", "restart", "remake", "rebuild"):
+            # "Start it over fresh": wipe this watch's finds + dedup memory so it re-discovers and
+            # RE-JUDGES everything with the current logic (which is how junk collected under old
+            # settings gets cleared), then make sure it's enabled and sweeping. The watch config
+            # (its URLs, keywords, etc.) is untouched — this clears results, it doesn't recreate.
+            from web_watcher.storage import clear_watch_results
+            removed = clear_watch_results(watch_id=getattr(w, "id", None), watch_name=w.name)
+            if not w.enabled:
+                w.enabled = True
+                save(cfg)
+            bg.add_task(manager.reload_scheduler)
+            if continuous:
+                bg.add_task(manager.start_continuous, watch_name)
+            return {"ok": True, "name": watch_name, "action": "reset",
+                    "removed": removed, "paused": manager.is_paused()}
         if action in ("disable", "stop"):
             # "Stop" has to actually stop it. Stopping a per-watch loop is a no-op whenever the
             # orchestrator is driving — it owns every ENABLED continuous watch and simply sweeps
@@ -3446,7 +3461,17 @@ _ACTION_VERB_RE = {
     "start":   re.compile(r"\b(start|run|resume|begin|kick off|fire up|turn on)\b", re.I),
     "enable":  re.compile(r"\b(enable|re-?enable|activate|turn on|switch on)\b", re.I),
     "disable": re.compile(r"\b(disable|deactivate|turn off|switch off)\b", re.I),
+    "reset":   re.compile(r"\b(reset|re-?set|remake|re-?make|recreate|re-?create|rebuild|"
+                          r"re-?build|redo|re-?do|start (?:it )?(?:over|fresh|again)|"
+                          r"clear (?:it|out)|wipe (?:it|and)|fresh start)\b", re.I),
 }
+
+# Reset intent, on its own — used for a deterministic short-circuit so "remake/reset the X watch"
+# actually DOES it instead of the 14b chatting about it. NB "restart" is NOT here: a restart is
+# just start; a reset also WIPES the finds and re-judges, so we only reset on the clearer verbs.
+_RESET_RE = re.compile(r"\b(reset|re-?set|remake|re-?make|recreate|re-?create|rebuild|re-?build|"
+                       r"redo|re-?do|start (?:it )?(?:over|fresh|afresh)|start over|"
+                       r"wipe (?:it|and)|clear (?:it|out)|fresh start)\b", re.I)
 
 
 def _latest_user_text(messages: list) -> str:
@@ -3865,7 +3890,7 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
             else:
                 listings = _run_listing_query(lq)
 
-        _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop"}
+        _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop", "reset"}
         latest_user = _latest_user_text(messages)
         watch_actions = []
         for a in (data.get("watch_actions") or []):
@@ -3885,6 +3910,20 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 continue
             if real:
                 watch_actions.append({"action": act, "name": real})
+
+        # Deterministic RESET. The 14b kept CHATTING about "remake/reset the X watch" ("could you
+        # clarify…") instead of doing it, so we detect the intent in code and issue the reset
+        # ourselves — clear the watch's finds and re-run it fresh — grounded on a watch the user
+        # named (or the one in focus) and owns. Replaces any start/enable it emitted for the same
+        # watch, since a reset already re-enables and re-runs it.
+        if _RESET_RE.search(latest_user) and not any(a["action"] == "reset" for a in watch_actions):
+            target = focus if (focus and focus != PENDING_CREATE) else _watch_named_in(latest_user, cfg, owner)
+            real = _resolve_watch_name(target or "", cfg)
+            if real and _is_owned(real, cfg, owner):
+                watch_actions = [a for a in watch_actions
+                                 if not (a["name"] == real and a["action"] in ("start", "enable"))]
+                watch_actions.append({"action": "reset", "name": real})
+                log.info("chat: deterministic reset of %r", real)
         watch_actions = watch_actions or None
 
         message = data["message"]   # _normalize_turn guarantees a message (never raw JSON)

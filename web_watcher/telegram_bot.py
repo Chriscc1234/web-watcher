@@ -327,7 +327,7 @@ class TelegramBridge:
         actions = [a for a in (result.get("watch_actions") or []) if isinstance(a, dict)]
         deletes    = [a for a in actions if str(a.get("action", "")).lower() == "delete"]
         reversible = [a for a in actions if str(a.get("action", "")).lower()
-                      in ("start", "stop", "enable", "disable")]
+                      in ("start", "stop", "enable", "disable", "reset")]
         if reversible:
             reply = (reply + "\n\n" + self._apply_actions(reversible)).strip()
 
@@ -536,7 +536,8 @@ class TelegramBridge:
         own mode-aware endpoint — the same one the dashboard buttons use. Ownership was already
         enforced server-side when the action was produced, so we just carry it out and report."""
         labels = {"start": "started", "stop": "stopped", "enable": "enabled",
-                  "disable": "disabled", "delete": "deleted"}
+                  "disable": "disabled", "delete": "deleted",
+                  "reset": "reset (cleared its finds and restarted)"}
         done, failed = [], []
         for a in actions:
             name = str(a.get("name") or "").strip()

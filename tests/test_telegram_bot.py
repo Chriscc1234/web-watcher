@@ -434,6 +434,35 @@ def test_no_nudge_without_the_opt_in(monkeypatch):
     assert sent == []
 
 
+# ── a chat lookup shows rich cards for a small result set ────────────────────────
+
+def test_a_small_lookup_is_shown_as_rich_cards(monkeypatch):
+    """'Show me the latest match' should come as a full card (photo + buttons), not a flat line."""
+    b = _bridge("111")
+    monkeypatch.setattr(b, "_ask_watcher", lambda *a, **k: {
+        "message": "Here's your latest match:",
+        "listings": [{"url": "https://x/1", "title": "Jeep", "price_text": "$5,600", "rating": 4}]})
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    cards, sends = [], []
+    monkeypatch.setattr(b, "_send_listing_card", lambda row, chat: cards.append(row))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sends.append(t))
+    b._handle_message("show me the latest match", "111", "Chris")
+    assert len(cards) == 1 and cards[0]["title"] == "Jeep"
+
+
+def test_a_big_lookup_stays_a_compact_list(monkeypatch):
+    b = _bridge("111")
+    rows = [{"url": f"https://x/{i}", "title": f"Car {i}", "rating": 3} for i in range(8)]
+    monkeypatch.setattr(b, "_ask_watcher", lambda *a, **k: {"message": "matches:", "listings": rows})
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    cards, sends = [], []
+    monkeypatch.setattr(b, "_send_listing_card", lambda row, chat: cards.append(row))
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sends.append(t))
+    b._handle_message("show me the matches", "111", "Chris")
+    assert cards == []                         # a big list is not a card storm
+    assert sends and "Car 0" in sends[0]        # rendered as the compact text list
+
+
 # ── approving a new user from the chat ───────────────────────────────────────────
 
 def test_admin_can_allow_a_user_from_the_chat(monkeypatch):

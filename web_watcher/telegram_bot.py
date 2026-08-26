@@ -65,6 +65,7 @@ _SLOW_TURN_S       = 20.0         # a normal local turn already takes ~12s, so n
                                   # that — #1 at ~20s (genuinely slow), #2 at ~45s (rare) — else the
                                   # "hang on" lands on top of the answer.
 _TOP_COOLDOWN_S    = 25.0         # ignore a second "Show top N" tap within this long (a burst takes a bit)
+_CHAT_CARDS_MAX    = 5            # a chat lookup of this many or fewer is shown as rich cards, not a list
 
 # A pool for each stage so the reassurance never reads the same twice in a row. The first fires at
 # ~12s ("this is taking a moment"); the second, rarely, at ~30s ("still at it").
@@ -315,8 +316,13 @@ class TelegramBridge:
         # dashboard renders them as cards. On a phone we render a compact scannable list, so the
         # bot actually SHOWS finds instead of only talking about them. The list is HTML, so the
         # model's own prose must be escaped before the two are joined.
+        # "Show me the matches" — the assistant returns rows. A SMALL result set (a single "latest
+        # match", a top-3) is shown as full CARDS — photo, rating, price, source, and the Open / Vet
+        # / Not-a-match buttons — the same rich card an alert gets, so a lookup isn't a detail-less
+        # text line. A bigger set stays a compact scannable list so it doesn't become a card storm.
         listings = result.get("listings")
-        if isinstance(listings, list) and listings:
+        send_cards = isinstance(listings, list) and 0 < len(listings) <= _CHAT_CARDS_MAX
+        if isinstance(listings, list) and listings and not send_cards:
             import html as _h
             head = reply if as_html else _h.escape(reply)
             reply = (head + "\n\n" + _format_listings(listings)).strip()
@@ -339,7 +345,17 @@ class TelegramBridge:
         elif sugg:
             self._pending = sugg
             reply = (reply + "\n\n" + _describe_suggestions(result)).strip()
-        self._send(reply or "(no reply)", to, html=as_html)
+
+        if send_cards:
+            # A short lead-in (if the model wrote one), then a rich card per match.
+            if reply.strip():
+                self._send(reply, to, html=as_html)
+            for i, row in enumerate(listings):
+                self._send_listing_card(row, to)
+                if i < len(listings) - 1:
+                    time.sleep(0.3)
+        else:
+            self._send(reply or "(no reply)", to, html=as_html)
 
     def _apply_pending(self, pending: list[dict]) -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the

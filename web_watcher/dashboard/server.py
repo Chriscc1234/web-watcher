@@ -1178,6 +1178,17 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             result.pop("raw", None)
             return result
 
+        # "how does this work / what can you do / help" — one fixed, friendly explainer, so a new
+        # user (a buddy just handed the bot) gets the same clear answer every time, not the 14b's
+        # improvisation. Not for specific how-tos ("how do I stop a watch") — those go to the model.
+        if _is_help_request(_latest):
+            result = {"message": _render_help(owner), "watch_suggestion": None, "html": True,
+                      "raw": None}
+            result["raw"] = result["message"]
+            _persist_chat_turn(messages, result, owner)
+            result.pop("raw", None)
+            return result
+
         try:
             snap = manager.oversight_snapshot(limit=14)
         except Exception:
@@ -2482,6 +2493,48 @@ def _is_watch_status_request(text: str) -> bool:
     """True when the person is asking about the WATCHES (which exist / are running), not to see
     the listings a watch has found. A status answer must never drag a wall of matches with it."""
     return bool(_WATCH_STATUS_RE.search(text or ""))
+
+
+# A general "how does this work / what can you do / help" — answered from a fixed, friendly
+# explainer, not the 14b (which gives a different, sometimes wrong answer every time). Deliberately
+# NOT matching specific how-to questions ("how do I stop a watch") — those go to the model.
+_HELP_RE = re.compile(
+    r"how (?:do|does|would|can) (?:you|it|this|the bot|web ?watcher|i)\b[^?]{0,24}\bwork"
+    r"|how do (?:you|i) work"
+    r"|how (?:do i|to) use\b"
+    r"|what (?:can|do) you do\b|what can i (?:ask|say|do)\b"
+    r"|\bwhat are you\b|\bwhat is this\b|\bwho are you\b"
+    r"|getting started\b|how (?:do i|to) get start"
+    r"|^\s*/?help\s*$",
+    re.I)
+
+
+def _is_help_request(text: str) -> bool:
+    return bool(_HELP_RE.search((text or "").strip()))
+
+
+def _render_help(owner: str | None) -> str:
+    """A fixed, friendly 'how I work' explainer — the same clear answer every time someone asks,
+    instead of whatever the 14b improvises. HTML so the Telegram bridge renders the formatting."""
+    return (
+        "👋 <b>I'm Web Watcher — I keep an eye on marketplaces for you.</b>\n\n"
+        "Tell me what you're hunting for and I'll watch Craigslist (and other sites) around the "
+        "clock, then message you the moment something matches — usually with a photo.\n\n"
+        "<b>Set up a watch</b> — just say what you want, for example:\n"
+        "  • “Watch craigslist for a manual pickup under $10k near Anacortes”\n"
+        "  • “Let me know about aluminum fishing boats under 20 feet”\n"
+        "I'll ask anything I need, then start watching.\n\n"
+        "<b>On each match</b> you get a card with buttons:\n"
+        "  • 🔗 <b>Open</b> — jump straight to the listing\n"
+        "  • 🔍 <b>Vet</b> — I read the whole posting and rate the deal + flag scam risk\n"
+        "  • 🚫 <b>Not a match</b> — remove a bad one so I never show it again\n\n"
+        "<b>Handy things to say</b>:\n"
+        "  • “What am I watching?” — your watches and what they've found\n"
+        "  • “Show me the latest match” — your newest find\n"
+        "  • “Stop / start / reset the boats watch”\n"
+        "  • “Only alert me on great deals”, or “raise the price to $12k”\n\n"
+        "Everything runs on the owner's own computer, and your watches are private to you. "
+        "Just talk to me in plain English — that's how you drive me. What should I watch for?")
 
 
 _SINGULAR_LATEST_RE = re.compile(r"\b(?:latest|last|most recent|newest)\b", re.I)

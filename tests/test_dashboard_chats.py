@@ -332,6 +332,26 @@ def test_what_the_model_did_decide_is_respected(monkeypatch):
     assert ran["matched_only"] is False and ran["limit"] == 20   # not overridden
 
 
+def test_help_requests_are_recognised():
+    for msg in ["how does it work", "how do you work", "how does this bot work",
+                "what can you do", "what can I ask", "how do I use this", "what is this",
+                "who are you", "getting started", "help", "/help", "how do I get started"]:
+        assert S._is_help_request(msg), msg
+
+
+def test_specific_howtos_are_not_help_requests():
+    """A specific how-to goes to the model, not the fixed explainer."""
+    for msg in ["how do I stop a watch", "show me the matches", "what am I watching",
+                "how much is it worth", "reset the boats watch"]:
+        assert not S._is_help_request(msg), msg
+
+
+def test_render_help_covers_the_essentials():
+    out = S._render_help(None)
+    for token in ("Web Watcher", "Set up a watch", "Vet", "Not a match", "latest match"):
+        assert token in out, token
+
+
 def test_reset_intent_is_recognised():
     for msg in ["remake the macgregor watch", "reset it", "start it over", "rebuild the boats watch",
                 "recreate it", "redo that watch", "start over", "wipe it and start fresh"]:

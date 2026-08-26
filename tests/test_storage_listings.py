@@ -211,6 +211,25 @@ def test_count_matches(db):
     assert count_matches("other", db_path=db) == 0
 
 
+def test_exclude_listing_is_sticky_across_a_rejudge(db):
+    """A hand-removed match drops out of the matches now AND stays out when a later sweep would
+    re-judge it as a match. See storage.exclude_listing / record_observation."""
+    from web_watcher.storage import exclude_listing
+    _put(db, key="cl:9")
+    record_observation("w", "Boats", "cl:9", "t0", matched=True, rating=4, db_path=db)
+    assert count_matches("w", db_path=db) == 1
+    assert exclude_listing("https://x/cl:9.html", db_path=db) == 1     # one observation excluded
+    assert count_matches("w", db_path=db) == 0                         # gone from matches
+    record_observation("w", "Boats", "cl:9", "t1", matched=True, rating=5, db_path=db)
+    assert count_matches("w", db_path=db) == 0                         # a re-judge can't bring it back
+
+
+def test_excluding_an_unknown_url_removes_nothing(db):
+    from web_watcher.storage import exclude_listing
+    assert exclude_listing("https://x/never-seen.html", db_path=db) == 0
+    assert exclude_listing("", db_path=db) == 0
+
+
 def test_observation_upsert_updates_verdict(db):
     _put(db, key="craigslist:1")
     record_observation("wid-A", "Trucks", "craigslist:1", "t0", matched=False, db_path=db)

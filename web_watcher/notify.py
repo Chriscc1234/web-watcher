@@ -79,10 +79,11 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
         tok = remember_vet_link(payload.result.link, _listing_title(payload))
         # Two matching buttons: open it, or have The Watcher vet it. A url button looks and taps
         # the same as the callback one, so the pair reads as one control strip.
-        body["reply_markup"] = {"inline_keyboard": [[
-            {"text": "🔗 Open listing", "url": payload.result.link},
-            {"text": "🔍 Vet this listing", "callback_data": f"{_VET_PREFIX}{tok}"},
-        ]]}
+        body["reply_markup"] = {"inline_keyboard": [
+            [{"text": "🔗 Open listing", "url": payload.result.link},
+             {"text": "🔍 Vet this listing", "callback_data": f"{_VET_PREFIX}{tok}"}],
+            [{"text": "🚫 Not a match", "callback_data": f"unmatch:{tok}"}],
+        ]}
 
     # A photo makes a listing readable at a glance — you know whether it's worth opening before
     # you read a word. Telegram will fetch the thumbnail we already stored and put it ABOVE the

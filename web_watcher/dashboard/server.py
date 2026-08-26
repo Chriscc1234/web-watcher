@@ -969,6 +969,18 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             "max_mileage": max_mileage, "limit": limit,
         })
 
+    @app.post("/api/listings/exclude")
+    def exclude_listing_ep(body: dict):
+        """Hand-remove a bad match. Marks the listing excluded+unmatched for every watch that
+        surfaced it, so it drops from the matches now and a later re-judge can't bring it back.
+        Body: {url}."""
+        from web_watcher.storage import exclude_listing as _excl
+        url = (body.get("url") or "").strip()
+        if not url:
+            raise HTTPException(400, detail="no url given")
+        removed = _excl(url)
+        return {"ok": True, "url": url, "removed": removed}
+
     @app.delete("/api/listings")
     def clear_results(watch: str | None = None):
         """Clear Results. With ?watch=<name> wipes just that watch's finds (and its dedup

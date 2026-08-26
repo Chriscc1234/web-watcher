@@ -191,6 +191,28 @@ def test_vet_button_runs_inspect_and_replies(monkeypatch, tmp_path):
     assert sent and f"VERDICT for {url}" in sent[0]
 
 
+def test_not_a_match_button_excludes_the_listing(monkeypatch, tmp_path):
+    """Tapping '🚫 Not a match' hand-removes the listing via the exclude endpoint."""
+    from web_watcher import notify
+    monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
+    url = "https://x/view/d/bad-boat/abc"
+    tok = notify.remember_vet_link(url)
+    b = _bridge("111")
+    posted, sent = {}, []
+    monkeypatch.setattr(b, "_answer_callback", lambda cb_id, text="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+
+    class _R:
+        status_code = 200
+        def json(self): return {"ok": True, "removed": 2}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.update(k.get("json") or {}) or _R())
+    b._handle_callback({"id": "1", "data": f"unmatch:{tok}", "message": {"chat": {"id": "111"}}})
+    assert posted.get("url") == url                       # the right listing was excluded
+    assert "Removed from your matches" in sent[0]
+
+
 def test_vet_verdict_is_sent_as_a_photo_card_when_an_image_exists(monkeypatch):
     """The verdict can land after other chatting, so the listing's picture makes it unmistakable
     which listing it's about."""

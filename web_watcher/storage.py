@@ -224,6 +224,10 @@ def init_db(db_path: Path | None = None) -> None:
         obs_cols = [r["name"] for r in conn.execute("PRAGMA table_info(observations)").fetchall()]
         if "rating" not in obs_cols:
             conn.execute("ALTER TABLE observations ADD COLUMN rating INTEGER")
+        # Migration: `excluded` — a match the USER hand-removed. Sticky, so a re-judge on a later
+        # sweep can't bring it back (see record_observation), and it never shows as matched again.
+        if "excluded" not in obs_cols:
+            conn.execute("ALTER TABLE observations ADD COLUMN excluded INTEGER DEFAULT 0")
         # Migration: add `understanding` (JSON: what KIND of site this is, what its search box
         # does, whether it's viable to watch) to a pre-existing site_profiles table.
         sp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(site_profiles)").fetchall()]
@@ -442,12 +446,32 @@ def record_observation(
             ON CONFLICT(watch_id, listing_key) DO UPDATE SET
                 last_seen    = excluded.last_seen,
                 watch_name   = excluded.watch_name,
-                matched      = excluded.matched,
+                -- A user-excluded listing STAYS unmatched no matter what a re-judge says.
+                matched      = CASE WHEN observations.excluded = 1 THEN 0 ELSE excluded.matched END,
                 rating       = COALESCE(excluded.rating, observations.rating),
                 judge_reason = COALESCE(excluded.judge_reason, observations.judge_reason)
             """,
             (watch_id, watch_name, listing_key, ts, ts, int(matched), rating, judge_reason),
         )
+
+
+def exclude_listing(url: str, db_path: Path | None = None) -> int:
+    """Hand-remove a bad match: mark every observation of this listing (by its URL → listing_key)
+    as excluded and unmatched, so it drops out of the matches now and a later re-judge can't bring
+    it back. Returns how many observation rows were updated (0 if the URL isn't known)."""
+    u = (url or "").strip()
+    if not u:
+        return 0
+    with _connect(_resolve(db_path)) as conn:
+        row = conn.execute(
+            "SELECT listing_key FROM listings WHERE url = ? ORDER BY last_seen DESC LIMIT 1",
+            (u,)).fetchone()
+        if not row:
+            return 0
+        key = row["listing_key"] if isinstance(row, sqlite3.Row) else row[0]
+        cur = conn.execute(
+            "UPDATE observations SET excluded = 1, matched = 0 WHERE listing_key = ?", (key,))
+        return cur.rowcount or 0
 
 
 def get_listing_by_url(url: str, db_path: Path | None = None) -> dict | None:

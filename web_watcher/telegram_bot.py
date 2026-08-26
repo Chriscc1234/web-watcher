@@ -61,7 +61,9 @@ _HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (conf
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 _TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
-_SLOW_TURN_S       = 12.0         # a hard turn says "hang on" at ~12s, and (if still going) again at 30s
+_SLOW_TURN_S       = 20.0         # a normal local turn already takes ~12s, so nudge only well past
+                                  # that — #1 at ~20s (genuinely slow), #2 at ~45s (rare) — else the
+                                  # "hang on" lands on top of the answer.
 _TOP_COOLDOWN_S    = 25.0         # ignore a second "Show top N" tap within this long (a burst takes a bit)
 
 # A pool for each stage so the reassurance never reads the same twice in a row. The first fires at
@@ -298,7 +300,7 @@ class TelegramBridge:
             # reassurance never reads the same twice.
             with self._typing_until_sent(to, slow_nudges=[
                     (_SLOW_TURN_S, random.choice(_THINKING_NUDGES)),
-                    (30.0, random.choice(_STILL_WORKING_NUDGES))]):
+                    (45.0, random.choice(_STILL_WORKING_NUDGES))]):
                 result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)
@@ -590,6 +592,26 @@ class TelegramBridge:
             self._handle_top_request(data[4:], str(chat))
             return
 
+        # "🚫 Not a match" — hand-remove a bad match so it drops out and never comes back.
+        if data.startswith("unmatch:"):
+            self._answer_callback(cb.get("id"), "Removing…")
+            url = vet_entry_for(data[len("unmatch:"):]).get("url", "")
+            if not url:
+                self._send("I couldn't find that listing to remove — it may be from an older alert.",
+                           str(chat))
+                return
+            ok = False
+            try:
+                r = httpx.post(f"{self.dashboard_url}/api/listings/exclude",
+                               json={"url": url}, timeout=20.0)
+                ok = r.status_code < 300 and (r.json() or {}).get("removed", 0) > 0
+            except Exception as exc:
+                log.warning("Telegram: exclude of %s failed: %s", url[:60], exc)
+            self._send("🚫 Removed from your matches — I won't surface that one again."
+                       if ok else "I couldn't remove that one just now — try again in a moment.",
+                       str(chat))
+            return
+
         self._answer_callback(cb.get("id"), "Vetting…")
         if not data.startswith("vet:"):
             return
@@ -612,10 +634,12 @@ class TelegramBridge:
         fails; the verdict is never lost to a missing picture."""
         import html as _h
         import json as _json
-        from web_watcher.notify import image_bytes_for_listing
+        from web_watcher.notify import image_bytes_for_listing, remember_vet_link, vet_token
         head = f"🔍 <b>{_h.escape(title)}</b>\n\n" if title else "🔍 <b>Vetted</b>\n\n"
         caption = head + _h.escape(verdict) + f'\n\n<a href="{_h.escape(url, quote=True)}">{_h.escape(url)}</a>'
-        buttons = [[{"text": "🔗 Open listing", "url": url}]]
+        remember_vet_link(url, title)
+        buttons = [[{"text": "🔗 Open listing", "url": url}],
+                   [{"text": "🚫 Not a match", "callback_data": f"unmatch:{vet_token(url)}"}]]
 
         if len(caption) <= 1024:
             img = image_bytes_for_listing("", url)      # recovers the thumbnail from the listing page
@@ -700,8 +724,10 @@ class TelegramBridge:
         buttons = None
         if url.startswith("http"):
             remember_vet_link(url, title)         # so the tapped button resolves back to this URL
+            tok = vet_token(url)
             buttons = [[{"text": "🔗 Open", "url": url},
-                        {"text": "🔍 Vet", "callback_data": f"vet:{vet_token(url)}"}]]
+                        {"text": "🔍 Vet", "callback_data": f"vet:{tok}"}],
+                       [{"text": "🚫 Not a match", "callback_data": f"unmatch:{tok}"}]]
 
         # Photo-card when the caption fits Telegram's 1024 cap. UPLOAD the bytes rather than
         # handing Telegram the URL — its server-side fetch of craigslist image URLs 400s, so we

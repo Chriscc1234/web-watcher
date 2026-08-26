@@ -348,8 +348,9 @@ def test_specific_howtos_are_not_help_requests():
 
 def test_render_help_covers_the_essentials():
     out = S._render_help(None)
-    for token in ("Web Watcher", "Set up a watch", "Vet", "Not a match", "latest match"):
-        assert token in out, token
+    for token in ("Web Watcher", "Set up a watch", "Vet", "not a match", "latest match"):
+        assert token.lower() in out.lower(), token
+    assert "🚫" not in out                       # the removed button is not mentioned
 
 
 def test_reset_intent_is_recognised():

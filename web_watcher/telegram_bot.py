@@ -67,6 +67,14 @@ _SLOW_TURN_S       = 20.0         # a normal local turn already takes ~12s, so n
 _TOP_COOLDOWN_S    = 25.0         # ignore a second "Show top N" tap within this long (a burst takes a bit)
 _CHAT_CARDS_MAX    = 5            # a chat lookup of this many or fewer is shown as rich cards, not a list
 
+# "that's not a match" — remove the LAST match shown, in chat (there's no per-card button any more).
+# Conservative so it doesn't fire on ordinary talk; and it only acts when a single match is remembered.
+_NOT_A_MATCH_RE = re.compile(
+    r"\b(not a match|isn'?t a match|wrong match|bad match|"
+    r"(?:remove|exclude|get rid of|drop) (?:that|this|it|the last)(?: one| match| listing| result)?|"
+    r"that(?:'?s| one'?s)? (?:not|isn'?t) (?:right|a match|what i want|it)|"
+    r"not what i(?:'?m| am)? (?:looking for|after|want))\b", re.I)
+
 # A pool for each stage so the reassurance never reads the same twice in a row. The first fires at
 # ~12s ("this is taking a moment"); the second, rarely, at ~30s ("still at it").
 _THINKING_NUDGES = (
@@ -128,6 +136,9 @@ class TelegramBridge:
         # Debounce the "Show top N" buttons: a top-20 sends 20 cards over several seconds, so
         # tapping 10 then 20 (or double-tapping) would spam two overlapping bursts. chat_id -> ts.
         self._top_cooldown: dict[str, float] = {}
+        # The last single listing we showed each chat (a vet verdict, or a one-match lookup), so
+        # "that's not a match" can remove THAT one without a per-card button. chat_id -> {url,title}.
+        self._last_listing: dict[str, dict] = {}
         # Proactive check-in bookkeeping. Seed "last contact" at startup so we don't fire the
         # moment the app launches; a real check-in is a full interval of quiet away.
         self._start_ts = time.time()
@@ -295,6 +306,29 @@ class TelegramBridge:
                 return
             # Anything else: not an answer to the question — fall through and just chat.
 
+        # "That's not a match" — remove the last match we showed this chat, no button needed.
+        if _NOT_A_MATCH_RE.search(text):
+            last = self._last_listing.get(to)
+            if last and last.get("url"):
+                self._typing(to)
+                ok = False
+                try:
+                    r = httpx.post(f"{self.dashboard_url}/api/listings/exclude",
+                                   json={"url": last["url"]}, timeout=20.0)
+                    ok = r.status_code < 300 and (r.json() or {}).get("removed", 0) > 0
+                except Exception as exc:
+                    log.warning("Telegram: chat exclude failed: %s", exc)
+                name = last.get("title") or "that listing"
+                if ok:
+                    self._last_listing.pop(to, None)
+                self._send(f"🚫 Removed “{name}” from your matches — I won't show it again."
+                           if ok else "I couldn't remove that one just now — try again in a moment.",
+                           to)
+                return
+            self._send("Which one? Show it to me first (e.g. “show me the latest match”), then say "
+                       "“not a match” and I'll remove it.", to)
+            return
+
         try:
             # Keep "typing" up for the whole wait, and if it runs long, say so — once at ~12s and,
             # only if it's STILL going at ~30s (uncommon), again. A fresh phrase each time so the
@@ -354,6 +388,11 @@ class TelegramBridge:
                 self._send_listing_card(row, to)
                 if i < len(listings) - 1:
                     time.sleep(0.3)
+            # Remember a SINGLE shown match so "that's not a match" can target it (ambiguous with
+            # several on screen, so only when there's exactly one).
+            if len(listings) == 1 and str(listings[0].get("url") or "").strip():
+                self._last_listing[to] = {"url": str(listings[0]["url"]).strip(),
+                                          "title": str(listings[0].get("title") or "").strip()}
         else:
             self._send(reply or "(no reply)", to, html=as_html)
 
@@ -692,12 +731,11 @@ class TelegramBridge:
         fails; the verdict is never lost to a missing picture."""
         import html as _h
         import json as _json
-        from web_watcher.notify import image_bytes_for_listing, remember_vet_link, vet_token
+        from web_watcher.notify import image_bytes_for_listing
         head = f"🔍 <b>{_h.escape(title)}</b>\n\n" if title else "🔍 <b>Vetted</b>\n\n"
         caption = head + _h.escape(verdict) + f'\n\n<a href="{_h.escape(url, quote=True)}">{_h.escape(url)}</a>'
-        remember_vet_link(url, title)
-        buttons = [[{"text": "🔗 Open listing", "url": url}],
-                   [{"text": "🚫 Not a match", "callback_data": f"unmatch:{vet_token(url)}"}]]
+        self._last_listing[chat] = {"url": url, "title": title}   # so "not a match" can target it
+        buttons = [[{"text": "🔗 Open listing", "url": url}]]
 
         if len(caption) <= 1024:
             img = image_bytes_for_listing("", url)      # recovers the thumbnail from the listing page
@@ -782,10 +820,8 @@ class TelegramBridge:
         buttons = None
         if url.startswith("http"):
             remember_vet_link(url, title)         # so the tapped button resolves back to this URL
-            tok = vet_token(url)
             buttons = [[{"text": "🔗 Open", "url": url},
-                        {"text": "🔍 Vet", "callback_data": f"vet:{tok}"}],
-                       [{"text": "🚫 Not a match", "callback_data": f"unmatch:{tok}"}]]
+                        {"text": "🔍 Vet", "callback_data": f"vet:{vet_token(url)}"}]]
 
         # Photo-card when the caption fits Telegram's 1024 cap. UPLOAD the bytes rather than
         # handing Telegram the URL — its server-side fetch of craigslist image URLs 400s, so we

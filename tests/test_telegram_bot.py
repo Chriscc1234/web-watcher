@@ -191,8 +191,38 @@ def test_vet_button_runs_inspect_and_replies(monkeypatch, tmp_path):
     assert sent and f"VERDICT for {url}" in sent[0]
 
 
-def test_not_a_match_button_excludes_the_listing(monkeypatch, tmp_path):
-    """Tapping '🚫 Not a match' hand-removes the listing via the exclude endpoint."""
+def test_not_a_match_in_chat_removes_the_last_shown_listing(monkeypatch):
+    """No per-card button any more — you just tell the bot, and it removes the last one it showed."""
+    b = _bridge("111")
+    b._last_listing["111"] = {"url": "https://x/bad", "title": "Bad Jeep"}
+    posted, sent = [], []
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+
+    class _R:
+        status_code = 200
+        def json(self): return {"removed": 1}
+
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda url, **k: posted.append(k.get("json")) or _R())
+    b._handle_message("that's not a match", "111", "Chris")
+    assert posted and posted[0]["url"] == "https://x/bad"
+    assert any("Removed" in s for s in sent)
+    assert "111" not in b._last_listing            # cleared after removal
+
+
+def test_not_a_match_without_a_shown_listing_asks_which_one(monkeypatch):
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
+                        lambda *a, **k: pytest.fail("must not exclude anything without a tracked match"))
+    b._handle_message("not a match", "111", "Chris")
+    assert sent and "which one" in sent[0].lower()
+
+
+def test_not_a_match_legacy_callback_still_excludes(monkeypatch, tmp_path):
+    """The old alerts' 🚫 button is gone, but its callback still works for any lingering messages."""
     from web_watcher import notify
     monkeypatch.setattr(notify, "_vet_store_path", lambda: tmp_path / "vet_links.json")
     url = "https://x/view/d/bad-boat/abc"

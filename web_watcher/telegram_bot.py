@@ -69,6 +69,34 @@ _CHAT_CARDS_MAX    = 5            # a chat lookup of this many or fewer is shown
 
 # "that's not a match" — remove the LAST match shown, in chat (there's no per-card button any more).
 # Conservative so it doesn't fire on ordinary talk; and it only acts when a single match is remembered.
+# Pull the actual word to avoid out of a natural reply — "avoid utility vehicles", "skip the
+# diesel ones", "the word project" — so the antikeyword is "utility"/"diesel"/"project", not the
+# whole sentence. A quoted phrase always wins. Filler stripped off the front and back.
+_AK_LEAD = re.compile(
+    r"^(?:the\s+word\s+|word\s+|avoid\s+|skip\s+|exclude\s+|filter(?:\s+out)?\s+|no\s+more\s+|"
+    r"don'?t\s+(?:show|want|include)\s+|do\s+not\s+(?:show|want|include)\s+|get\s+rid\s+of\s+|"
+    r"anything\s+(?:with|mentioning|that\s+says)\s+|ones?\s+with\s+|remove\s+|drop\s+|no\s+|"
+    r"me\s+|us\s+)+", re.I)
+_AK_TRAIL = re.compile(
+    r"\s+(?:ones?|listings?|results?|posts?|vehicles?|cars?|boats?|trucks?|please|"
+    r"in\s+it|in\s+the\s+title|in\s+the\s+listing|from\s+now\s+on|any\s*more)$", re.I)
+
+
+def _extract_antikeyword(text: str) -> str:
+    """The word a natural reply means to avoid. A quoted phrase wins; otherwise strip leading/
+    trailing filler so 'skip the diesel ones' → 'diesel'. Returns '' when nothing usable is left."""
+    t = (text or "").strip()
+    m = re.search(r"[\"“'']\s*([^\"“”']{1,30}?)\s*[\"”'']", t)   # quoted → exact
+    if m:
+        return m.group(1).strip().lower()
+    t = t.rstrip(".!?, ").lower()
+    prev = None
+    while prev != t:                       # strip repeatedly ("no more diesel ones")
+        prev = t
+        t = _AK_TRAIL.sub("", _AK_LEAD.sub("", t)).strip()
+    return t.strip("\"“”'").strip()
+
+
 _NOT_A_MATCH_RE = re.compile(
     r"\b(not a match|isn'?t a match|wrong match|bad match|"
     r"(?:remove|exclude|get rid of|drop) (?:that|this|it|the last)(?: one| match| listing| result)?|"
@@ -315,7 +343,7 @@ class TelegramBridge:
             if _is_negative(text):
                 self._send("No problem — I just removed that one.", to)
                 return
-            word = text.strip().strip('"“”\'').lower()
+            word = _extract_antikeyword(text)
             if _is_affirmative(text) or not word:
                 self._pending_antikeyword = pend      # they said yes but no word — ask for it
                 self._send("Sure — what word should I avoid? A make, model or type "
@@ -335,7 +363,13 @@ class TelegramBridge:
                     f"👍 Done — I'll skip listings mentioning “{word}” for “{pend['watch']}”."
                     if ok else "I couldn't add that filter just now — try again in a moment.", to)
                 return
-            # A longer message — not a word. Drop the offer and treat it as a normal turn.
+            # Still more than a word or two after trimming — ask for just the word rather than
+            # storing a whole phrase that would never match. Keep the offer open.
+            if len(word) <= 60:
+                self._pending_antikeyword = pend
+                self._send("Just the one word works best — e.g. “utility” or “diesel”. Or “no”.", to)
+                return
+            # A long, clearly-unrelated reply — they moved on; drop the offer, chat normally.
 
         # "That's not a match" — remove the last match we showed this chat, no button needed.
         if _NOT_A_MATCH_RE.search(text):

@@ -228,6 +228,18 @@ def test_not_a_match_offers_an_antikeyword_when_the_watch_is_known(monkeypatch):
     assert any("skip ones like it" in s.lower() for s in sent)
 
 
+def test_extract_antikeyword_pulls_the_word_from_a_sentence():
+    from web_watcher.telegram_bot import _extract_antikeyword as ex
+    assert ex("utility") == "utility"
+    assert ex("avoid utility") == "utility"
+    assert ex("skip utility vehicles") == "utility"
+    assert ex("the word diesel") == "diesel"
+    assert ex("don't show me diesel ones") == "diesel"
+    assert ex("anything with kayak in it") == "kayak"
+    assert ex("no more project cars") == "project"
+    assert ex('skip the "sport utility" ones') == "sport utility"   # quotes win, kept intact
+
+
 def test_an_antikeyword_word_is_appended_to_the_watch(monkeypatch):
     b = _bridge("111")
     b._pending_antikeyword = {"watch": "Cars"}
@@ -237,7 +249,7 @@ def test_an_antikeyword_word_is_appended_to_the_watch(monkeypatch):
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
                         lambda url, **k: posted.append((url, k.get("json")))
                         or type("R", (), {"status_code": 200})())
-    b._handle_message("utility", "111", "Chris")
+    b._handle_message("avoid utility vehicles", "111", "Chris")   # a full sentence, not one word
     assert posted and "antikeyword" in posted[0][0] and posted[0][1]["word"] == "utility"
     assert any("skip listings mentioning" in s.lower() for s in sent)
     assert b._pending_antikeyword is None

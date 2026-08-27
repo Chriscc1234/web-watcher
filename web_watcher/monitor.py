@@ -26,6 +26,7 @@ scheduler.py orchestrates:
   has_blocking_overlay ~L316 Fast no-wait probe: is an overlay in the way? (agent gate)
   humanized_search   ~L390  Type the query into the search box (keyboard+mouse) vs URL-jump
   human_scroll       ~L460  Human-paced scroll bursts
+  human_read         ~L520  Dwell on ONE listing page like a person actually reading it
   is_login_wall      ~L360  Login-wall / logged-out detection
 ──────────────────────────────────────────────────────────────────────────────
 """
@@ -1013,6 +1014,120 @@ def human_scroll(page: Page, passes: int = 4) -> None:
         except Exception as exc:
             log.debug("Scroll pass %d failed: %s", i, exc)
             break
+
+
+# ---------------------------------------------------------------------------
+# Reading ONE listing page like a person
+# ---------------------------------------------------------------------------
+
+# How long a person plausibly spends on a listing they opened on purpose. The old behaviour
+# was a flat 0.8–2.0s — open, scrape, close — which is not reading, it's a tab flicker, and
+# on a site that profiles engagement (Facebook above all) a run of sub-second visits is a
+# louder bot tell than anything in the user-agent string. These are the floor/ceiling of the
+# TOTAL dwell; the actual figure is drawn per-page and scaled by how much there is to read.
+_READ_MIN_S       = 8.0
+_READ_MAX_S       = 46.0
+# Sites where a listing view is watched closely enough to warrant the unhurried end.
+_SLOW_READ_HOSTS  = ("facebook.com", "fb.com", "marketplace.facebook.com")
+
+
+def nap(seconds: float, stop_event=None) -> bool:
+    """Sleep in short slices so a Stop is honoured within ~0.2s instead of after the full
+    dwell. Returns False if we were asked to stop (caller should bail), True otherwise."""
+    end = time.monotonic() + max(0.0, seconds)
+    while time.monotonic() < end:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        time.sleep(min(0.2, max(0.0, end - time.monotonic())))
+    return True
+
+
+def _read_budget(page, host: str) -> float:
+    """How long to spend on THIS page: a base visit plus time proportional to how much ad
+    there is to read. A three-line ad doesn't hold anyone for 40 seconds; a long, detailed
+    one does. Content-scaled dwell looks like reading — a constant does not."""
+    slow = any(h in (host or "").lower() for h in _SLOW_READ_HOSTS)
+    base = random.uniform(9.0, 16.0) if slow else random.uniform(6.0, 11.0)
+    try:
+        chars = int(page.evaluate(
+            "() => (document.body && document.body.innerText ? document.body.innerText.length : 0)"
+        ) or 0)
+    except Exception:
+        chars = 0
+    # ~1,100 chars is a typical marketplace ad; give roughly 5s of reading per screenful of it.
+    base += min(22.0, (chars / 1100.0) * random.uniform(3.5, 6.5))
+    return max(_READ_MIN_S, min(_READ_MAX_S, base))
+
+
+def human_read(page, stop_event=None) -> float:
+    """
+    Dwell on a listing page the way a person who opened it on purpose actually behaves:
+    let it render, look at the photos, scroll down through the description in reading-paced
+    passes, drift back up to re-check a detail, and only then leave.
+
+    This exists because the deep-read used to open a listing, scrape the DOM and close the
+    tab inside two seconds. That is the single most recognisable automation signature there
+    is — a human cannot read an ad in 800ms — and it is worst exactly where it matters most,
+    on Facebook Marketplace. Returns the seconds actually spent (0.0 if stopped early).
+
+    Best-effort throughout: this is politeness, not correctness, so any failure here must
+    leave the scrape that follows it untouched.
+    """
+    started = time.monotonic()
+    try:
+        host = urlparse(page.url).netloc
+    except Exception:
+        host = ""
+    budget = _read_budget(page, host)
+
+    try:
+        # 1. Land and look. Photos are at the top and are the first thing anyone looks at.
+        if not nap(random.uniform(1.2, 2.6), stop_event):
+            return time.monotonic() - started
+        try:
+            page.mouse.move(random.randint(380, 900), random.randint(240, 460))
+        except Exception:
+            pass
+        if not nap(random.uniform(1.5, 3.5), stop_event):
+            return time.monotonic() - started
+
+        # 2. Work down through the ad in reading passes, pausing where the text is.
+        while (time.monotonic() - started) < budget:
+            for _ in range(random.randint(2, 4)):
+                page.mouse.wheel(0, random.randint(220, 460))
+                if not nap(max(0.05, random.gauss(0.18, 0.06)), stop_event):
+                    return time.monotonic() - started
+            # The pause AFTER a scroll is the reading — this is where the time goes.
+            if not nap(max(0.6, random.gauss(2.3, 0.9)), stop_event):
+                return time.monotonic() - started
+            # Drift back up now and then, the way you do to re-check a price or a year.
+            if random.random() < 0.35:
+                for _ in range(random.randint(1, 3)):
+                    page.mouse.wheel(0, -random.randint(140, 320))
+                    if not nap(max(0.05, random.gauss(0.2, 0.07)), stop_event):
+                        return time.monotonic() - started
+                if not nap(max(0.4, random.gauss(1.6, 0.6)), stop_event):
+                    return time.monotonic() - started
+            # A cursor frozen for 30 seconds is as odd as one that never rests.
+            if random.random() < 0.4:
+                try:
+                    page.mouse.move(random.randint(300, 1000), random.randint(200, 700),
+                                    steps=random.randint(4, 12))
+                except Exception:
+                    pass
+
+        # 3. Back to the top before leaving — nobody closes a tab mid-description.
+        try:
+            page.mouse.wheel(0, -random.randint(1200, 2600))
+        except Exception:
+            pass
+        nap(random.uniform(0.5, 1.4), stop_event)
+    except Exception as exc:
+        log.debug("human_read interrupted on %s: %s", host, exc)
+
+    spent = time.monotonic() - started
+    log.debug("Read %s for %.1fs (budget %.1fs)", host, spent, budget)
+    return spent
 
 
 # ---------------------------------------------------------------------------

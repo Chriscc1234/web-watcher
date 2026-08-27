@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import math
 import re
 import threading
 import time
@@ -56,8 +57,8 @@ from web_watcher.perception import perceive
 from web_watcher.reasoning import Reasoner, ReasoningResult, OllamaUnavailableError
 from web_watcher.notify import NotificationPayload, send_notifications
 from web_watcher.monitor import (
-    extract_listings, extract_listing_body, extract_listing_posted_at, vary_search,
-    human_scroll, is_login_wall, dismiss_popups, humanized_search,
+    Listing, extract_listings, extract_listing_body, extract_listing_posted_at, vary_search,
+    human_scroll, is_login_wall, dismiss_popups, humanized_search, human_read, nap,
 )
 from web_watcher.storage import (
     SCREENSHOTS_DIR,
@@ -976,8 +977,12 @@ def _run_agent_continuous_sweep(
 
     _process_sweep_listings(watch, cfg, db_path, sweep_index, listings, run_ts,
                             mode_label="continuous-agent",
-                            page=page, fetch_bodies=bool(watch.judgment_prompt),
+                            page=page, fetch_bodies=_wants_deep_read(watch),
                             stop_event=stop_event)
+
+    # Go back for matches this watch banked BEFORE it could read them — from a priming
+    # sweep, or from any run made while the deep-read was gated off. See _explore_matches.
+    _explore_matches(watch, cfg, db_path, page, stop_event)
 
 
 def _human_first_navigate(page, url: str, watch: Watch) -> bool:
@@ -1120,9 +1125,95 @@ def _run_continuous_sweep(
     # Deep-read is decoupled from the agent: read new ads' attributes whenever there's a
     # judgment_prompt to consume them, regardless of how the listings were gathered.
     _process_sweep_listings(watch, cfg, db_path, sweep_index, listings, run_ts,
-                            page=page, fetch_bodies=bool(watch.judgment_prompt),
+                            page=page, fetch_bodies=_wants_deep_read(watch),
                             stop_event=stop_event)
     return len(listings)
+
+
+# How many previously-banked matches to go back and read per sweep. Small on purpose: this
+# runs IN ADDITION to the sweep's own deep-reads, and each one is a real ~10-45s page visit.
+_EXPLORE_BACKLOG_PER_SWEEP = 4
+
+
+def _explore_matches(watch, cfg, db_path, page, stop_event=None) -> int:
+    """Open and read matches this watch already found but never actually looked at.
+
+    A match can be banked without its ad body ever being read — that is what a priming sweep
+    does (it judges card titles cheaply), and it is what every sweep did while the deep-read
+    was gated on `judgment_prompt`. Those rows sit in Results with an empty body, no posted
+    date and no frozen copy: the listing is known to exist, but nothing about it is known.
+
+    Each sweep this picks a few of them off the backlog and reads them properly — same human
+    dwell, same archive capture as a fresh match. Small batches by design: a burst of twenty
+    listing views in a row is the pattern we are specifically trying not to look like.
+    Returns how many were read. Never raises — a failed backfill must not end a sweep.
+    """
+    if page is None or not _wants_deep_read(watch):
+        return 0
+    if stop_event is not None and stop_event.is_set():
+        return 0
+    try:
+        from web_watcher.storage import query_listings
+        wid  = watch.id or watch.name
+        rows = query_listings(watch_id=wid, matched=True, limit=200, db_path=db_path)
+        pending = [r for r in rows
+                   if not (r.get("details") or "").strip() and (r.get("url") or "")]
+        if not pending:
+            return 0
+        # Oldest-unread first, so the backlog actually drains instead of re-reading the head.
+        pending.reverse()
+        batch = [Listing(key=r["listing_key"], url=r["url"],
+                         title=r.get("title") or "", price=r.get("price_text") or "")
+                 for r in pending[:_EXPLORE_BACKLOG_PER_SWEEP]]
+        log.info("Continuous watch %r: reading %d previously-unread match(es) "
+                 "(%d still unread)", watch.name, len(batch), len(pending))
+        _capture_listing_bodies(page, batch, stop_event)
+
+        read = 0
+        for l in batch:
+            details = (getattr(l, "details", "") or "").strip()
+            if not details:
+                continue
+            read += 1
+            try:
+                host  = urlparse(l.url).netloc if l.url else ""
+                attrs = parse_listing_attributes(l.title, l.price, details)
+                upsert_listing(l.key, source=host, url=l.url, title=l.title,
+                               price_text=l.price, attributes=attrs, details=details,
+                               fingerprint=listing_fingerprint(l.title, attrs.get("price_value"),
+                                                               attrs.get("year")),
+                               image=getattr(l, "image", "") or "",
+                               posted_at=getattr(l, "posted_at", "") or "",
+                               ts=datetime.now(timezone.utc).isoformat(), db_path=db_path)
+                tmp = getattr(l, "_archive_tmp", None)
+                if tmp is not None:
+                    from web_watcher import archive
+                    kept = archive.keep(tmp, l.key)   # already a match — always worth freezing
+                    if kept:
+                        set_listing_archive(l.key, str(kept), db_path=db_path)
+                    l._archive_tmp = None
+            except Exception as exc:
+                log.debug("could not store backfilled read for %s: %s", l.key, exc)
+        if read:
+            log.info("Continuous watch %r: filled in the ad details for %d earlier match(es)",
+                     watch.name, read)
+        return read
+    except Exception as exc:
+        log.debug("explore-matches pass failed for %r: %s", watch.name, exc)
+        return 0
+
+
+def _wants_deep_read(watch) -> bool:
+    """Should this watch open each new listing and read the actual ad?
+
+    This USED to be `bool(watch.judgment_prompt)` — but the judge one layer down runs on
+    `judgment_prompt OR instruction`. So a watch with a plain instruction ("MacGregor
+    sailboats near Seattle, under $8k") got judged on criteria it had no way to check: no
+    body, no posted date, no archive — just the card title. That is how a Facebook run
+    harvested fifteen real MacGregors, opened none of them, and rejected several on a
+    location guessed from whatever leaked into the card text. The two gates have to agree.
+    """
+    return bool(watch.judgment_prompt or (watch.instruction or "").strip())
 
 
 def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
@@ -1149,12 +1240,19 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
         # — NOT a bot machine-gunning tabs open/closed (a strong bot tell, especially on
         # Facebook, which watches for that). Pause before each (after the first).
         if i > 0:
-            time.sleep(random.uniform(1.5, 4.0))
+            if not nap(random.uniform(4.0, 11.0), stop_event):
+                break
         tab = None
         try:
             tab = ctx.new_page()
             tab.goto(l.url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
             dismiss_popups(tab, settle_ms=0)
+            # Spend a believable amount of time ON the ad — scrolling the description,
+            # looking at the photos — BEFORE scraping it. Reading first also means the
+            # lazy-loaded parts of the page (seller block, full description) have arrived
+            # by the time we extract, so the body we get is more complete, not just more
+            # human. See monitor.human_read.
+            human_read(tab, stop_event)
             l.details = extract_listing_body(tab)
             l.posted_at = extract_listing_posted_at(tab)
             # Freeze the page while we're on it — self-contained MHTML, no extra visit. Held in a
@@ -1166,7 +1264,6 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
             except Exception:
                 l._archive_tmp = None
             fetched += 1
-            time.sleep(random.uniform(0.8, 2.0))   # "read" the ad before closing the tab
         except Exception as exc:
             # Visible (not debug) so a systematic 0/N failure is diagnosable from the log.
             log.warning("Body fetch failed for %s: %s: %s",
@@ -1226,13 +1323,71 @@ def _persist_listings(watch, listings: list, matched_keys: set, run_ts: str, db_
             log.debug("Persist listing %s failed: %s", l.key, exc)
 
 
-def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: str, verb: str) -> None:
+_STOPWORDS = {
+    "the", "and", "for", "with", "near", "from", "any", "all", "look", "find", "watch",
+    "listing", "listings", "post", "posts", "read", "only", "under", "over", "about",
+    "that", "this", "just", "new", "used", "good", "great", "please", "want", "wanted",
+    "buy", "sell", "sale", "area", "around", "within", "miles", "mile", "price", "prices",
+}
+
+
+def _instruction_terms(watch) -> list[str]:
+    """The distinctive words from a watch's own instruction — 'macgregor', 'sailboat'.
+    Used to decide which listings are worth the judge's limited attention first."""
+    text = f"{watch.instruction or ''} {watch.judgment_prompt or ''}".lower()
+    seen, out = set(), []
+    for w in re.findall(r"[a-z][a-z0-9'-]{2,}", text):
+        if w in _STOPWORDS or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+    return out
+
+
+def _judge_order(batch: list, watch) -> list:
+    """Order a batch so the listings most likely to matter are judged FIRST.
+
+    The baseline judges a capped slice of what a priming sweep harvested, and it used to
+    take that slice in raw FEED order. On a 233-listing Facebook prime that meant judging
+    positions 1-60 and silently dropping the rest — including ten genuine MacGregors that
+    happened to sit further down the feed. They went into the database unjudged and never
+    appeared in Results. The cap is fine; taking an arbitrary slice under it was not.
+
+    Scoring is deterministic and free: count how many of the watch's own instruction terms
+    appear in the card title. Ties keep feed order, so nothing is shuffled without cause.
+    """
+    terms = _instruction_terms(watch)
+    if not terms:
+        return list(batch)
+    titles = [(getattr(l, "title", "") or "").lower() for l in batch]
+    n = len(titles) or 1
+    # Weight each term by how RARE it is in this batch. On a "MacGregor sailboats near
+    # Seattle" watch, half the feed says "seattle" and nearly all of it says "sailboat" —
+    # those separate nothing. "macgregor" appears in a handful, so it is the term actually
+    # carrying the search. Counting terms equally let common words outrank the brand.
+    weight = {}
+    for t in terms:
+        hits = sum(1 for ti in titles if t in ti)
+        weight[t] = 0.0 if hits == 0 else 1.0 + math.log(n / hits)
+    def score(i):
+        return sum(w for t, w in weight.items() if t in titles[i])
+    ranked = sorted(range(len(batch)), key=lambda i: (-score(i), i))
+    return [batch[i] for i in ranked]
+
+
+def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: str, verb: str,
+                    page=None, stop_event=None) -> None:
     """Silently baseline a large batch (first sweep, or a flood-guard trip): mark the WHOLE
     batch seen so we never notify on pre-existing backlog — but still JUDGE a capped slice and
     record its matches so they populate Results. This is the difference between a new watch
     looking broken (hundreds found, nothing shown) and it showing real matches from the start,
     just without a wall of notifications."""
-    to_judge = batch[:_BASELINE_JUDGE_CAP]
+    # Relevance-first, then cap — so a real match further down the feed is never the one
+    # that falls off the end. See _judge_order.
+    to_judge = _judge_order(batch, watch)[:_BASELINE_JUDGE_CAP]
+    if len(batch) > _BASELINE_JUDGE_CAP:
+        log.info("Continuous watch %r: judging the %d most relevant of %d primed listing(s)",
+                 watch.name, len(to_judge), len(batch))
     # Keyword prefilter first (free) — even on the baseline, so parts/salvage never reach
     # the LLM and are recorded as keyword-excluded non-matches.
     kw_kept, kw_dropped = _keyword_prefilter(to_judge, watch)
@@ -1242,6 +1397,14 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
         # Runs against the instruction even without an explicit judgment_prompt, so a plain
         # watch doesn't baseline EVERYTHING as a match (the "everything is a match" bug).
         matched = _filter_listings_by_judgment(kw_kept, watch, cfg)
+    # Now go READ the ones that passed. Priming stays cheap on the JUDGE (one call over
+    # card titles) but the handful that survive it are exactly the listings a person would
+    # click, so they get opened, read and archived like any other match. Without this a
+    # primed watch banked its best finds with an empty body and no frozen copy — the state
+    # the Facebook run ended in.
+    if matched and page is not None and _wants_deep_read(watch):
+        _capture_listing_bodies(page, _judge_order(matched, watch)[:_MAX_BODY_FETCH],
+                                stop_event)
     matched_keys = {l.key for l in matched}
     if to_judge:
         _persist_listings(watch, to_judge, matched_keys, run_ts, db_path)
@@ -1300,7 +1463,8 @@ def _process_sweep_listings(
     # Results view is populated from the start (previously it recorded nothing → the watch
     # looked broken: lots found, nothing in Results).
     if priming:
-        _baseline_batch(watch, cfg, listings, run_ts, db_path, mode_label, "primed")
+        _baseline_batch(watch, cfg, listings, run_ts, db_path, mode_label, "primed",
+                        page=page, stop_event=stop_event)
         return
 
     # Flood guard: an implausibly large "new" batch usually means a baseline gap (a thin first
@@ -1316,7 +1480,8 @@ def _process_sweep_listings(
     # volume, and that is its whole job.
     established = count_seen_listings(watch.name, db_path) >= _ESTABLISHED_SEEN
     if len(new_listings) >= _FLOOD_REBASELINE_THRESHOLD and not established:
-        _baseline_batch(watch, cfg, new_listings, run_ts, db_path, mode_label, "re-baselined")
+        _baseline_batch(watch, cfg, new_listings, run_ts, db_path, mode_label, "re-baselined",
+                        page=page, stop_event=stop_event)
         return
 
     # Repost detection: a listing with a NEW id but the same content fingerprint AND

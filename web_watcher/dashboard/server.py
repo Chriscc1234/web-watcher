@@ -114,6 +114,24 @@ an AI model reads the page to decide if the user's condition is met. If it is, \
 a notification is sent via Telegram and/or email.
 
 ════════════════════════════════════════
+UNDERSTAND THE CONVERSATION (before any tool)
+════════════════════════════════════════
+Read what the person MEANS, in the flow of the conversation — not keywords.
+  • A correction ("no wait, I meant sailboats only", "not that one") corrects their previous
+    QUESTION or reference. Re-answer the corrected question. It is NOT a request to create or
+    edit a watch unless they say so.
+  • "The second one" / "that one" / "the cheaper one" refer to things YOU just showed or said.
+    Use the numbered LISTINGS YOU JUST SHOWED block when present; never claim you lack context
+    for something you said a moment ago.
+  • A question is not an instruction: "what did you find today?" wants an answer from real
+    data, not an offer to build something new. Propose a NEW watch only when they describe
+    something they want tracked that no existing watch covers.
+  • A message can ask two things ("which are running, and did any find anything?") — answer
+    BOTH parts.
+  • If a request genuinely contradicts itself and you cannot tell what they want, say what you
+    understood and ask ONE short question.
+
+════════════════════════════════════════
 WHAT YOU CAN DO IN CHAT (your tools)
 ════════════════════════════════════════
 When the user asks what you can do, answer plainly from this list — don't invent tools.
@@ -1233,7 +1251,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         # clean, well-spaced block instead of the model running the titles together in a paragraph
         # (and mis-reporting run-state). A lookup ("show me the matches") is NOT caught here.
         _glob = _is_global_status_request(_latest)
-        if (_is_watch_status_request(_latest) or _glob) and not _is_lookup_request(_latest):
+        if (_pure_status_request(_latest) or _glob) and not _is_lookup_request(_latest):
             # A global-scoped question ("is the whole watcher running?", "globally how many?") leads
             # with a counts-only line spanning ALL users, then the speaker's own watches. A buddy
             # gets a real global number without ever seeing another person's watch titles.
@@ -1267,9 +1285,17 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         observed_ctx = (
             "WHAT YOU'VE RECENTLY OBSERVED (your own narration, newest first):\n" + narration
         )
+        # What this conversation just put on screen, and any recorded verdicts a "why…"
+        # question is about — both injected so follow-ups are answered from facts in hand
+        # instead of "I don't have context" / a guess. Empty strings when not applicable.
+        shown_ctx   = _recent_shown_block(messages, owner)
+        verdict_ctx = _verdict_context(_latest, cfg, owner)
         system = (
             _WATCHER_SYSTEM + "\n\n" + _CHAT_SYSTEM_BASE + "\n\n"
-            + _build_watches_context(cfg, manager, owner=owner) + "\n\n" + observed_ctx
+            + _build_watches_context(cfg, manager, owner=owner)
+            + (("\n\n" + shown_ctx) if shown_ctx else "")
+            + (("\n\n" + verdict_ctx) if verdict_ctx else "")
+            + "\n\n" + observed_ctx
             + "\n\n" + _cloud_spend_context(cfg)
         )
         result = _complete_assistant_turn(system, messages, cfg, model, owner=owner)
@@ -2255,6 +2281,116 @@ def _shown_summary(result: dict) -> dict:
     return out
 
 
+def _recent_shown_block(messages: list, owner: str | None) -> str:
+    """The listings this conversation just put on screen, numbered as the user saw them — so
+    "how much is the second one?" is answerable.
+
+    The `shown` record was deliberately kept out of the model's context to avoid bloat — and
+    the result was amnesia: the assistant showed a list and, one turn later, denied any
+    knowledge of it ("I don't have information about any previous matches"). This narrow
+    re-injection fixes that: ONLY the most recent shown list, ONLY when it belongs to THIS
+    conversation (its prose must appear in the transcript the client sent — saved history can
+    hold older threads), and compact by construction (`shown` is already capped at 8 rows).
+    """
+    if not any(isinstance(m, dict) and m.get("role") == "assistant" for m in (messages or [])):
+        return ""                      # first turn of a fresh chat — nothing was shown yet
+    try:
+        history = _load_watcher_history(owner)
+    except Exception:
+        return ""
+    sent = {str(m.get("content") or "").strip()
+            for m in messages if isinstance(m, dict) and m.get("role") == "assistant"}
+    for m in reversed(history):
+        if not (isinstance(m, dict) and m.get("role") == "assistant"):
+            continue
+        shown = (m.get("shown") or {}).get("listings") or []
+        if not shown:
+            continue
+        if str(m.get("content") or "").strip() not in sent:
+            continue                   # a different (older) conversation's list — not this one
+        lines = []
+        for i, r in enumerate(shown, 1):
+            bits = [str(r.get("title") or "?")[:90]]
+            if r.get("price"):
+                bits.append(str(r.get("price")))
+            if r.get("rating") is not None:
+                bits.append(f"rated {r.get('rating')}")
+            line = f"  {i}. " + " — ".join(bits)
+            if r.get("url"):
+                line += f"\n     {str(r.get('url'))[:200]}"
+            lines.append(line)
+        return ("LISTINGS YOU JUST SHOWED THE USER (numbered exactly as they saw them — "
+                "“the second one” means #2 below):\n" + "\n".join(lines) + "\n"
+                "Answer follow-ups about these items from THIS list — price, location, which "
+                "one is which, links. If a detail isn't here, say what IS known and offer to "
+                "vet the listing rather than claiming you have no context.")
+    return ""
+
+
+_WHY_VERDICT_RE = re.compile(
+    r"\bwhy\b.{0,80}\b(?:reject|skip|drop|refus|rate|flag|not (?:a )?match|"
+    r"did ?n[o']?t (?:it |you )?(?:match|keep|like|show))"
+    r"|\bwhy (?:isn'?t|wasn'?t|didn'?t|no)\b", re.I | re.S)
+
+_WHY_STOPWORDS = frozenset({
+    "why", "did", "didn", "you", "your", "the", "that", "this", "these", "those", "watch",
+    "watches", "listing", "listings", "reject", "rejected", "match", "matched", "matches",
+    "wasn", "isn", "about", "have", "what", "from", "with", "show", "shown", "keep", "kept",
+    "drop", "dropped", "skip", "skipped", "rate", "rated", "flag", "flagged", "there", "then",
+})
+
+
+def _verdict_context(text: str, cfg, owner: str | None) -> str:
+    """The judge's RECORDED verdicts for the listing(s) a "why did you reject…" question is
+    about — real rows, real reasons, so the answer comes from the database instead of a guess.
+
+    Observed live: asked "Why did you reject the Macgregor in Bothell?", the assistant invented
+    a plausible story ("very specific search terms…") and blamed the wrong watch — while the
+    store held the actual verdict for that exact listing. Guessing when the truth is one query
+    away is the definition of regurgitation; this injects the truth.
+    """
+    if not _WHY_VERDICT_RE.search(text or ""):
+        return ""
+    toks = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9'’-]{3,}", text or "")
+            if w.lower() not in _WHY_STOPWORDS][:6]
+    if not toks:
+        return ""
+    try:
+        from web_watcher.storage import query_listings
+        watches = _watches_for_owner(cfg, owner) or list(cfg.watches)
+        hits: dict[str, tuple] = {}
+        for w in watches[:12]:
+            wid = getattr(w, "id", None) or w.name
+            for t in toks[:2]:
+                try:
+                    rows = query_listings(watch_id=wid, text=t, limit=15)
+                except Exception:
+                    continue
+                for r in rows:
+                    title = str(r.get("title") or "").lower()
+                    score = sum(1 for tk in toks if tk in title)
+                    key = r.get("listing_key") or r.get("url") or title
+                    if score and (key not in hits or score > hits[key][0]):
+                        hits[key] = (score, w.name, r)
+        if not hits:
+            return ""
+        best = sorted(hits.values(), key=lambda h: -h[0])[:3]
+        lines = []
+        for _score, wname, r in best:
+            verdict = "MATCHED" if r.get("matched") else "rejected"
+            reason = str(r.get("judge_reason") or "no reason recorded").strip()
+            rating = r.get("rating")
+            lines.append(f"  • “{str(r.get('title') or '')[:90]}” — {verdict}"
+                         + (f", rated {rating}" if rating is not None else "")
+                         + f": {reason[:140]}  (watch: {wname})")
+        return ("RECORDED VERDICTS from the database for the listing(s) the user is asking "
+                "about — answer their WHY from these facts, never from a guess:\n"
+                + "\n".join(lines))
+    except Exception as exc:
+        log.debug("verdict context failed: %s", exc)
+        return ""
+
+
 def _persist_chat_turn(messages: list, result: dict, owner: str | None) -> None:
     """Save the exchange on EVERY turn that had a user message — including degraded/error turns —
     so a transient model hiccup can't punch a permanent hole in the saved chat. (An older gate only
@@ -2605,6 +2741,31 @@ def _is_watch_status_request(text: str) -> bool:
     return bool(_WATCH_STATUS_RE.search(text or ""))
 
 
+# An imperative about the watches. "Turn off all my watches. Actually wait, keep the MacGregor
+# one on, kill the rest" matched the status regex (via "my watches") and got a STATUS LIST as
+# its answer — nothing acted on, the contradiction never even seen. A message that tells us to
+# DO something must reach the full assistant path, which grounds and executes actions.
+_WATCH_ACTION_WORDS_RE = re.compile(
+    r"\b(turn (?:off|on)|shut (?:down|off)|switch (?:off|on)|stop|start|kill|pause|resume|"
+    r"enable|disable|delete|remove|reset|restart|create|add|set ?up)\b", re.I)
+
+# The message ALSO asks what was FOUND ("…and did any of them find anything in the last day?").
+# The status fast-path answers only the status half and silently drops the rest — a compound
+# question deserves the model, which has the same real state in its context.
+_ASKS_ABOUT_FINDS_RE = re.compile(
+    r"\b(?:f(?:i|ou)nds?|found|match(?:es|ed)?|anything (?:new|good)|new listings?|"
+    r"turn(?:ed)? (?:anything )?up|come (?:up|in)|seen anything)\b", re.I)
+
+
+def _pure_status_request(text: str) -> bool:
+    """The status fast-path fires ONLY for a message that is a status question and nothing
+    else — no action to carry out, no second question about the finds riding along."""
+    t = text or ""
+    return (_is_watch_status_request(t)
+            and not _WATCH_ACTION_WORDS_RE.search(t)
+            and not _ASKS_ABOUT_FINDS_RE.search(t))
+
+
 # A general "how does this work / what can you do / help" — answered from a fixed, friendly
 # explainer, not the 14b (which gives a different, sometimes wrong answer every time). Deliberately
 # NOT matching specific how-to questions ("how do I stop a watch") — those go to the model.
@@ -2661,7 +2822,18 @@ def _lookup_limit(text: str, default=10):
     (callers pass default=None to mean 'no explicit ask — fall back to the model's/standard page').
     Bounded so a stray number can't dump the whole DB."""
     t = text or ""
-    m = re.search(r"\b(?:top|first|best|show me|latest|last|newest)\s+(\d{1,6})\b", t, re.I)
+    # People write counts as WORDS — "the three most recent", "top five". The digit-only
+    # parsing returned the default 10 for those, so "show me the three most recent matches"
+    # came back headed "Here are 10 matches".
+    _words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+              "eight": 8, "nine": 9, "ten": 10, "dozen": 12, "fifteen": 15, "twenty": 20,
+              "a couple of": 2, "a couple": 2, "a few": 3, "a handful of": 5, "a handful": 5}
+    for w, n in sorted(_words.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"\b{re.escape(w)}\b(?=.*\b(?:most recent|recent|latest|newest|"
+                     rf"matches?|listings?|finds?|results?|ones?|items?)\b)", t, re.I):
+            t = re.sub(rf"\b{re.escape(w)}\b", str(n), t, count=1, flags=re.I)
+            break
+    m = re.search(r"\b(?:top|first|best|show me|latest|last|newest|the)\s+(\d{1,6})\b", t, re.I)
     if m:
         try:
             return max(1, min(int(m.group(1)), 30))
@@ -4297,9 +4469,22 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
             elif scope == "all_mine":
                 suggestions = []
                 mine = _watches_for_owner(cfg, owner)
-                watch_actions = [{"action": act, "name": w.name} for w in mine] or None
-                message = (f"{act.title()}ing all {len(watch_actions)} of your watches."
-                           if watch_actions else "You don't have any watches yet.")
+                # "Kill them all — except X" / "…keep the MacGregor one on". The blanket action
+                # used to steamroll the exception clause and stop the one watch the user asked to
+                # spare. If the message carves out an exception and names a watch, spare it.
+                spared = None
+                if re.search(r"\b(?:keep|except|but (?:leave|keep)|apart from|other than|"
+                             r"spare|leave)\b", latest_user, re.I):
+                    spared = _resolve_watch_name(
+                        _watch_named_in(latest_user, cfg, owner) or "", cfg)
+                acted = [w for w in mine if w.name != spared]
+                watch_actions = [{"action": act, "name": w.name} for w in acted] or None
+                if spared and watch_actions:
+                    message = (f"{act.title()}ing {len(watch_actions)} of your watches — "
+                               f"keeping “{spared}” as it is.")
+                else:
+                    message = (f"{act.title()}ing all {len(watch_actions)} of your watches."
+                               if watch_actions else "You don't have any watches yet.")
             elif scope == "bare" and not already_named:
                 if is_admin:
                     message = (f"Do you mean {verb} the **whole Watcher** (everything, for everyone), "

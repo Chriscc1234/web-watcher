@@ -71,11 +71,26 @@ _CLEAN_ARGS = [
 ACTION_TIMEOUT = 10_000
 SCREENSHOT_TIMEOUT = 15_000
 
-# Fallback Chrome version for the UA when we can't read the bundled build's real version
-# (persistent/installed-channel launches). Kept reasonably current; the ephemeral path
-# overrides this with the ACTUAL bundled Chromium version so the UA never goes stale and
-# mismatches the engine — a classic fingerprint tell we were previously guilty of.
-_DEFAULT_CHROME_FULL = "124.0.6367.243"
+# LAST-RESORT Chrome version for the UA, used only when we cannot read the real build. It was
+# hardcoded to 124.0.6367.243 and left there: by Aug 2026 that was ~2 years and 27 majors behind
+# the installed browser (151), so every persistent session announced a browser far older than the
+# engine running it. Sites feature-gate on this — Facebook served that UA a legacy bundle that
+# rendered blank. Both launch paths now detect the REAL version; this constant exists so a
+# detection failure degrades to something plausible rather than crashing, and any session using
+# it says so in the log.
+_DEFAULT_CHROME_FULL = "151.0.0.0"
+
+
+def _usable(browser) -> bool:
+    """Is this freshly-launched browser actually alive? A launch can SUCCEED and then have its
+    target die on first real use (measured: bundled Chromium with the sandbox enabled), which no
+    static "these flags work" rule can predict. Cheap: open a context, close it."""
+    try:
+        ctx = browser.new_context()
+        ctx.close()
+        return True
+    except Exception:
+        return False
 
 
 def _installed_chrome_version() -> str:
@@ -392,17 +407,30 @@ class BrowserSession:
         show_cursor: bool = False,
         geolocation: tuple[float, float] | None = None,
         inject_patches: bool = True,
+        # The three concerns `inject_patches` used to conflate. None = follow inject_patches.
+        inject_scripts: bool | None = None,
+        clean_launch:   bool | None = None,
+        spoof_ua:       bool | None = None,
     ) -> None:
         self._headless = headless
-        # HANDS-OFF MODE (inject_patches=False): add NO init scripts at all — no fingerprint
-        # patches, no fake cursor, no dialog blocking. For the "Connect Facebook" window, where
-        # a REAL PERSON types their own password into Facebook's own page. Nothing we inject can
-        # help there and everything we inject can hurt: each patch is one more thing that can
-        # break a heavy login bundle (it did — a non-configurable window.print override sent the
-        # login page to a white screen) and one more surface for the most detection-happy site
-        # we deal with to notice. A plain Chrome profile with a human driving is the most
-        # legitimate thing we can possibly present.
-        self._inject_patches = inject_patches
+        # `inject_patches` USED TO MEAN THREE UNRELATED THINGS AT ONCE — whether to add init
+        # scripts, which launch flags to use, and whether to spoof the User-Agent. One boolean
+        # silently steering three concerns is how this file drifted: a fix aimed at one of them
+        # kept changing the other two by accident. It is now the shorthand that sets three
+        # explicit knobs, each of which a caller can also set on its own.
+        #
+        #   inject_scripts — our init scripts (fingerprint patches, dialog guard, cursor)
+        #   clean_launch   — plain Chrome flags instead of the anti-fingerprint set
+        #   spoof_ua       — override the User-Agent / Sec-CH-UA headers
+        #
+        # HANDS-OFF (inject_patches=False) turns all three off. That is for the Connect Facebook
+        # window, where a REAL PERSON types their own password into Facebook's own page: a plain
+        # profile with a human driving is the most legitimate thing we can present, and every
+        # patch is one more thing that can break a heavy login bundle (one did — a
+        # non-configurable window.print override sent the login page to a white screen).
+        self._inject_scripts = inject_scripts if inject_scripts is not None else inject_patches
+        self._clean_launch   = clean_launch   if clean_launch   is not None else not inject_patches
+        self._spoof_ua       = spoof_ua       if spoof_ua       is not None else inject_patches
         # (lat, lon) to report via the Geolocation API — so sites that show "your area"
         # from location (OfferUp, store locators) show the WATCH's area, not a default
         # (a fresh automated browser has no location → OfferUp was serving Florida junk).
@@ -429,26 +457,18 @@ class BrowserSession:
         self._cores, self._mem_gb = random.choice(_HARDWARE_POOL)
         self._chrome_full    = _DEFAULT_CHROME_FULL   # overridden once the real build is known
 
-    def _build_ctx_kwargs(self) -> dict:
-        """Context options shared by ephemeral and persistent launch paths. Uses a UA
-        matched to the ACTUAL bundled Chromium version (set in _enter_ephemeral) and a
-        per-session randomized viewport so the fingerprint isn't a fixed constant."""
-        ctx_kwargs: dict = {"locale": "en-US"}
-        # NO UA OVERRIDE when a person is driving. This window runs the user's REAL Chrome,
-        # which already sends a correct, current User-Agent — replacing it with ours could only
-        # ever make it wrong, and it was: the persistent path never updated _chrome_full, so we
-        # announced Chrome 124 from an actual Chrome 151 (measured on this machine). Facebook
-        # served that stale UA a legacy bundle and the two-factor page rendered as a blank
-        # screen with a lone Meta logo. Let the browser speak for itself.
-        if not self._inject_patches:
-            if not self._headless:
-                ctx_kwargs["no_viewport"] = True
-            return ctx_kwargs
-        major = (self._chrome_full.split(".")[0] or "124")
-        ctx_kwargs = {
-            "locale": "en-US",
-            # Real Windows Chrome UA whose version tracks the engine we're actually running,
-            # so DataDome's UA/engine and platform cross-checks line up.
+    def _ua_major(self) -> str:
+        """The Chrome major version to advertise. Prefers the version actually detected for this
+        session; the module fallback is a last resort and is deliberately NOT a hardcoded old
+        build any more — see _DEFAULT_CHROME_FULL."""
+        return (self._chrome_full.split(".")[0] or "").strip()
+
+    def _ua_headers(self, major: str) -> dict:
+        """UA + client-hint headers that agree with each other AND with the engine.
+
+        Kept in one place because the failure mode is always the same: the UA string and the
+        Sec-CH-UA major drifting apart, or both drifting from the browser actually running."""
+        return {
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -462,6 +482,23 @@ class BrowserSession:
                 "Sec-CH-UA-Mobile": "?0",
             },
         }
+
+    def _build_ctx_kwargs(self) -> dict:
+        """Context options shared by ephemeral and persistent launch paths. Uses a UA
+        matched to the ACTUAL bundled Chromium version (set in _enter_ephemeral) and a
+        per-session randomized viewport so the fingerprint isn't a fixed constant."""
+        ctx_kwargs: dict = {"locale": "en-US"}
+        # UA spoofing is OPT-IN. When a person is driving we send nothing: that window runs the
+        # user's REAL Chrome, which already reports a correct, current User-Agent — overriding it
+        # could only ever make it wrong, and it did. The persistent path never refreshed
+        # _chrome_full, so we announced Chrome 124 from an actual Chrome 151 (measured on this
+        # machine) and Facebook handed that stale UA a legacy bundle.
+        if self._spoof_ua:
+            major = self._ua_major()
+            ctx_kwargs.update(self._ua_headers(major))
+        # Viewport, geolocation and permissions below apply in EVERY mode. They used to be
+        # skipped along with the UA on the hands-off path, which silently dropped the watch's
+        # location — the exact defect that had OfferUp serving Florida results.
         # In visible mode let --start-maximized own the window size; forcing a
         # fixed viewport would create a mismatch with the actual window frame.
         if self._headless:
@@ -504,8 +541,8 @@ class BrowserSession:
         # Inject our supplemental stealth patches on every new page before site JS runs,
         # then this session's randomized fingerprint values (cores/memory/screen) on top.
         assert self._context is not None
-        if not self._inject_patches:
-            log.info("Browser: hands-off mode — no init scripts injected (a person is driving)")
+        if not self._inject_scripts:
+            log.info("Browser: no init scripts injected for this session (a person is driving)")
             return self
         self._context.add_init_script(_EXTRA_STEALTH_JS)
         self._context.add_init_script(self._session_fingerprint_js())
@@ -530,7 +567,7 @@ class BrowserSession:
         """Chrome flags for this session. Hands-off mode gets a VANILLA set: the stealth args
         exist to make automation look human, which is pointless when a human is driving, and
         actively harmful here — disabling site isolation broke Facebook's two-factor step."""
-        return list(_CLEAN_ARGS if not self._inject_patches else _STEALTH_ARGS)
+        return list(_CLEAN_ARGS if self._clean_launch else _STEALTH_ARGS)
 
     def _enter_persistent(self) -> None:
         """Launch a persistent-profile context (full user-data-dir on disk)."""
@@ -556,29 +593,43 @@ class BrowserSession:
         # Facebook's two-factor step will not render in that state (the login page survives it,
         # 2FA does not). It is a plain automation tell too. Sandbox=False stays as a fallback so
         # a machine that genuinely cannot sandbox still gets a browser instead of an error.
-        for sandbox in (True, False):
-            for channel in ("chrome", "msedge", None):
-                try:
-                    self._context = self._pw.chromium.launch_persistent_context(
-                        user_data_dir=str(self._profile_dir),
-                        headless=self._headless,
-                        args=self._launch_args(),
-                        chromium_sandbox=sandbox,
-                        **({"channel": channel} if channel else {}),
-                        **ctx_kwargs,
-                    )
-                    log.info(
-                        "Persistent browser launched (profile=%s) via channel=%r, sandbox=%s",
-                        self._profile_dir.name, channel or "bundled", sandbox,
-                    )
-                    if not sandbox:
-                        log.warning("Chrome sandbox unavailable — running with --no-sandbox. "
-                                    "Some pages (Facebook's 2FA) may not render.")
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    log.debug("Persistent launch channel=%r sandbox=%s failed: %s",
-                              channel, sandbox, exc)
+        # Same ordering as the ephemeral path: a REAL Chrome with its sandbox on is the first
+        # choice, and every combination is verified before it is accepted (a persistent context
+        # can come back "launched" and then be dead). Kept identical on purpose — the two paths
+        # drifting apart is what produced the --no-sandbox split in the first place.
+        channels = ("chrome", "msedge", None)
+        attempts = [(ch, True) for ch in channels] + [(ch, False) for ch in channels]
+        for channel, sandbox in attempts:
+            ctx = None
+            try:
+                ctx = self._pw.chromium.launch_persistent_context(
+                    user_data_dir=str(self._profile_dir),
+                    headless=self._headless,
+                    args=self._launch_args(),
+                    chromium_sandbox=sandbox,
+                    **({"channel": channel} if channel else {}),
+                    **ctx_kwargs,
+                )
+                # A persistent context IS the context — prove it by touching its pages.
+                _ = ctx.pages
+                self._context = ctx
+                log.info(
+                    "Persistent browser launched (profile=%s) via channel=%r, sandbox=%s",
+                    self._profile_dir.name, channel or "bundled", sandbox,
+                )
+                if not sandbox:
+                    log.warning("Chrome sandbox unavailable — running with --no-sandbox. "
+                                "Some protected pages (Facebook's 2FA) may not render.")
+                return
+            except Exception as exc:
+                last_exc = exc
+                log.debug("Persistent launch channel=%r sandbox=%s failed: %s",
+                          channel, sandbox, exc)
+                if ctx is not None:
+                    try:
+                        ctx.close()
+                    except Exception:
+                        pass
         # All channels failed — release the profile lock before raising, since
         # __exit__ is NOT called when __enter__ raises (would otherwise leak the lock).
         if self._profile_lock_held:
@@ -591,25 +642,49 @@ class BrowserSession:
 
     def _enter_ephemeral(self) -> None:
         """Launch an ephemeral context, reusing storage_state if present."""
-        if not self._headless:
-            for channel in ("chrome", "msedge", None):
-                try:
-                    self._browser = self._pw.chromium.launch(
-                        headless=False,
-                        args=self._launch_args(),
-                        **( {"channel": channel} if channel else {} ),
-                    )
-                    log.info("Browser launched (visible) via channel=%r", channel or "bundled")
-                    break
-                except Exception as exc:
-                    log.debug("Browser launch via channel=%r failed: %s", channel, exc)
-        else:
-            self._browser = self._pw.chromium.launch(
-                headless=True,
-                args=self._launch_args(),
-            )
+        # Ask for the REAL Chrome sandbox first, exactly as the persistent path does. This used
+        # to be set on the persistent path ONLY, so every ordinary sweep still ran with
+        # --no-sandbox: an unsandboxed renderer, a visible "unsupported command-line flag"
+        # banner, and a plain automation tell. Two launch paths that disagree is how this file
+        # drifted; they now make the same request with the same fallback.
+        # Try (channel, sandbox) combinations, PREFERRING a real installed Chrome with its
+        # sandbox on, and VERIFY each one before accepting it. Measured on this machine:
+        #   channel="chrome" + sandbox=True  -> works
+        #   bundled Chromium + sandbox=True  -> launches, then the target dies on first use
+        # A launch that "succeeds" and then dies is why a static rule was wrong here; the only
+        # reliable test is to use the browser. _usable() does that cheaply.
+        channels = ("chrome", "msedge", None) if not self._headless else ("chrome", None)
+        attempts = [(ch, True) for ch in channels] + [(ch, False) for ch in channels]
+        last_exc: Exception | None = None
+        for channel, sandbox in attempts:
+            browser = None
+            try:
+                browser = self._pw.chromium.launch(
+                    headless=self._headless,
+                    args=self._launch_args(),
+                    chromium_sandbox=sandbox,
+                    **({"channel": channel} if channel else {}),
+                )
+                if not _usable(browser):
+                    raise RuntimeError("browser closed immediately after launch")
+                self._browser = browser
+                log.info("Browser launched (%s) via channel=%r, sandbox=%s",
+                         "headless" if self._headless else "visible",
+                         channel or "bundled", sandbox)
+                if not sandbox:
+                    log.info("Running unsandboxed (this build could not sandbox).")
+                break
+            except Exception as exc:
+                last_exc = exc
+                log.debug("Browser launch channel=%r sandbox=%s failed: %s",
+                          channel, sandbox, exc)
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
         if self._browser is None:
-            raise RuntimeError("Could not launch any browser in visible mode")
+            raise RuntimeError(f"Could not launch any browser: {last_exc}")
 
         # Pin the UA to the ACTUAL bundled/installed Chromium version so the UA string and
         # the engine can't disagree (a stale hardcoded version was a real fingerprint tell).

@@ -147,6 +147,58 @@ def test_persistent_launch_asks_for_the_real_chrome_sandbox():
     automation tell. Sandbox=False remains only as a fallback."""
     import inspect as _i
     from web_watcher.browser import BrowserSession
-    src = _i.getsource(BrowserSession._enter_persistent)
-    assert "chromium_sandbox=sandbox" in src
-    assert "for sandbox in (True, False)" in src      # real sandbox FIRST, fallback second
+    for fn in (BrowserSession._enter_persistent, BrowserSession._enter_ephemeral):
+        src = _i.getsource(fn)
+        assert "chromium_sandbox=sandbox" in src, fn.__name__
+        # Sandboxed attempts are ordered BEFORE unsandboxed ones, on BOTH paths. The two used
+        # to disagree — only the persistent path asked for the sandbox, so every ordinary sweep
+        # still ran with --no-sandbox.
+        assert "[(ch, True) for ch in channels] + [(ch, False) for ch in channels]" in src, fn.__name__
+
+
+# ── the three concerns that used to be one boolean ────────────────────────────────
+# `inject_patches` silently steered init scripts, launch flags AND UA spoofing at once, so a fix
+# aimed at one kept changing the other two by accident. They are separable now.
+
+def test_the_three_session_concerns_are_independent():
+    from web_watcher.browser import BrowserSession
+    s = BrowserSession(headless=False, persistent=True,
+                       inject_scripts=True, clean_launch=True, spoof_ua=False)
+    assert s._inject_scripts is True and s._clean_launch is True and s._spoof_ua is False
+    assert "--no-first-run" in s._launch_args()
+    assert not any("AutomationControlled" in a for a in s._launch_args())
+    assert "user_agent" not in s._build_ctx_kwargs()
+
+
+def test_inject_patches_still_works_as_the_shorthand():
+    from web_watcher.browser import BrowserSession
+    off = BrowserSession(headless=False, persistent=True, inject_patches=False)
+    assert (off._inject_scripts, off._clean_launch, off._spoof_ua) == (False, True, False)
+    on = BrowserSession(headless=False, persistent=True)
+    assert (on._inject_scripts, on._clean_launch, on._spoof_ua) == (True, False, True)
+
+
+def test_geolocation_survives_every_mode():
+    """It used to be dropped along with the UA on the hands-off path — silently un-setting the
+    watch's location, which is the exact defect that had OfferUp serving Florida results."""
+    from web_watcher.browser import BrowserSession
+    for kw in ({}, {"inject_patches": False}, {"spoof_ua": False}):
+        k = BrowserSession(headless=True, geolocation=(48.5, -122.6), **kw)._build_ctx_kwargs()
+        assert k["geolocation"] == {"latitude": 48.5, "longitude": -122.6}, kw
+        assert "geolocation" in k.get("permissions", []), kw
+
+
+def test_ua_and_client_hint_majors_never_disagree():
+    from web_watcher.browser import BrowserSession
+    s = BrowserSession(headless=True)
+    s._chrome_full = "151.0.7922.172"
+    k = s._build_ctx_kwargs()
+    assert "Chrome/151.0.7922.172" in k["user_agent"]
+    assert '"Google Chrome";v="151"' in k["extra_http_headers"]["Sec-CH-UA"]
+
+
+def test_the_last_resort_ua_is_not_years_stale():
+    # It sat at 124 while the machine ran 151. A fallback that lies by 27 majors is worse than
+    # no fallback: sites feature-gate on it.
+    from web_watcher.browser import _DEFAULT_CHROME_FULL
+    assert int(_DEFAULT_CHROME_FULL.split(".")[0]) >= 150

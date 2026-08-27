@@ -741,12 +741,73 @@ class ServiceManager:
                     page = None
                 if page is None:
                     page = session.new_page()
+                # DIAGNOSTICS. A blank page has several possible causes that look identical from
+                # the outside — a JS exception, a blocked resource, a CSP violation, or a server
+                # that simply returned an empty shell — and guessing between them has cost this
+                # project several releases. Record what the page actually reports so the log can
+                # answer it. Read-only listeners; they cannot affect the page.
+                _diag = {"errors": [], "failed": [], "console": []}
+
+                def _on_pageerror(exc):
+                    _diag["errors"].append(str(exc)[:300])
+                    log.warning("FB connect: page error: %s", str(exc)[:300])
+
+                def _on_requestfailed(req):
+                    # Ad/telemetry blocking is normal noise; a failed FACEBOOK asset is not.
+                    line = f"{req.failure} {req.url[:140]}"
+                    _diag["failed"].append(line)
+                    if "facebook.com" in req.url or "fbcdn" in req.url:
+                        log.warning("FB connect: request failed: %s", line)
+
+                def _on_console(msg):
+                    if msg.type == "error":
+                        _diag["console"].append(msg.text[:250])
+                        log.warning("FB connect: console error: %s", msg.text[:250])
+
+                page.on("pageerror", _on_pageerror)
+                page.on("requestfailed", _on_requestfailed)
+                page.on("console", _on_console)
                 page.goto("https://www.facebook.com/", timeout=60_000, wait_until="domcontentloaded")
                 self._fb_connect_status = "waiting_for_login"
                 log.info("Facebook login window open — waiting for user to sign in and close it")
-                session.wait_until_closed(poll_seconds=1.0, timeout=600.0)
+                # While the person works, sample the page every few seconds. If it goes blank we
+                # want the URL and the body size AT THAT MOMENT — after the window closes there
+                # is nothing left to inspect, which is why the last several attempts produced
+                # screenshots and no data. A page that is 200-OK, error-free and still empty is
+                # a very different diagnosis from one throwing exceptions, and only this tells
+                # them apart.
+                def _sample():
+                    try:
+                        if page.is_closed():
+                            return None
+                        body = page.inner_text("body", timeout=2_000) or ""
+                        return (page.url, len(body.strip()))
+                    except Exception:
+                        return None
+
+                last_seen = None
+                for _ in range(200):                      # ~10 minutes at 3s
+                    if page.is_closed():
+                        break
+                    got = _sample()
+                    if got and got != last_seen:
+                        url, size = got
+                        last_seen = got
+                        log.info("FB connect: at %s — %d chars of visible text", url[:110], size)
+                        if size < 40:
+                            log.warning(
+                                "FB connect: THIS PAGE IS BLANK (%d chars). errors=%d "
+                                "console_errors=%d failed_requests=%d",
+                                size, len(_diag["errors"]), len(_diag["console"]),
+                                len([f for f in _diag["failed"]
+                                     if "facebook.com" in f or "fbcdn" in f]))
+                    if session.wait_until_closed(poll_seconds=1.0, timeout=3.0):
+                        break
             self._fb_connect_status = "done"
-            log.info("Facebook connect complete — profile session saved")
+            log.info("Facebook connect complete — profile session saved "
+                     "(page errors: %d, console errors: %d, failed FB requests: %d)",
+                     len(_diag["errors"]), len(_diag["console"]),
+                     len([f for f in _diag["failed"] if "facebook.com" in f or "fbcdn" in f]))
         except Exception as exc:
             self._fb_connect_status = "error"
             log.error("connect_facebook failed: %s", exc)

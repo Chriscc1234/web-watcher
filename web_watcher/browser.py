@@ -846,25 +846,29 @@ class BrowserSession:
         _apply_stealth(page)
         return page
 
-    def wait_until_closed(self, poll_seconds: float = 1.0, timeout: float | None = None) -> None:
+    def wait_until_closed(self, poll_seconds: float = 1.0,
+                          timeout: float | None = None) -> bool:
         """
         Block until the user closes the browser window (all pages gone) or timeout.
 
         Used by manual flows like the Facebook login: open a visible window, let the
         user sign in, and return once they close it (the persistent profile keeps the
         session on disk). Safe to call inside the context-manager `with` block.
+
+        Returns True if the window is actually CLOSED, False if we merely timed out — so a
+        caller can poll in short slices (sampling the page in between) instead of blocking for
+        the whole session with no visibility into what it is doing.
         """
         import time as _t
         start = _t.monotonic()
         while True:
             try:
                 if self._context is None or not self._context.pages:
-                    return
+                    return True
             except Exception:
-                return  # context/browser already torn down by the user closing it
+                return True  # context/browser already torn down by the user closing it
             if timeout is not None and (_t.monotonic() - start) > timeout:
-                log.info("wait_until_closed timed out after %.0fs", timeout)
-                return
+                return False
             _t.sleep(poll_seconds)
 
     def run_watch(self, watch: Watch, screenshot: bool = False) -> list[PageResult]:

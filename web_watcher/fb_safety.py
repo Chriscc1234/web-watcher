@@ -245,7 +245,12 @@ _MUTATING_ACTION_RE = re.compile(
     r"buy(\s*(it\s*)?now)?|check\s*out|place\s*(an?\s*)?(order|bid)|bid\b|make\s*(an?\s*)?offer|"
     r"contact\s*(the\s*)?(seller|poster)|reply\b|send\s*(a\s*)?(message|email)|message\b|"
     r"subscribe|sign\s*up|register|create\s*(an?\s*)?account|"
-    r"post\s*(an?\s*)?(ad|listing)|publish"
+    r"post\s*(an?\s*)?(ad|listing)|publish|"
+    # Controls that open a NATIVE OS dialog. These are worse than a mutating click: the dialog
+    # is drawn by the browser/OS, not the page, so automation cannot see or dismiss it and the
+    # whole browser hangs until a human clicks it. Observed live — the agent clicked craigslist's
+    # 'print' on a listing page and the sweep froze mid-run with a print dialog on screen.
+    r"print(\s*(this|page|listing|ad))?|download|export|save\s*as|open\s*in\s*(a\s*)?new"
     r")\b",
     re.I,
 )

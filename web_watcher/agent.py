@@ -276,6 +276,9 @@ class AgentResult:
     error:         Optional[str]         = None
     history:       list[AgentAction]     = field(default_factory=list)
     scratchpad:    dict[str, str]        = field(default_factory=dict)
+    # Set to the URL when a challenge we could NOT clear ended the run. The caller uses this to
+    # tell the user (they can clear it by hand) instead of silently reporting an empty sweep.
+    challenge_blocked: Optional[str]     = None
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +334,7 @@ def run_agent(
     page_context:     str              = ""   # vision description, refreshed on path change
     last_vision_path: str              = ""   # netloc+path at which page_context was captured
     start_url:        str              = page.url  # used to detect premature done
+    challenge_blocked: str | None       = None   # set when an uncleared challenge ended the run
     # What EARLIER sweeps learned about this site, as a tree of {page_kind: {control: effect}}.
     # Read once per run and merged back at the end, so a dead control discovered on sweep 1 is
     # still known on sweep 151 instead of being rediscovered every two minutes.
@@ -387,29 +391,24 @@ def run_agent(
         if _detect_captcha(page):
             log.warning("CAPTCHA detected on %s", page.url)
             solved = _solve_captcha(page)
+            # EITHER WAY, the site just told us we look automated. Record it and rest the host:
+            # a challenge we got through still means we were close enough to the line to trip it,
+            # so the next visit waits. This is a back-off, not a bypass.
+            try:
+                from web_watcher import sitecool
+                sitecool.record_challenge(page.url, reason="CAPTCHA shown", solved=solved)
+            except Exception as exc:
+                log.debug("could not record the site challenge: %s", exc)
             if not solved:
-                log.warning("CAPTCHA solver pipeline exhausted — running get-unstuck pass")
-                # Snapshot once so the recovery pass and the execute below choose from
-                # (and act on) the exact same element list.
-                captcha_elements = _snapshot_elements(page)
-                rec = _convene_council(
-                    page,
-                    "CAPTCHA not solved after full pipeline (press-hold, checkbox, audio)",
-                    history,
-                    _council_model,
-                    captcha_elements,
-                )
-                if rec and rec.action != "done":
-                    history.append(rec)
-                    try:
-                        _execute(page, rec, captcha_elements)
-                    except Exception as exc:
-                        log.warning("Recovery action failed: %s", exc)
-                    _human_pause(*PAGE_SETTLE)
-                    continue
-                else:
-                    log.error("Recovery pass gave up — stopping agent")
-                    break
+                # STOP. The old behaviour convened a recovery council and kept poking the
+                # challenged page, then came back a minute later — retrying a failed check over
+                # and over is the most bot-like thing we could do, and it turns one challenge
+                # into a block. A person who fails a check wanders off. So do we: end the sweep,
+                # let the cooldown above hold the site, and tell the user so THEY can clear it.
+                log.warning("CAPTCHA not cleared on %s — ending this sweep and resting the site",
+                            page.url[:80])
+                challenge_blocked = page.url
+                break
             _human_pause(*PAGE_SETTLE)
 
         # ── Vision page description (fires on path change, not query-param change) ──
@@ -856,6 +855,7 @@ def run_agent(
         steps_taken = len(history),
         history     = history,
         scratchpad  = scratchpad,
+        challenge_blocked = challenge_blocked,
     )
 
 

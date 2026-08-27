@@ -858,8 +858,9 @@ def _run_agent_continuous_sweep(
 
     log.info("Continuous agent sweep %d for %r: style=%s start=%s (max_steps=%d)",
              sweep_index, watch.name, plan["style"], plan["start_url"], steps)
+    _agent_result = None      # bound before the try so the challenge check below is safe
     try:
-        run_agent(
+        _agent_result = run_agent(
             page,
             instruction   = instruction,
             model         = model,
@@ -878,6 +879,27 @@ def _run_agent_continuous_sweep(
         # Process whatever we harvested before the error rather than losing the sweep.
         log.error("Continuous agent sweep %d for %r errored mid-browse: %s",
                   sweep_index, watch.name, exc)
+
+    # A challenge we could NOT clear ended the run. Tell the user plainly — an unattended app
+    # that silently reports "0 found" when it was actually blocked is how a watch looks healthy
+    # for a week while finding nothing. The site is already resting (see sitecool); this is the
+    # shoulder-tap so a human can clear it if they want that site back sooner.
+    _blocked_at = getattr(_agent_result, "challenge_blocked", None) if _agent_result else None
+    if _blocked_at:
+        try:
+            from web_watcher import sitecool
+            from web_watcher.notify import send_plain_telegram
+            mins = max(1, sitecool.cooling_for(_blocked_at) // 60)
+            host = sitecool.host_of(_blocked_at) or _blocked_at[:40]
+            send_alert(
+                f"🛑 <b>{host}</b> asked for a human check that I couldn't clear.\n\n"
+                f"Watch: “{watch.name}”\nI've stopped touching that site for about "
+                f"{mins} minute(s) so we don't push it. Your other watches keep running.\n\n"
+                f"If you want it back sooner, open it yourself, clear the check, then say "
+                f"“resume {host}”.",
+                cfg.notifications, html=True)
+        except Exception as exc:
+            log.debug("could not send the challenge alert: %s", exc)
 
     # The agent stopped on a Facebook checkpoint mid-browse → alert + back off, and do
     # NOT process/alert listings from a flagged session.

@@ -78,6 +78,32 @@ _HARDWARE_POOL = [(4, 8), (6, 8), (8, 8), (8, 16), (12, 16), (16, 16)]
 # A visible fake cursor injected into the agent's pages so you can SEE where its synthetic
 # mouse is. It follows the real mousemove events Playwright dispatches (page.mouse.move), and
 # pulses on press. pointer-events:none so it never intercepts. Re-ensures itself on SPA nav.
+# Native dialogs are the one thing that can wedge an unattended browser: they are drawn by the
+# browser/OS rather than the page, so no amount of automation can dismiss them. window.print() is
+# the real-world offender (craigslist puts a 'print' link on every listing). Neutered here rather
+# than handled after the fact, because once the dialog is up it is already too late.
+# Playwright auto-dismisses alert/confirm/prompt, but we stub them too so a page that BLOCKS on
+# one can't stall a sweep waiting for the auto-dismiss.
+_NO_NATIVE_DIALOGS_JS = r"""
+(() => {
+  try {
+    const noop = () => undefined;
+    Object.defineProperty(window, 'print', {value: noop, writable: false, configurable: false});
+    window.alert   = noop;
+    window.confirm = () => false;
+    window.prompt  = () => null;
+    // Some sites call print() from a beforeprint/keyboard handler; swallow the event too.
+    window.addEventListener('beforeprint', e => { e.preventDefault && e.preventDefault(); }, true);
+    // Ctrl/Cmd+P from a stray synthetic keystroke would open the same dialog.
+    window.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'p' || e.key === 'P')) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    }, true);
+  } catch (_) { /* a page that fights this is not worth breaking the sweep over */ }
+})();
+"""
+
 _CURSOR_JS = r"""
 (function () {
     function ensure() {
@@ -394,6 +420,12 @@ class BrowserSession:
         assert self._context is not None
         self._context.add_init_script(_EXTRA_STEALTH_JS)
         self._context.add_init_script(self._session_fingerprint_js())
+        # Never let a page open a NATIVE dialog. window.print() draws an OS-level print dialog
+        # that Playwright cannot see or dismiss, so the browser hangs until a human clicks it —
+        # observed live, a sweep froze for minutes after the agent clicked craigslist's 'print'.
+        # beforeprint/alert/confirm/prompt are the same hazard. The label guard in fb_safety
+        # stops the agent CHOOSING these; this stops the page from doing it regardless.
+        self._context.add_init_script(_NO_NATIVE_DIALOGS_JS)
         # Visible fake cursor (opt-in) so you can watch where the agent's mouse goes.
         if self._show_cursor:
             self._context.add_init_script(_CURSOR_JS)

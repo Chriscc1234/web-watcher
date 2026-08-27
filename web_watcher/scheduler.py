@@ -1122,11 +1122,14 @@ def _run_continuous_sweep(
     dismiss_popups(page)
     listings = extract_listings(page, max_items=200, profiles=list_site_profiles(db_path))
 
-    # Deep-read is decoupled from the agent: read new ads' attributes whenever there's a
-    # judgment_prompt to consume them, regardless of how the listings were gathered.
+    # Deep-read is decoupled from the agent: read new ads' attributes whenever the watch has
+    # criteria to consume them, regardless of how the listings were gathered.
     _process_sweep_listings(watch, cfg, db_path, sweep_index, listings, run_ts,
                             page=page, fetch_bodies=_wants_deep_read(watch),
                             stop_event=stop_event)
+    # Same backlog drain as the agent sweep — a watch that never used the agent can have
+    # just as many unread matches banked behind it. See _explore_matches.
+    _explore_matches(watch, cfg, db_path, page, stop_event)
     return len(listings)
 
 

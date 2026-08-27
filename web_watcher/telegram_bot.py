@@ -152,15 +152,26 @@ class TelegramBridge:
         # Strangers we've already alerted the admin about, so one persistent knocker can't spam
         # the owner's phone. Reset on restart (re-alerting once after a restart is fine).
         self._access_notified: set[str] = set()
+        # ── PER-CHAT pending state ────────────────────────────────────────────────────────
+        # Every one of these is keyed by chat_id, and that is load-bearing, not tidiness: each
+        # Telegram update is handled on its OWN thread, and the bot serves several people (the
+        # owner plus any approved buddy). As single shared values these raced badly — your
+        # pending "create this watch?" could be confirmed by the BUDDY's "yes", or silently
+        # clobbered by his own pending action, and two fast messages from one person could
+        # interleave on the non-atomic clear below. Keyed per chat, each conversation owns its
+        # own state and nobody can answer anybody else's question.
         # Watch changes the assistant proposed and is waiting on a yes/no for. The dashboard
         # shows these as click-to-confirm cards; on a phone the confirmation is the next message.
-        self._pending: list[dict] | None = None
+        self._pending: dict[str, list[dict]] = {}
         # Destructive lifecycle actions (delete) held for a yes. Reversible ones (start/stop/
         # enable/disable) are applied immediately — no confirmation needed.
-        self._pending_deletes: list[dict] | None = None
+        self._pending_deletes: dict[str, list[dict]] = {}
         # A create that collided with an existing watch of the same name, whose settings DIFFER.
-        # Held for the user to choose update / replace / leave. {"name", "body"}.
-        self._pending_conflict: dict | None = None
+        # Held for the user to choose update / replace / leave. chat_id -> {"name", "body"}.
+        self._pending_conflict: dict[str, dict] = {}
+        # Guards the pending maps themselves: the read-then-clear below is not atomic, so two
+        # messages arriving together could both claim the same pending action.
+        self._state_lock = threading.Lock()
         # Debounce the "Show top N" buttons: a top-20 sends 20 cards over several seconds, so
         # tapping 10 then 20 (or double-tapping) would spam two overlapping bursts. chat_id -> ts.
         self._top_cooldown: dict[str, float] = {}
@@ -169,7 +180,7 @@ class TelegramBridge:
         self._last_listing: dict[str, dict] = {}
         # After removing a bad match, we offer to add an antikeyword so similar ones auto-filter.
         # Held until they answer with a word (or "no"). chat_id -> {"watch": name}.
-        self._pending_antikeyword: dict | None = None
+        self._pending_antikeyword: dict[str, dict] = {}
         # Proactive check-in bookkeeping. Seed "last contact" at startup so we don't fire the
         # moment the app launches; a real check-in is a full interval of quiet away.
         self._start_ts = time.time()
@@ -313,23 +324,26 @@ class TelegramBridge:
 
         # A name collision we surfaced is waiting on update / replace / leave — that answer is
         # about the existing watch, not a new request, so handle it before anything else.
-        if self._pending_conflict:
+        if self._pending_conflict.get(to):
             self._typing(to)
             self._resolve_conflict(text, to)
             return
 
         # A yes to a proposal we're holding APPLIES it — that's how a watch gets created, edited,
         # or deleted from the phone, standing in for the dashboard's confirm button.
-        if self._pending or self._pending_deletes:
-            sugg_pending, del_pending = self._pending, self._pending_deletes
-            self._pending, self._pending_deletes = None, None
+        if self._pending.get(to) or self._pending_deletes.get(to):
+            # Claim THIS chat's pending items atomically — two messages arriving together must
+            # not both apply the same proposal.
+            with self._state_lock:
+                sugg_pending = self._pending.pop(to, None)
+                del_pending = self._pending_deletes.pop(to, None)
             if _is_affirmative(text):
                 self._typing(to)
                 out = []
                 if del_pending:
                     out.append(self._apply_actions(del_pending))
                 if sugg_pending:
-                    out.append(self._apply_pending(sugg_pending))
+                    out.append(self._apply_pending(sugg_pending, to))
                 self._send(" ".join(x for x in out if x) or "Done.", to)
                 return
             if _is_negative(text):
@@ -338,14 +352,17 @@ class TelegramBridge:
             # Anything else: not an answer to the question — fall through and just chat.
 
         # Answer to "want me to skip ones like this?" — a word to add as an antikeyword, or "no".
-        if self._pending_antikeyword:
-            pend, self._pending_antikeyword = self._pending_antikeyword, None
+        if self._pending_antikeyword.get(to):
+            with self._state_lock:
+                pend = self._pending_antikeyword.pop(to, None)
+            if not pend:
+                pend = {}
             if _is_negative(text):
                 self._send("No problem — I just removed that one.", to)
                 return
             word = _extract_antikeyword(text)
             if _is_affirmative(text) or not word:
-                self._pending_antikeyword = pend      # they said yes but no word — ask for it
+                self._pending_antikeyword[to] = pend  # they said yes but no word — ask for it
                 self._send("Sure — what word should I avoid? A make, model or type "
                            "(e.g. “utility”, “diesel”, “project”).", to)
                 return
@@ -366,7 +383,7 @@ class TelegramBridge:
             # Still more than a word or two after trimming — ask for just the word rather than
             # storing a whole phrase that would never match. Keep the offer open.
             if len(word) <= 60:
-                self._pending_antikeyword = pend
+                self._pending_antikeyword[to] = pend
                 self._send("Just the one word works best — e.g. “utility” or “diesel”. Or “no”.", to)
                 return
             # A long, clearly-unrelated reply — they moved on; drop the offer, chat normally.
@@ -389,7 +406,7 @@ class TelegramBridge:
                     self._last_listing.pop(to, None)
                 # Offer the feedback loop: add an antikeyword so similar ones never match again.
                 if ok and watch:
-                    self._pending_antikeyword = {"watch": watch}
+                    self._pending_antikeyword[to] = {"watch": watch}
                     self._send(f"🚫 Removed “{name}”. Want me to skip ones like it? Send a word to "
                                "avoid (a make, model or type — e.g. “utility”), or “no”.", to)
                     return
@@ -445,11 +462,11 @@ class TelegramBridge:
 
         sugg = _suggestions_of(result)
         if deletes:
-            self._pending_deletes = deletes
+            self._pending_deletes[to] = deletes
             names = ", ".join(f"“{a.get('name')}”" for a in deletes)
             reply = (reply + f"\n\n🗑 Delete {names}? Reply “yes” to confirm.").strip()
         elif sugg:
-            self._pending = sugg
+            self._pending[to] = sugg
             reply = (reply + "\n\n" + _describe_suggestions(result)).strip()
 
         if send_cards:
@@ -472,7 +489,7 @@ class TelegramBridge:
         else:
             self._send(reply or "(no reply)", to, html=as_html)
 
-    def _apply_pending(self, pending: list[dict]) -> str:
+    def _apply_pending(self, pending: list[dict], chat_id: str = "") -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the
         dashboard's confirm button uses), and report what happened in plain words."""
         done, already, failed = [], [], []
@@ -524,7 +541,7 @@ class TelegramBridge:
         if conflicts:
             # Hold the first one for a follow-up choice (a turn almost always carries one watch).
             name, body, diff = conflicts[0]
-            self._pending_conflict = {"name": name, "body": body}
+            self._pending_conflict[chat_id or self.chat_id] = {"name": name, "body": body}
             bullets = "\n".join(f"  • {d}" for d in diff)
             parts.append(
                 f"You already have a watch called “{name}”. Here's what would change:\n\n"
@@ -609,7 +626,10 @@ class TelegramBridge:
 
     def _resolve_conflict(self, text: str, chat_id: str) -> None:
         """Act on the user's choice for a name collision (update / replace / leave)."""
-        conflict, self._pending_conflict = self._pending_conflict, None
+        with self._state_lock:
+            conflict = self._pending_conflict.pop(chat_id, None)
+        if not conflict:
+            return                      # another thread already handled this chat's collision
         name, body = conflict["name"], conflict["body"]
         low = (text or "").strip().lower()
         if any(w in low for w in ("update", "change", "modify", "edit", "yes", "keep the history")):
@@ -633,7 +653,7 @@ class TelegramBridge:
             self._send(f"Okay — kept “{name}” exactly as it was.", chat_id)
         else:
             # Unclear answer: hold the choice open and ask once more, plainly.
-            self._pending_conflict = conflict
+            self._pending_conflict[chat_id] = conflict
             self._send("Sorry — “update” to change the existing watch, “replace” to start fresh, "
                        "or “leave” to keep it as is?", chat_id)
 

@@ -129,6 +129,11 @@ _PAT_FB      = re.compile(r"/marketplace/item/(\d{10,})")        # fb marketplac
 _PAT_CL_NEW  = re.compile(r"/view/(?:d|p)/[^/]+/([A-Za-z0-9_-]{8,})")
 _PAT_CL      = re.compile(r"/(\d{8,})\.html")                    # legacy craigslist post ids
 _PAT_GENERIC = re.compile(r"/(?:item|listing|product|offer)/[^?#]*?(\d{7,})")
+# OfferUp item ids are UUIDs, not digits: /item/detail/f9c730b0-02c9-3382-a7b3-5271d033fb79
+# (verified live 26 Aug 2026). _PAT_GENERIC demands 7+ DIGITS after /item/, so every OfferUp
+# card was rejected and the harvest came back 0 while the vision model could plainly see the
+# listings on screen — the site looked "blind to the scraper" when it was just an id-shape gap.
+_PAT_OFFERUP = re.compile(r"/item/detail/([A-Za-z0-9][A-Za-z0-9_-]{7,})")
 # Last-resort for UNKNOWN hosts only: a path segment that is a long numeric id.
 _PAT_NUMERIC = re.compile(r"/(\d{9,})(?:[/?#]|$)")
 
@@ -275,6 +280,8 @@ def _listing_key(url: str, profiles: list[dict] | None = None) -> str | None:
         m = _PAT_EBAY.search(path);  return f"ebay:{m.group(1)}" if m else None
     if "facebook." in host:
         m = _PAT_FB.search(path);    return f"fb:{m.group(1)}" if m else None
+    if "offerup." in host:
+        m = _PAT_OFFERUP.search(path); return f"offerup:{m.group(1)}" if m else None
     if "craigslist." in host:
         m = _PAT_CL_NEW.search(path) or _PAT_CL.search(path)
         return f"craigslist:{m.group(1)}" if m else None

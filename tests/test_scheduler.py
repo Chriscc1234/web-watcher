@@ -1015,3 +1015,40 @@ def test_verify_pass_caps_per_sweep(monkeypatch):
     kept = _verify_kept_listings(listings, w, cfg, threshold=3)
     assert len(kept) == len(listings)            # overflow keeps the batch verdict
     assert n_calls["n"] == _VERIFY_CAP           # but is never re-judged
+
+
+# ── judge batching + the rejection feedback loop ──────────────────────────────────
+
+def test_judge_batches_are_small_enough_to_enumerate_reliably():
+    # Measured live: at 60 per call the 14b silently skipped 18. Small models lose track over a
+    # long numbered list, and each skipped item costs a whole retry pass.
+    from web_watcher.scheduler import _JUDGE_BATCH
+    assert 5 <= _JUDGE_BATCH <= 25
+
+
+def test_rejected_examples_feed_the_judge_prompt(tmp_path, monkeypatch):
+    # The loop used to stop at antikeywords: the judge never learned from a rejection, so it
+    # rated the next near-identical listing the same way and the user rejected it again.
+    import web_watcher.scheduler as sch
+    monkeypatch.setattr("web_watcher.storage.rejected_examples",
+                        lambda wid, limit=6, db_path=None: ["J30 Sailboat", "C&C 25 sailboat"])
+    w = _cont_watch(judgment_prompt="MacGregor sailboats only")
+    block = sch._rejected_block(w)
+    assert "ALREADY REJECTED" in block
+    assert "J30 Sailboat" in block and "C&C 25 sailboat" in block
+    assert "2 or lower" in block
+
+
+def test_no_rejections_means_no_block(monkeypatch):
+    import web_watcher.scheduler as sch
+    monkeypatch.setattr("web_watcher.storage.rejected_examples",
+                        lambda wid, limit=6, db_path=None: [])
+    assert sch._rejected_block(_cont_watch(judgment_prompt="x")) == ""
+
+
+def test_rejected_examples_survive_a_storage_error(monkeypatch):
+    import web_watcher.scheduler as sch
+    def _boom(*a, **k):
+        raise RuntimeError("db gone")
+    monkeypatch.setattr("web_watcher.storage.rejected_examples", _boom)
+    assert sch._rejected_block(_cont_watch(judgment_prompt="x")) == ""   # never breaks a sweep

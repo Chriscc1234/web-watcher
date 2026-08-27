@@ -481,6 +481,39 @@ def exclude_listing(url: str, db_path: Path | None = None) -> int:
         return cur.rowcount or 0
 
 
+def rejected_examples(watch_id: str, limit: int = 6, db_path: Path | None = None) -> list[str]:
+    """Titles the USER hand-rejected on this watch — the judge's counter-examples.
+
+    The feedback loop used to stop at antikeywords: "not a match" removed the listing and could
+    learn ONE word, but the judge itself never found out. So it would rate the next near-identical
+    listing exactly the same way and the user would reject it again. Showing the judge a handful
+    of things this person has already said no to costs a few tokens and teaches the shape of the
+    rejection, not just a keyword. Newest first, deduped, best-effort."""
+    if not watch_id:
+        return []
+    path = _resolve(db_path)
+    if not path.exists():
+        return []
+    try:
+        with _connect(path) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT l.title FROM observations o "
+                "JOIN listings l ON l.listing_key = o.listing_key "
+                "WHERE o.watch_id = ? AND o.excluded = 1 AND l.title IS NOT NULL AND l.title != '' "
+                "ORDER BY o.last_seen DESC LIMIT ?",
+                (str(watch_id), int(max(1, limit)))).fetchall()
+    except sqlite3.Error:
+        return []
+    out, seen = [], set()
+    for r in rows:
+        t = " ".join(str((r["title"] if isinstance(r, sqlite3.Row) else r[0]) or "").split())[:90]
+        k = t.lower()
+        if t and k not in seen:
+            seen.add(k)
+            out.append(t)
+    return out
+
+
 def get_listing_by_url(url: str, db_path: Path | None = None) -> dict | None:
     """Everything we already KNOW about one listing, by its URL.
 

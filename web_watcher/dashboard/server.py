@@ -86,7 +86,7 @@ def _apply_new_models_bg(rec: dict) -> None:
         # Every model is now on disk — safe to switch. Re-load so we don't clobber a config the
         # user edited during the download, then persist. New model is picked up on the next
         # chat turn / sweep (both read cfg.models fresh each time).
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         cfg = load()
         cfg.models.text_model    = rec.get("text_model") or cfg.models.text_model
         cfg.models.vision_model  = rec.get("vision_model") or ""
@@ -620,7 +620,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     # the reload lands a moment later.
     @app.post("/api/watches", status_code=201)
     def create_watch(body: dict, bg: BackgroundTasks):
-        from web_watcher.config import Watch, load, save
+        from web_watcher.config import Watch, load, save, lock as _cfg_lock
         if isinstance(body.get("urls"), list):
             body["urls"], _ = _normalize_marketplace_urls(
                 body["urls"], body.get("instruction") or body.get("name") or "")
@@ -630,12 +630,16 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         except ValidationError as exc:
             raise HTTPException(400, detail=_validation_detail(exc))
 
-        cfg = load()
-        if any(w.name == new_watch.name for w in cfg.watches):
-            raise HTTPException(409, detail=f"Watch {new_watch.name!r} already exists")
+        # Read-modify-write under the config lock: without it two callers (dashboard, owner's
+        # bot, buddy's bot — FastAPI runs sync endpoints on a threadpool) can both load, both
+        # append, and the second save silently discards the first person's new watch.
+        with _cfg_lock():
+            cfg = load()
+            if any(w.name == new_watch.name for w in cfg.watches):
+                raise HTTPException(409, detail=f"Watch {new_watch.name!r} already exists")
 
-        cfg.watches.append(new_watch)
-        save(cfg)
+            cfg.watches.append(new_watch)
+            save(cfg)
         bg.add_task(manager.reload_scheduler)
         # NOTE: exploration of an unknown site happens when the watch is STARTED (see
         # scheduler._execute_continuous_watch), not here — creating a watch shouldn't kick
@@ -660,37 +664,39 @@ def create_app(manager: "ServiceManager") -> FastAPI:
 
     @app.put("/api/watches/{watch_name}")
     def update_watch(watch_name: str, body: dict, bg: BackgroundTasks):
-        from web_watcher.config import Watch, load, save
+        from web_watcher.config import Watch, load, save, lock as _cfg_lock
         if isinstance(body.get("urls"), list):
             body["urls"], _ = _normalize_marketplace_urls(
                 body["urls"], body.get("instruction") or body.get("name") or watch_name or "")
         body = _coerce_watch_numbers(body)
 
-        cfg = load()
-        watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
-        idx = next((i for i, w in enumerate(cfg.watches) if w.name == watch_name), None)
-        if idx is None:
-            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+        with _cfg_lock():          # see create_watch — closes the lost-update window
+            cfg = load()
+            watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
+            idx = next((i for i, w in enumerate(cfg.watches) if w.name == watch_name), None)
+            if idx is None:
+                raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
 
-        try:
-            updated = _merge_watch_update(cfg.watches[idx], body, watch_name)
-        except ValidationError as exc:
-            raise HTTPException(400, detail=_validation_detail(exc))
+            try:
+                updated = _merge_watch_update(cfg.watches[idx], body, watch_name)
+            except ValidationError as exc:
+                raise HTTPException(400, detail=_validation_detail(exc))
 
-        cfg.watches[idx] = updated
-        save(cfg)
+            cfg.watches[idx] = updated
+            save(cfg)
         bg.add_task(manager.reload_scheduler)
         return {"ok": True, "name": watch_name}
 
     @app.delete("/api/watches/{watch_name}")
     def delete_watch(watch_name: str, bg: BackgroundTasks):
-        from web_watcher.config import load, save
-        cfg = load()
-        before = len(cfg.watches)
-        cfg.watches = [w for w in cfg.watches if w.name != watch_name]
-        if len(cfg.watches) == before:
-            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
-        save(cfg)
+        from web_watcher.config import load, save, lock as _cfg_lock
+        with _cfg_lock():          # a delete racing an edit must not resurrect the watch
+            cfg = load()
+            before = len(cfg.watches)
+            cfg.watches = [w for w in cfg.watches if w.name != watch_name]
+            if len(cfg.watches) == before:
+                raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+            save(cfg)
         bg.add_task(manager.reload_scheduler)
         return {"ok": True}
 
@@ -698,13 +704,14 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     def set_watch_enabled(watch_name: str, body: dict, bg: BackgroundTasks):
         """Enable/disable a watch without rewriting its whole config (used by the
         assistant's lifecycle actions and the dashboard)."""
-        from web_watcher.config import load, save
-        cfg = load()
-        w = next((w for w in cfg.watches if w.name == watch_name), None)
-        if w is None:
-            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
-        w.enabled = bool(body.get("enabled", True))
-        save(cfg)
+        from web_watcher.config import load, save, lock as _cfg_lock
+        with _cfg_lock():          # enable/disable races the assistant's lifecycle actions
+            cfg = load()
+            w = next((w for w in cfg.watches if w.name == watch_name), None)
+            if w is None:
+                raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+            w.enabled = bool(body.get("enabled", True))
+            save(cfg)
         bg.add_task(manager.reload_scheduler)
         return {"ok": True, "name": watch_name, "enabled": w.enabled}
 
@@ -728,7 +735,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         """One mode-aware lifecycle control for a single watch: enable | disable | start | stop |
         delete. The bot and dashboard get ONE tool that does the right thing for a continuous vs a
         scheduled watch. OWNERSHIP is enforced by the chat layer before this is called."""
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         action = str(body.get("action") or "").strip().lower()
         cfg = load()
         w = next((x for x in cfg.watches if x.name == watch_name), None)
@@ -795,7 +802,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         watch the person had already deactivated on purpose is not silently resurrected by a
         group start. With nothing remembered (first use), START enables the whole group, which is
         what clicking "Start all" on a visible group plainly means."""
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         action = str(body.get("action") or "").strip().lower()
         if action not in ("start", "stop"):
             raise HTTPException(400, detail=f"Unknown owner action {action!r}")
@@ -883,7 +890,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     @app.post("/api/review/settings")
     def set_review_settings(body: dict):
         """Turn the self-audit on/off and set how often it runs."""
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         cfg = load()
         if "enabled" in body:
             cfg.review.enabled = bool(body["enabled"])
@@ -989,20 +996,23 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         """Append ONE antikeyword to a watch (dedup, case-insensitive) — an APPEND, not a replace,
         so we never wipe the watch's existing filters. Feeds the 'not a match → skip ones like
         this' flow. Body: {word}."""
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         word = (body.get("word") or "").strip().lower()
-        cfg = load()
-        watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
-        w = next((x for x in cfg.watches if x.name == watch_name), None)
-        if w is None:
-            raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
-        if not word:
-            raise HTTPException(400, detail="no word given")
-        existing = [a for a in (w.antikeywords or [])]
-        if word not in [a.lower() for a in existing]:
-            w.antikeywords = existing + [word]
-            save(cfg)
-            bg.add_task(manager.reload_scheduler)
+        # Under the lock: this is an APPEND, so a concurrent edit reloading stale watches would
+        # drop the word the user just taught us (or another of their filters).
+        with _cfg_lock():
+            cfg = load()
+            watch_name = _resolve_watch_name(watch_name, cfg) or watch_name
+            w = next((x for x in cfg.watches if x.name == watch_name), None)
+            if w is None:
+                raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
+            if not word:
+                raise HTTPException(400, detail="no word given")
+            existing = [a for a in (w.antikeywords or [])]
+            if word not in [a.lower() for a in existing]:
+                w.antikeywords = existing + [word]
+                save(cfg)
+                bg.add_task(manager.reload_scheduler)
         return {"ok": True, "name": watch_name, "antikeywords": w.antikeywords}
 
     @app.post("/api/listings/exclude")
@@ -1392,7 +1402,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
 
     @app.post("/api/browser")
     def set_browser_settings(body: dict):
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         cfg = load()
         if "headless" in body:
             cfg.browser.headless = bool(body["headless"])
@@ -1644,16 +1654,19 @@ def create_app(manager: "ServiceManager") -> FastAPI:
     def telegram_allow_access(body: dict):
         """Grant a pending request: add its chat_id to the allowlist, save, restart the bridge
         so it takes effect live, and clear it from the pending list."""
-        from web_watcher.config import load, save
+        from web_watcher.config import load, save, lock as _cfg_lock
         cid = str(body.get("chat_id") or "").strip()
         if not cid:
             return {"ok": False, "error": "no chat_id"}
-        cfg = load()
-        allowed = list(cfg.notifications.telegram.allowed_chat_ids or [])
-        if cid not in allowed:
-            allowed.append(cid)
-            cfg.notifications.telegram.allowed_chat_ids = allowed
-            save(cfg)
+        # The allow-list is a SECURITY boundary — a lost update here silently un-invites
+        # someone the owner just approved. Append under the lock.
+        with _cfg_lock():
+            cfg = load()
+            allowed = list(cfg.notifications.telegram.allowed_chat_ids or [])
+            if cid not in allowed:
+                allowed.append(cid)
+                cfg.notifications.telegram.allowed_chat_ids = allowed
+                save(cfg)
         # Remember their name for the console, then drop the pending request.
         name = str(body.get("name") or "").strip()
         if name:
@@ -2949,7 +2962,7 @@ def _action_broaden_terms(watch_name: str, manager, bg, terms_override=None) -> 
         asking to 'change/broaden' actually produces something new instead of the cached set.
     Backs The Watcher's 'matched none of them' concern button and chat term-change requests."""
     from urllib.parse import urlparse, parse_qsl, unquote_plus
-    from web_watcher.config import load, save
+    from web_watcher.config import load, save, lock as _cfg_lock
     from web_watcher.search_terms import expand_search_terms, build_search_urls, _search_param
 
     cfg = load()

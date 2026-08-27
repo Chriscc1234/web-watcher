@@ -129,12 +129,12 @@ def test_yes_applies_the_pending_change(monkeypatch):
     sent, applied = [], []
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
-    monkeypatch.setattr(b, "_apply_pending", lambda p: applied.append(p) or "✅ Done.")
+    monkeypatch.setattr(b, "_apply_pending", lambda p, c="": applied.append(p) or "✅ Done.")
     monkeypatch.setattr(b, "_ask_watcher", lambda t, o="", n="": pytest.fail("a yes must not re-ask the model"))
-    b._pending = [{"name": "Trucks", "action": "update"}]
+    b._pending = {"12345": [{"name": "Trucks", "action": "update"}]}
     b._handle_message("yes")
     assert applied == [[{"name": "Trucks", "action": "update"}]]
-    assert b._pending is None            # consumed, so a later stray "yes" can't re-apply
+    assert not b._pending.get("12345")       # consumed, so a later stray "yes" can't re-apply
     assert sent == ["✅ Done."]
 
 
@@ -143,10 +143,10 @@ def test_no_cancels_without_applying(monkeypatch):
     sent = []
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
-    monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply on 'no'"))
-    b._pending = [{"name": "Trucks"}]
+    monkeypatch.setattr(b, "_apply_pending", lambda p, c="": pytest.fail("must not apply on 'no'"))
+    b._pending = {"12345": [{"name": "Trucks"}]}
     b._handle_message("no")
-    assert b._pending is None and "left everything" in sent[0].lower()
+    assert not b._pending.get("12345") and "left everything" in sent[0].lower()
 
 
 def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
@@ -154,9 +154,9 @@ def test_a_new_request_after_a_proposal_is_not_consent(monkeypatch):
     sent = []
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
-    monkeypatch.setattr(b, "_apply_pending", lambda p: pytest.fail("must not apply"))
+    monkeypatch.setattr(b, "_apply_pending", lambda p, c="": pytest.fail("must not apply"))
     monkeypatch.setattr(b, "_ask_watcher", lambda t, o="", n="": {"message": "Sure, boats instead."})
-    b._pending = [{"name": "Trucks"}]
+    b._pending = {"12345": [{"name": "Trucks"}]}
     b._handle_message("actually find me a boat")
     assert sent == ["Sure, boats instead."]
 
@@ -224,7 +224,7 @@ def test_not_a_match_offers_an_antikeyword_when_the_watch_is_known(monkeypatch):
 
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post", lambda url, **k: _R())
     b._handle_message("that's not a match", "111", "Chris")
-    assert b._pending_antikeyword and b._pending_antikeyword["watch"] == "Cars"
+    assert b._pending_antikeyword.get("111", {}).get("watch") == "Cars"
     assert any("skip ones like it" in s.lower() for s in sent)
 
 
@@ -242,7 +242,7 @@ def test_extract_antikeyword_pulls_the_word_from_a_sentence():
 
 def test_an_antikeyword_word_is_appended_to_the_watch(monkeypatch):
     b = _bridge("111")
-    b._pending_antikeyword = {"watch": "Cars"}
+    b._pending_antikeyword = {"111": {"watch": "Cars"}}
     posted, sent = [], []
     monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
@@ -252,18 +252,18 @@ def test_an_antikeyword_word_is_appended_to_the_watch(monkeypatch):
     b._handle_message("avoid utility vehicles", "111", "Chris")   # a full sentence, not one word
     assert posted and "antikeyword" in posted[0][0] and posted[0][1]["word"] == "utility"
     assert any("skip listings mentioning" in s.lower() for s in sent)
-    assert b._pending_antikeyword is None
+    assert not b._pending_antikeyword.get("111")
 
 
 def test_declining_the_antikeyword_adds_nothing(monkeypatch):
     b = _bridge("111")
-    b._pending_antikeyword = {"watch": "Cars"}
+    b._pending_antikeyword = {"111": {"watch": "Cars"}}
     sent = []
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
                         lambda *a, **k: pytest.fail("declining must not add a filter"))
     b._handle_message("no", "111", "Chris")
-    assert b._pending_antikeyword is None and sent
+    assert not b._pending_antikeyword.get("111") and sent
 
 
 def test_not_a_match_without_a_shown_listing_asks_which_one(monkeypatch):
@@ -675,51 +675,51 @@ def test_a_differing_collision_offers_update_replace_leave(monkeypatch):
     assert "You already have a watch called" in out and "what would change" in out.lower()
     assert "Looking for" in out
     assert "update" in out and "replace" in out and "leave" in out
-    assert b._pending_conflict and b._pending_conflict["name"] == "Boats"
+    assert b._pending_conflict.get("12345", {}).get("name") == "Boats"
 
 
 def test_conflict_update_puts_the_new_settings(monkeypatch):
     b = _bridge()
-    b._pending_conflict = {"name": "Boats", "body": {"instruction": "new", "urls": ["https://x"]}}
+    b._pending_conflict = {"12345": {"name": "Boats", "body": {"instruction": "new", "urls": ["https://x"]}}}
     calls, sent = {}, []
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.put",
                         lambda url, **k: calls.update(put=url) or type("R", (), {"status_code": 200})())
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    b._resolve_conflict("update", "111")
-    assert "put" in calls and "Updated" in sent[0] and b._pending_conflict is None
+    b._resolve_conflict("update", "12345")
+    assert "put" in calls and "Updated" in sent[0] and not b._pending_conflict.get("12345")
 
 
 def test_conflict_replace_deletes_then_recreates(monkeypatch):
     b = _bridge()
-    b._pending_conflict = {"name": "Boats", "body": {"urls": ["https://x"]}}
+    b._pending_conflict = {"12345": {"name": "Boats", "body": {"urls": ["https://x"]}}}
     seq, sent = [], []
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.delete",
                         lambda url, **k: seq.append("del") or type("R", (), {"status_code": 200})())
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.post",
                         lambda url, **k: seq.append("post") or type("R", (), {"status_code": 201})())
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    b._resolve_conflict("replace", "111")
+    b._resolve_conflict("replace", "12345")
     assert seq == ["del", "post"] and "Replaced" in sent[0]
 
 
 def test_conflict_leave_changes_nothing(monkeypatch):
     b = _bridge()
-    b._pending_conflict = {"name": "Boats", "body": {}}
+    b._pending_conflict = {"12345": {"name": "Boats", "body": {}}}
     sent = []
     monkeypatch.setattr("web_watcher.telegram_bot.httpx.put",
                         lambda *a, **k: pytest.fail("leave must not modify the watch"))
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    b._resolve_conflict("leave", "111")
-    assert "kept" in sent[0].lower() and b._pending_conflict is None
+    b._resolve_conflict("leave", "12345")
+    assert "kept" in sent[0].lower() and not b._pending_conflict.get("12345")
 
 
 def test_an_unclear_conflict_answer_re_asks_and_holds(monkeypatch):
     b = _bridge()
-    b._pending_conflict = {"name": "Boats", "body": {}}
+    b._pending_conflict = {"12345": {"name": "Boats", "body": {}}}
     sent = []
     monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append(t))
-    b._resolve_conflict("what do you mean", "111")
-    assert b._pending_conflict is not None                 # still held for a real answer
+    b._resolve_conflict("what do you mean", "12345")
+    assert b._pending_conflict.get("12345")                   # still held for a real answer
     assert "update" in sent[0] and "replace" in sent[0] and "leave" in sent[0]
 
 
@@ -792,7 +792,7 @@ def test_reversible_action_applies_immediately(monkeypatch):
                         lambda url, **k: posted.append(url) or _R())
     b._handle_message("stop my truck watch")
     assert any("/api/watches/Trucks/action" in u for u in posted)   # hit the action endpoint
-    assert b._pending is None and b._pending_deletes is None         # nothing left hanging
+    assert not b._pending.get("12345") and not b._pending_deletes.get("12345")   # nothing left hanging
     assert "stopped" in sent[0].lower()
 
 
@@ -812,11 +812,11 @@ def test_delete_waits_for_a_yes(monkeypatch):
                         lambda url, **k: posted.append(url) or _R())
     b._handle_message("delete my truck watch")
     assert posted == []                                    # NOT applied yet — waiting for a yes
-    assert b._pending_deletes == [{"action": "delete", "name": "Trucks"}]
+    assert b._pending_deletes.get("12345") == [{"action": "delete", "name": "Trucks"}]
     assert "yes" in sent[0].lower()
     b._handle_message("yes")                               # confirm
     assert any("/api/watches/Trucks/action" in u for u in posted)
-    assert b._pending_deletes is None
+    assert not b._pending_deletes.get("12345")
 
 
 def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
@@ -827,7 +827,7 @@ def test_a_turn_with_suggestions_arms_the_confirmation(monkeypatch):
                         lambda t, o="", n="": {"message": "Here's what I'd set up.",
                                    "watch_suggestion": {"name": "Trucks"}})
     b._handle_message("watch for trucks")
-    assert b._pending == [{"name": "Trucks"}]
+    assert b._pending.get("12345") == [{"name": "Trucks"}]
 
 
 # ── HTML parse mode (the "settings printed literal <i> tags" bug) ────────────────
@@ -995,3 +995,51 @@ class _Ok:
 
     def raise_for_status(self):
         pass
+
+
+# ── per-chat pending state: one person cannot answer another's question ───────────
+# Every update is handled on its OWN thread and the bot serves the owner plus any approved
+# buddy. As single shared values these raced: the owner's pending "create this watch?" could be
+# confirmed by the BUDDY's unrelated "yes", or clobbered by his own pending action.
+
+def test_a_buddys_yes_cannot_confirm_the_owners_pending_change(monkeypatch):
+    b = _bridge("111")                       # owner's chat is 111
+    applied = []
+    monkeypatch.setattr(b, "_apply_pending", lambda p, c="": applied.append((p, c)) or "Done.")
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: None)
+    monkeypatch.setattr(b, "_ask_watcher", lambda t, owner="", owner_name="": {"message": "ok"})
+    b._pending["111"] = [{"name": "Trucks", "action": "update"}]
+    b._handle_message("yes", "999", "Buddy")          # the BUDDY says yes
+    assert applied == []                               # ...and nothing of the owner's is applied
+    assert b._pending.get("111")                       # still waiting for the OWNER
+    b._handle_message("yes", "111", "Chris")           # the owner confirms
+    assert applied and applied[0][1] == "111"
+    assert not b._pending.get("111")
+
+
+def test_two_people_hold_independent_conflicts(monkeypatch):
+    b = _bridge("111")
+    sent = []
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: sent.append((chat_id, t)))
+    monkeypatch.setattr("web_watcher.telegram_bot.httpx.put",
+                        lambda *a, **k: type("R", (), {"status_code": 200})())
+    b._pending_conflict["111"] = {"name": "OwnerBoats", "body": {}}
+    b._pending_conflict["999"] = {"name": "BuddyCars", "body": {}}
+    b._resolve_conflict("leave", "999")                # buddy answers his own
+    assert not b._pending_conflict.get("999")
+    assert b._pending_conflict.get("111", {}).get("name") == "OwnerBoats"   # owner's untouched
+
+
+def test_a_pending_action_is_claimed_only_once(monkeypatch):
+    # Two messages arriving together must not both apply the same proposal.
+    b = _bridge("111")
+    applied = []
+    monkeypatch.setattr(b, "_apply_pending", lambda p, c="": applied.append(p) or "Done.")
+    monkeypatch.setattr(b, "_typing", lambda chat_id="": None)
+    monkeypatch.setattr(b, "_send", lambda t, chat_id="", html=False, buttons=None: None)
+    monkeypatch.setattr(b, "_ask_watcher", lambda t, owner="", owner_name="": {"message": "ok"})
+    b._pending["111"] = [{"name": "Trucks"}]
+    b._handle_message("yes", "111", "Chris")
+    b._handle_message("yes", "111", "Chris")           # a second, stray yes
+    assert len(applied) == 1                            # applied exactly once

@@ -14,7 +14,11 @@ Source of truth is config.yaml — this module owns all read/write access to it.
 from __future__ import annotations
 
 import copy
+import os
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -330,6 +334,15 @@ from web_watcher import paths
 
 _DEFAULT_CONFIG_PATH = paths.config_path()
 
+# Serialises config writers inside this process. Re-entrant because mutate() holds it across a
+# load+save and save() takes it again. Cross-PROCESS safety comes from the atomic os.replace in
+# save() plus single_instance, which already stops a second copy of the app running.
+_CONFIG_LOCK = threading.RLock()
+
+# Windows refuses os.replace() while another handle has the target open, and this app reads
+# config.yaml constantly. ~1.5s of retries total, which is far longer than any read here takes.
+_REPLACE_RETRIES = 8
+
 
 def load(path: Path | str | None = None) -> AppConfig:
     """Load and validate config.yaml. Raises ValidationError on schema violations."""
@@ -387,11 +400,85 @@ def load(path: Path | str | None = None) -> AppConfig:
 
 
 def save(config: AppConfig, path: Path | str | None = None) -> None:
-    """Serialise AppConfig back to config.yaml, preserving human-readable YAML."""
+    """Serialise AppConfig back to config.yaml — ATOMICALLY, under a lock.
+
+    config.yaml holds EVERY watch: it is the app's entire state in one file. This used to be a
+    plain open("w"), which truncates first and then writes, and roughly fifteen API endpoints do
+    load → mutate → save. FastAPI runs sync endpoints on a threadpool, so the desktop dashboard,
+    the owner's bot and a buddy's bot can all be inside that sequence at once. Two real hazards:
+
+      • CORRUPTION — a crash (or a reader) between truncate and flush leaves a half-written file.
+        For this file that means every watch is gone.
+      • LOST UPDATES — two readers each load, each mutate a different watch, and the second save
+        silently discards the first person's change.
+
+    Fixed here by writing a sibling temp file, fsync-ing it, then os.replace() — which is atomic
+    on Windows and POSIX, so a reader sees either the old file or the new one, never a partial —
+    all under _CONFIG_LOCK so writers inside one process serialise. Callers that read-modify-write
+    should hold `mutate()` to close the lost-update window across the whole sequence."""
     p = Path(path) if path else _DEFAULT_CONFIG_PATH
     data = config.model_dump(exclude_none=False)
-    with p.open("w", encoding="utf-8") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    text = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    with _CONFIG_LOCK:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())     # the bytes are on disk before anything is swapped
+            # os.replace is atomic — readers see old or new, never half. On WINDOWS it also
+            # fails with PermissionError while any other handle has the target open, and this
+            # app reads config.yaml constantly (every orchestrator cycle, every chat turn), so
+            # an unretried replace loses the write outright. Caught by a concurrent-reader test.
+            # Retry briefly: the competing read is a few milliseconds long.
+            for attempt in range(_REPLACE_RETRIES):
+                try:
+                    os.replace(tmp, p)
+                    break
+                except PermissionError:
+                    if attempt == _REPLACE_RETRIES - 1:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+
+@contextmanager
+def lock():
+    """Hold the config lock across a read-modify-write done with explicit load()/save().
+
+        with config.lock():
+            cfg = load()
+            ...mutate...
+            save(cfg)
+
+    Preferred over mutate() when the block has early returns or raises that must NOT write —
+    the save stays explicit, so the existing control flow is preserved exactly while the
+    lost-update window (two endpoints both loading before either saves) is closed."""
+    with _CONFIG_LOCK:
+        yield
+
+
+@contextmanager
+def mutate(path: Path | str | None = None):
+    """Read-modify-write config.yaml without losing a concurrent edit.
+
+        with config.mutate() as cfg:
+            cfg.watches.append(new_watch)
+
+    Holds the lock across load AND save, so two endpoints editing different watches can no longer
+    clobber each other — the second one loads what the first one wrote. Saves on clean exit only;
+    an exception leaves the file untouched."""
+    with _CONFIG_LOCK:
+        cfg = load(path)
+        yield cfg
+        # save() re-takes the lock; it is an RLock precisely so this nesting is safe.
+        save(cfg, path)
 
 
 def round_trip(path: Path | str | None = None) -> AppConfig:

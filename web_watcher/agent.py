@@ -86,6 +86,11 @@ _AGENT_NUM_CTX = 16_384
 # the WHOLE run per control regardless of this window.
 _HISTORY_STEPS = 25
 
+# Consecutive SCROLLS that add no new listings before we call the page exhausted. Three is the
+# same threshold the stuck-detector uses, and it matches what the logs show: a feed that has
+# stopped growing after three scrolls does not start again.
+_FLAT_HARVEST_LIMIT = 3
+
 # ---- human-pace timing ----
 ACTION_PAUSE    = (0.4, 1.1)   # pause between agent actions (seconds)
 PAGE_SETTLE     = (0.9, 1.8)   # pause after navigation / page change (seconds)
@@ -195,6 +200,20 @@ chose the action. A filled-in thought leads to better decisions.
     read the results — do NOT type "severe weather Seattle". If the box's autocomplete only
     offers cities, treat it as a LOCATION INPUT even if it was tagged TEXT INPUT.
 
+  ══ TWO RULES ABOUT VALUES — these matter more than anything else here ══
+  (a) KEYWORDS ONLY IN THE SEARCH BOX. Search for the THING, never the place or the price.
+      Goal "MacGregor sailboats within 300 miles of Anacortes WA under $10k"
+        → type "MacGregor sailboat"
+        → NOT "MacGregor sailboats Anacortes WA", NOT "macgregor under 10k"
+      The location and price are separate controls (a zip field, a distance dropdown, min/max
+      price boxes). Putting them in the keyword box makes most sites return NOTHING, and then
+      you will wrongly conclude there are no results.
+  (b) NEVER INVENT A FILTER VALUE. Every number you type must come from the goal. If the goal
+      states no budget, do NOT type a maximum price — leave price empty. If it states no year,
+      do not set a year. Inventing a filter silently hides listings the user asked to see: a
+      goal with no budget that gets a "$13,000 max" typed into it will never show them a
+      $21,500 boat they wanted. When in doubt about a filter, leave it alone.
+
   Reading search results:
     1. The page text contains the listing titles, prices, and details.
     2. Read the page text to extract what you need.
@@ -297,6 +316,7 @@ def run_agent(
     should_stop:   Optional[Callable[[Page], bool]] = None,
     exploration_mode: bool = False,
     search_locked: bool = False,
+    harvest_size:  Optional[Callable[[], int]] = None,
 ) -> AgentResult:
     """
     Run the agent loop on an already-loaded page.
@@ -353,6 +373,23 @@ def run_agent(
             on_step(page)
         except Exception as exc:
             log.debug("on_step harvest callback failed: %s", exc)
+
+    # How many unique listings the caller has collected, and how many steps in a row that has
+    # not moved. The agent could not previously SEE this: on OfferUp the extractor returned 0
+    # every single step while the vision model kept telling it "the page shows results", so it
+    # scrolled contentedly to the step cap harvesting nothing. On eBay it sat at exactly 35 for
+    # eight straight scrolls. A count that stops moving is the clearest "there is nothing more
+    # here" signal available, and it costs nothing to read.
+    def _harvest_count() -> int:
+        if harvest_size is None:
+            return -1
+        try:
+            return int(harvest_size())
+        except Exception:
+            return -1
+
+    last_harvest = _harvest_count()
+    flat_steps = 0
 
     # Emit focus events so DataDome sees a normal tab-activation sequence
     _emit_focus_events(page)
@@ -520,6 +557,24 @@ def run_agent(
             )
             _human_pause(*ACTION_PAUSE)
             continue
+
+        # ── Block INVENTED filter values ──────────────────────────────────────
+        # Observed live: on a watch with NO budget the agent typed "13000" into OfferUp's
+        # max-price box, silently hiding every boat above it. A filter value the goal never
+        # stated is a silent narrowing of the user's search — the same class of harm as the
+        # dropped category, but self-inflicted. Numbers must come from the goal, not the model.
+        if action.action in ("type", "select") and action.element_label and action.text:
+            _bad = _invented_filter_value(action.element_label, action.text, instruction)
+            if _bad:
+                log.info("Agent tried to set %r to %r, which the goal never asked for — rejecting",
+                         action.element_label, action.text)
+                action.outcome = (
+                    f"REJECTED: the goal does not mention {_bad}. Do NOT invent filter values — "
+                    "typing a limit the user never asked for hides listings they wanted to see. "
+                    "Leave this filter empty and read the results as they are."
+                )
+                _human_pause(*ACTION_PAUSE)
+                continue
 
         # ── Block repeated searches ───────────────────────────────────────────
         # The agent tends to re-type the SAME query it already searched (different
@@ -720,6 +775,14 @@ def run_agent(
                 log.info("Council recommended navigating to %s — refusing (search locked)",
                          (rec.text or "")[:80])
                 rec = None
+            # A recovery that cannot execute is not a recovery. The council repeatedly returned
+            # click/type/select with NO element_index, which failed validation deep in _execute
+            # and burned the whole get-unstuck pass — twice in one live eBay sweep. Discard an
+            # unusable recommendation here so the normal loop gets the step back instead.
+            if rec and rec.action in ("click", "type", "select") and rec.element_index is None:
+                log.info("Council recommended %r with no element — discarding (unusable)",
+                         rec.action)
+                rec = None
             if rec and rec.action != "done":
                 log.info("Council recommends: %s — %s", rec.action, rec.thought[:80])
                 _pre_url  = page.url
@@ -835,6 +898,23 @@ def run_agent(
 
         _human_pause(*ACTION_PAUSE)
         _harvest()   # harvest listings from the page this action landed on
+
+        # Nothing new came back for several steps in a row → the page has given us what it has.
+        # Stop rather than scrolling out the step budget. Only counts SCROLLS: a click or a
+        # search legitimately takes a step or two to pay off, whereas a scroll that adds nothing
+        # three times running is the end of the feed (or an extractor that cannot read it).
+        _now_count = _harvest_count()
+        if _now_count >= 0 and action.action == "scroll":
+            if _now_count == last_harvest:
+                flat_steps += 1
+                if flat_steps >= _FLAT_HARVEST_LIMIT:
+                    log.info("Agent stopping at step %d: %d listing(s) and nothing new after "
+                             "%d scrolls — the page has no more to give",
+                             step + 1, _now_count, flat_steps)
+                    break
+            else:
+                flat_steps = 0
+        last_harvest = _now_count if _now_count >= 0 else last_harvest
 
     # Fold this run's experience back into the site's tree so the NEXT sweep starts knowing it.
     # Best-effort: a storage hiccup must never cost us a completed sweep's listings.
@@ -2308,6 +2388,46 @@ def _url_path(url: str) -> str:
         return url
 
 
+# Filter controls whose value must come from the GOAL, never from the model. Matched on the
+# control's own visible label, which is what a person reads to know what a box is for.
+_PRICE_FIELD_RE = re.compile(r"\b(min|max|price|budget|\$|cost|from|to)\b", re.I)
+_YEAR_FIELD_RE  = re.compile(r"\b(year|model\s*year|from\s*year|to\s*year)\b", re.I)
+_MILES_FIELD_RE = re.compile(r"\b(mile|miles|mileage|odometer|distance|radius)\b", re.I)
+
+
+def _goal_states_a_number(instruction: str, kind: str) -> bool:
+    """Does the goal actually state a value of this kind? Deliberately generous — we only block
+    when the goal is CLEARLY silent, because wrongly blocking a legitimate filter would be worse
+    than letting one through."""
+    t = (instruction or "").lower()
+    if kind == "price":
+        return bool(re.search(r"[$€£]\s?\d|under\s+\d|below\s+\d|less\s+than\s+\d|"
+                              r"\b\d[\d,]*\s?(k|grand|dollars?)\b|budget|max\w*\s+price|"
+                              r"between\s+\d", t))
+    if kind == "year":
+        return bool(re.search(r"\b(19|20)\d{2}\b|newer\s+than|older\s+than|year", t))
+    if kind == "miles":
+        return bool(re.search(r"\bmiles?\b|\bmileage\b|\bradius\b|\bwithin\s+\d|\bkm\b", t))
+    return True
+
+
+def _invented_filter_value(label: str, text: str, instruction: str) -> str:
+    """Name the kind of filter the agent is inventing, or "" when the value is legitimate.
+
+    Only fires when ALL of: the control is a known numeric filter, the value is a bare number,
+    and the goal says nothing about that kind of number. A keyword search is never blocked."""
+    value = (text or "").strip().replace(",", "").replace("$", "")
+    if not value or not re.fullmatch(r"\d[\d.]*", value):
+        return ""                      # not a bare number — a keyword search, leave it alone
+    lab = label or ""
+    for kind, rx, human in (("price", _PRICE_FIELD_RE, "a price limit"),
+                            ("year",  _YEAR_FIELD_RE,  "a year limit"),
+                            ("miles", _MILES_FIELD_RE, "a mileage or distance limit")):
+        if rx.search(lab) and not _goal_states_a_number(instruction, kind):
+            return human
+    return ""
+
+
 def is_listing_url(url: str) -> bool:
     """Does this URL point at ONE listing (an ad to read) rather than a search/browse page?
 
@@ -2317,13 +2437,22 @@ def is_listing_url(url: str) -> bool:
     if not u.startswith("http"):
         return False
     from urllib.parse import urlparse
-    path = urlparse(u).path
-    # Search/browse shapes across the marketplaces we drive.
-    if re.search(r"/(search|browse|categories|area|city|sub)\b", path):
+    parsed = urlparse(u)
+    path = parsed.path
+    # Search/browse shapes across the marketplaces we drive. eBay's results page is
+    # /sch/i.html — note it ends in .html, which is why a bare `\.html$` rule is wrong.
+    if re.search(r"/(search|browse|categories|area|city|sub|sch)\b", path):
         return False
-    # Listing shapes: craigslist /view/d/<slug>/<id> and .../<digits>.html, ebay /itm/,
-    # offerup /item/, facebook /marketplace/item/.
-    return bool(re.search(r"/(view|itm|item|d|p)/|/\d{6,}(?:\.html)?$|\.html$", path))
+    # A query string that carries search parameters means a RESULTS page whatever the path
+    # looks like. This is the eBay case: /sch/i.html?_nkw=... used to be classified as a
+    # listing (any .html), which put its controls in the wrong branch of the site tree AND
+    # made the search lock leaky — a navigate to another eBay search sailed through as
+    # "just opening a listing".
+    if re.search(r"(^|&)(_nkw|q|query|k|keywords|search|s)=", parsed.query or "", re.I):
+        return False
+    # Listing shapes: craigslist /view/d/<slug>/<id>, ebay /itm/<id>, offerup /item/<id>,
+    # facebook /marketplace/item/<id>, and the classic <digits>.html detail page.
+    return bool(re.search(r"/(view|itm|item|d|p)/|/\d{6,}(?:\.html)?$", path))
 
 
 def _search_lock_violation(current_url: str, target_url: str) -> bool:

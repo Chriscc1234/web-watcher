@@ -156,3 +156,51 @@ def test_agent_context_window_is_set_and_generous():
     from web_watcher.agent import _AGENT_NUM_CTX, _HISTORY_STEPS
     assert _AGENT_NUM_CTX >= 16_384
     assert _HISTORY_STEPS >= 25
+
+
+# ── invented filter values (the silent-narrowing bug) ─────────────────────────────
+# Live: on a watch with NO budget the agent typed "13000" into OfferUp's max-price box,
+# hiding every boat above it. A value the goal never stated silently shrinks the user's search.
+
+def test_a_price_typed_into_a_no_budget_watch_is_rejected():
+    from web_watcher.agent import _invented_filter_value as f
+    no_budget = "MacGregor sailboats of any model within 300 miles of Anacortes, no price limit."
+    assert f("max", "13000", no_budget)          # the exact live failure
+    assert f("min", "0", no_budget)
+    assert f("year", "2010", no_budget)
+
+
+def test_a_filter_the_goal_actually_states_is_allowed():
+    from web_watcher.agent import _invented_filter_value as f
+    with_budget = "manual transmission cars within 100 miles, under $8000"
+    assert not f("max price", "8000", with_budget)
+    # A radius the goal states is legitimate even on a no-budget watch.
+    assert not f("miles", "300", "MacGregor sailboats within a 300-mile radius of Anacortes")
+
+
+def test_keyword_text_is_never_treated_as_an_invented_filter():
+    from web_watcher.agent import _invented_filter_value as f
+    assert not f("search for sale", "macgregor sailboat", "anything")
+    assert not f("zip", "98221", "boats near Anacortes")     # not a guarded numeric filter
+
+
+# ── eBay search pages are not listings (leaky search lock) ────────────────────────
+
+def test_an_ebay_results_page_is_a_search_not_a_listing():
+    from web_watcher.agent import is_listing_url, page_kind, _search_lock_violation
+    results = "https://www.ebay.com/sch/i.html?_nkw=macgregor+sailboat"
+    assert is_listing_url(results) is False      # `.html` alone used to make this a "listing"
+    assert page_kind(results) == "search"
+    assert is_listing_url("https://www.ebay.com/itm/123456789012") is True
+    # ...so the lock actually holds on eBay: another search is refused, an item is allowed.
+    assert _search_lock_violation(results, "https://www.ebay.com/sch/i.html?_nkw=golf") is True
+    assert _search_lock_violation(results, "https://www.ebay.com/itm/999999999999") is False
+
+
+def test_offerup_uuid_listings_are_extracted():
+    # OfferUp ids are UUIDs, not digits, so the digits-only generic pattern rejected every card —
+    # the harvest returned 0 while vision could plainly see listings on the page.
+    from web_watcher.monitor import _listing_key
+    key = _listing_key("https://offerup.com/item/detail/f9c730b0-02c9-3382-a7b3-5271d033fb79")
+    assert key == "offerup:f9c730b0-02c9-3382-a7b3-5271d033fb79"
+    assert _listing_key("https://offerup.com/search?q=sailboat") is None

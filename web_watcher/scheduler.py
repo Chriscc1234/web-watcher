@@ -96,6 +96,10 @@ _ESTABLISHED_SEEN = 250
 # When silently baselining a big backlog (first sweep, or a flood), still JUDGE up to this
 # many so the matches show in Results — capped to keep the single judge call fast/accurate.
 _BASELINE_JUDGE_CAP = 60
+# How many listings go to the judge in ONE call. Measured live: at 60 the 14b silently skipped
+# 18 of them. Small models lose track over a long numbered list, and a skipped item costs a whole
+# retry pass anyway, so a smaller batch is both more accurate AND usually cheaper.
+_JUDGE_BATCH = 15
 
 
 # Consecutive zero-listing scraper sweeps before a continuous watch auto-escalates to the
@@ -874,6 +878,8 @@ def _run_agent_continuous_sweep(
             # Lock the search ONLY when we actually drove the site's controls to it. If we fell
             # back to a plain goto, the agent may still need to fix the query itself.
             search_locked = drove,
+            # Let the agent see whether its scrolling is actually producing anything.
+            harvest_size  = lambda: len(harvested),
         )
     except Exception as exc:
         # Process whatever we harvested before the error rather than losing the sweep.
@@ -1453,6 +1459,22 @@ _FAILING_REASON_RE = re.compile(
     r"another (country|state|region)|not rated by judge)\b", re.IGNORECASE)
 
 
+def _rejected_block(watch: Watch) -> str:
+    """The "you already told me no to these" block for the judge prompt, or "" when there are
+    none. Capped and title-only: enough to convey the shape of a rejection without turning every
+    judge call into a wall of history."""
+    try:
+        from web_watcher.storage import rejected_examples
+        titles = rejected_examples(watch.id or watch.name, limit=6)
+    except Exception:
+        return ""
+    if not titles:
+        return ""
+    lines = "\n".join(f"  - {t}" for t in titles)
+    return ("THE USER ALREADY REJECTED THESE for this watch — anything essentially like them "
+            f"is a 2 or lower:\n{lines}\n\n")
+
+
 def _reason_contradicts_pass(rating: int, why: str, threshold: int) -> bool:
     """True when the judge's own words reject the listing while its score passes the gate."""
     return rating >= threshold and bool(_FAILING_REASON_RE.search(why or ""))
@@ -1594,8 +1616,13 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
         """Rate a subset — a list of (orig_index, listing) — in one LLM call. Returns
         {orig_index: (rating, why)}. Prompt is numbered by LOCAL position, mapped back."""
         numbered = "\n".join(_entry(k, l) for k, (_oi, l) in enumerate(subset))
+        # Counter-examples the USER hand-rejected on this watch. Without them the feedback loop
+        # stopped at antikeywords — the judge never learned anything from a rejection, so it
+        # rated the next near-identical listing the same way and the user rejected it again.
+        rejected = _rejected_block(watch)
         user_msg = (
             f"Criteria: {watch.instruction}\n{watch.judgment_prompt or ''}\n\n"
+            f"{rejected}"
             f"Listings:\n{numbered}\n\nRate every listing."
         )
         # Route through the provider layer: role "judge" may be config-routed to a cloud model
@@ -1625,8 +1652,18 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
                 out[subset[k][0]] = (r_, str(item.get("why", "")).strip())
         return out
 
+    def _rate_chunked(pairs: list) -> dict:
+        """Rate in CHUNKS. A 60-item batch had the 14b silently skipping 18 of them (measured
+        live on eBay) — small models lose track over a long numbered list, and every skipped
+        item then needs a retry pass anyway. Smaller batches keep each list inside what the
+        model reliably enumerates, so far fewer items go missing in the first place."""
+        out: dict[int, tuple[int, str]] = {}
+        for i in range(0, len(pairs), _JUDGE_BATCH):
+            out.update(_rate(pairs[i:i + _JUDGE_BATCH]))
+        return out
+
     try:
-        by_idx = _rate(list(enumerate(new_listings)))
+        by_idx = _rate_chunked(list(enumerate(new_listings)))
         # Small models silently skip entries when the batch is long or an item reads as
         # 'obviously' off-topic. Re-judge the omitted ones once so a genuine match is never
         # dropped merely because it went unrated on the first pass.
@@ -1635,7 +1672,7 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             log.info("Rating judge: %d/%d unrated on first pass for %r — re-judging",
                      len(missing), len(new_listings), watch.name)
             try:
-                by_idx.update(_rate(missing))
+                by_idx.update(_rate_chunked(missing))
             except Exception as exc:
                 log.debug("re-judge of unrated items failed for %r: %s", watch.name, exc)
 

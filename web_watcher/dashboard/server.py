@@ -120,9 +120,18 @@ Read what the person MEANS, in the flow of the conversation — not keywords.
   • A correction ("no wait, I meant sailboats only", "not that one") corrects their previous
     QUESTION or reference. Re-answer the corrected question. It is NOT a request to create or
     edit a watch unless they say so.
+      User: "What boats did you find today?" → You: "Nothing today — the watches are off."
+      User: "No wait, I meant sailboats only" →
+        RIGHT: "Nothing on the sailboat side today either — those watches are off too."
+        WRONG: "Got it, let's set up a MacGregor sailboat watch…" (they corrected a question,
+        they didn't ask to build anything)
   • "The second one" / "that one" / "the cheaper one" refer to things YOU just showed or said.
     Use the numbered LISTINGS YOU JUST SHOWED block when present; never claim you lack context
-    for something you said a moment ago.
+    for something you said a moment ago. Once an item is under discussion, later "it"/"that"
+    keeps pointing at the SAME item until the user changes subject:
+      You: "The second one is a 1974 Venture 17, $3,500." User: "Is that the one with the
+      trailer?" → "that" = the Venture 17. Answer from what its listing says (title, details);
+      if it doesn't say, say so and offer to vet it — don't ask which listing they mean.
   • A question is not an instruction: "what did you find today?" wants an answer from real
     data, not an offer to build something new. Propose a NEW watch only when they describe
     something they want tracked that no existing watch covers.
@@ -4469,22 +4478,31 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
             elif scope == "all_mine":
                 suggestions = []
                 mine = _watches_for_owner(cfg, owner)
+                gerund = {"stop": "Stopping", "start": "Starting"}.get(act, act.title() + "ing")
                 # "Kill them all — except X" / "…keep the MacGregor one on". The blanket action
-                # used to steamroll the exception clause and stop the one watch the user asked to
-                # spare. If the message carves out an exception and names a watch, spare it.
-                spared = None
-                if re.search(r"\b(?:keep|except|but (?:leave|keep)|apart from|other than|"
-                             r"spare|leave)\b", latest_user, re.I):
-                    spared = _resolve_watch_name(
-                        _watch_named_in(latest_user, cfg, owner) or "", cfg)
-                acted = [w for w in mine if w.name != spared]
-                watch_actions = [{"action": act, "name": w.name} for w in acted] or None
-                if spared and watch_actions:
-                    message = (f"{act.title()}ing {len(watch_actions)} of your watches — "
-                               f"keeping “{spared}” as it is.")
+                # used to steamroll the exception clause and stop the one watch the user asked
+                # to spare. Spare it when it resolves to exactly one watch; when it's AMBIGUOUS
+                # ("the MacGregor one" with four MacGregor watches), ask — acting on all of
+                # them would do the one thing the user explicitly said not to do.
+                _exc = re.search(r"\b(?:keep|except|but (?:leave|keep)|apart from|other than|"
+                                 r"spare|leave)\b", latest_user, re.I)
+                spared = (_resolve_watch_name(_watch_named_in(latest_user, cfg, owner) or "", cfg)
+                          if _exc else None)
+                if _exc and not spared:
+                    watch_actions = None
+                    past = {"stop": "stopped", "start": "started"}.get(act, act + "ed")
+                    opts = ", ".join(f"“{w.name}”" for w in mine[:8])
+                    message = (f"You want everything {past} except one — but I'm not sure "
+                               f"which one to keep. Which of these should stay as it is? {opts}")
                 else:
-                    message = (f"{act.title()}ing all {len(watch_actions)} of your watches."
-                               if watch_actions else "You don't have any watches yet.")
+                    acted = [w for w in mine if w.name != spared]
+                    watch_actions = [{"action": act, "name": w.name} for w in acted] or None
+                    if spared and watch_actions:
+                        message = (f"{gerund} {len(watch_actions)} of your watches — "
+                                   f"keeping “{spared}” as it is.")
+                    else:
+                        message = (f"{gerund} all {len(watch_actions)} of your watches."
+                                   if watch_actions else "You don't have any watches yet.")
             elif scope == "bare" and not already_named:
                 if is_admin:
                     message = (f"Do you mean {verb} the **whole Watcher** (everything, for everyone), "
@@ -4492,7 +4510,8 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 else:
                     mine = _watches_for_owner(cfg, owner)
                     watch_actions = [{"action": act, "name": w.name} for w in mine] or None
-                    message = (f"{act.title()}ing your {len(watch_actions)} watch(es)."
+                    message = (f"{ {'stop': 'Stopping', 'start': 'Starting'}.get(act, act.title() + 'ing') } "
+                               f"your {len(watch_actions)} watch(es)."
                                if watch_actions else "You don't have any watches yet.")
 
         # WE HOLD THE REAL ROWS, SO THE MODEL DOES NOT GET TO NARRATE THEM. Asked for the

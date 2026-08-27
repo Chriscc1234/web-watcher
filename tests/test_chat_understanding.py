@@ -136,3 +136,13 @@ def test_why_stopwords_keep_the_content_words():
             if w.lower() not in S._WHY_STOPWORDS]
     assert "macgregor" in toks and "bothell" in toks
     assert "reject" not in toks and "watch" not in toks
+
+
+# --------------------------------------------------------------------------
+# The exception clause on a blanket action
+# --------------------------------------------------------------------------
+
+def test_gerunds_are_spelled():
+    """'Stoping all 7 of your watches' went to a real user. Never again."""
+    src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    assert "act.title()}ing" not in src, "a bare act.title()+'ing' gerund survives (Stoping)"

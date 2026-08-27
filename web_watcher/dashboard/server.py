@@ -2327,12 +2327,23 @@ def _recent_shown_block(messages: list, owner: str | None) -> str:
             line = f"  {i}. " + " — ".join(bits)
             if r.get("url"):
                 line += f"\n     {str(r.get('url'))[:200]}"
+            # The deep-read already banked each ad's body — pull a snippet in, so "does it
+            # come with a trailer?" is answerable from context instead of wobbling between
+            # a guess and "I don't have context". Best-effort; titles alone still work.
+            try:
+                from web_watcher.storage import get_listing_by_url
+                row = get_listing_by_url(str(r.get("url") or "")) if r.get("url") else None
+                details = str((row or {}).get("details") or "").strip()
+                if details:
+                    line += f"\n     ad details: {details[:280]}"
+            except Exception:
+                pass
             lines.append(line)
         return ("LISTINGS YOU JUST SHOWED THE USER (numbered exactly as they saw them — "
                 "“the second one” means #2 below):\n" + "\n".join(lines) + "\n"
                 "Answer follow-ups about these items from THIS list — price, location, which "
-                "one is which, links. If a detail isn't here, say what IS known and offer to "
-                "vet the listing rather than claiming you have no context.")
+                "one is which, what the ad says, links. If a detail isn't here, say what IS "
+                "known and offer to vet the listing rather than claiming you have no context.")
     return ""
 
 

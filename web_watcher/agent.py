@@ -427,6 +427,22 @@ def run_agent(
         # ── CAPTCHA gate ────────────────────────────────────────────────────
         if _detect_captcha(page):
             log.warning("CAPTCHA detected on %s", page.url)
+            # FACEBOOK IS EXEMPT FROM SOLVING — always, no exceptions.
+            # fb_safety's whole design is STOP-DON'T-SOLVE, but that was enforced only by
+            # is_checkpoint(), which needs a recognisable checkpoint URL or phrase. A PLAIN
+            # CAPTCHA that matches none of those cues reached the solver instead, and on
+            # Facebook we are LOGGED IN: a defeated challenge is attributed to the user's real
+            # account, and reliably beating a human check is the clearest automation signal
+            # there is. Everywhere else the solver behaves exactly as before; here we stop,
+            # engage the global halt, and let a human decide what happens next.
+            if fb_safety.is_facebook(page.url):
+                log.warning("CAPTCHA on Facebook — NOT attempting it. Halting Facebook activity.")
+                try:
+                    fb_safety.engage_halt("Facebook showed a CAPTCHA / human check")
+                except Exception as exc:
+                    log.error("could not persist the Facebook halt: %s", exc)
+                challenge_blocked = page.url
+                break
             solved = _solve_captcha(page)
             # EITHER WAY, the site just told us we look automated. Record it and rest the host:
             # a challenge we got through still means we were close enough to the line to trip it,
@@ -1146,6 +1162,16 @@ def _solve_captcha(page: Page) -> bool:
       4. Passive wait for self-clearing CAPTCHAs (v3, Turnstile, Cloudflare)
     Returns True when CAPTCHA clears, False if we give up.
     """
+    # Belt and braces: the caller already exempts Facebook, but this function is the ONLY place
+    # that can defeat a human check, so it refuses there itself too. A future caller added
+    # without the guard must not be able to reach the solver on a logged-in Facebook session.
+    try:
+        if fb_safety.is_facebook(getattr(page, "url", "") or ""):
+            log.warning("_solve_captcha called on Facebook — refusing (stop-don't-solve)")
+            return False
+    except Exception:
+        pass
+
     # Simulate blur → focus cycle that DataDome expects before interaction
     _emit_focus_events(page)
     time.sleep(max(0.01, random.gauss(1.2, 0.2)))

@@ -204,3 +204,17 @@ def test_offerup_uuid_listings_are_extracted():
     key = _listing_key("https://offerup.com/item/detail/f9c730b0-02c9-3382-a7b3-5271d033fb79")
     assert key == "offerup:f9c730b0-02c9-3382-a7b3-5271d033fb79"
     assert _listing_key("https://offerup.com/search?q=sailboat") is None
+
+
+# ── the setup budget: stop re-clicking sort/filter, scroll to harvest ─────────────
+# Reproduced live on BOTH craigslist and Facebook: a harvest sweep re-clicked sort controls
+# 7-8 times, KNOWING it had already sorted ("I have already changed the sorting to 'oldest',
+# but need to..."), instead of scrolling to load listings. The agent has no phase model; the
+# budget is the deterministic backstop.
+
+def test_setup_budget_limits_are_sane():
+    from web_watcher.agent import _SETUP_SOFT_LIMIT, _SETUP_HARD_LIMIT
+    # A dropdown legitimately costs two clicks (open, choose), so the soft limit must exceed 2
+    # or it would fire mid-dropdown; the hard limit must be above the soft one.
+    assert _SETUP_SOFT_LIMIT >= 3
+    assert _SETUP_HARD_LIMIT > _SETUP_SOFT_LIMIT

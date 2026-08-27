@@ -91,6 +91,16 @@ _HISTORY_STEPS = 25
 # stopped growing after three scrolls does not start again.
 _FLAT_HARVEST_LIMIT = 3
 
+# SETUP BUDGET. On a harvest sweep the agent's job is to LOAD listings — a sort/filter/category
+# change is a ONE-TIME setup step, then it should scroll. But the agent has no phase model: it
+# re-clicks sort controls indefinitely, KNOWING it already sorted ("I have already changed the
+# sorting to 'oldest', but need to…") and doing it again. Reproduced on both Facebook and
+# craigslist — 7-8 sort clicks, ~3 scrolls. A dropdown legitimately costs two clicks (open,
+# choose), so 3 consecutive non-scroll interactions is the point where it has stopped setting up
+# and started fiddling: from there we steer hard toward scrolling, and force one if it persists.
+_SETUP_SOFT_LIMIT = 3    # after this many non-scroll actions in a row, tell it firmly to scroll
+_SETUP_HARD_LIMIT = 5    # after this many, scroll FOR it and reset — talk is clearly not working
+
 # ---- human-pace timing ----
 ACTION_PAUSE    = (0.4, 1.1)   # pause between agent actions (seconds)
 PAGE_SETTLE     = (0.9, 1.8)   # pause after navigation / page change (seconds)
@@ -390,6 +400,9 @@ def run_agent(
 
     last_harvest = _harvest_count()
     flat_steps = 0
+    # Non-scroll interactions since the last scroll — the "am I still setting up, or fiddling?"
+    # counter. Only meaningful on a harvest sweep (exploration_mode), where scrolling IS the job.
+    setup_streak = 0
 
     # Emit focus events so DataDome sees a normal tab-activation sequence
     _emit_focus_events(page)
@@ -498,6 +511,43 @@ def run_agent(
 
         _kind_by_step[len(history)] = page_kind(page.url)   # branch this action belongs under
         history.append(action)
+
+        # ── SETUP BUDGET (harvest sweeps only) ────────────────────────────────
+        # The job here is to LOAD listings; a sort/filter/category change is a one-time setup
+        # step. The agent, though, re-clicks sort controls having just said it already sorted.
+        # Track non-scroll interactions since the last scroll: past a soft limit, steer hard;
+        # past a hard limit, scroll for it. Opening a LISTING is real progress, not fiddling, so
+        # it resets the streak too. Never applies to 'done'/'remember'/'scroll'.
+        _setup_steer = ""
+        if exploration_mode:
+            if action.action == "scroll":
+                setup_streak = 0
+            elif action.action in ("click", "type", "select", "press"):
+                _opened_listing = (action.action == "click"
+                                   and is_listing_url((action.text or "")) )  # rare; navigate covers most
+                setup_streak = 0 if _opened_listing else setup_streak + 1
+                if setup_streak >= _SETUP_HARD_LIMIT:
+                    log.info("Agent has taken %d setup actions without scrolling — forcing a "
+                             "scroll (setup is done; the job is to load listings)", setup_streak)
+                    try:
+                        page.mouse.wheel(0, 900)
+                        _wait_for_settle(page)
+                    except Exception as exc:
+                        log.debug("forced scroll failed: %s", exc)
+                    action.outcome = ("You kept changing sort/filter controls instead of loading "
+                                      "listings, so I scrolled for you. STOP changing the sort — "
+                                      "it is already set. Use 'scroll' to load more results.")
+                    setup_streak = 0
+                    _harvest()
+                    _human_pause(*ACTION_PAUSE)
+                    continue
+                if setup_streak >= _SETUP_SOFT_LIMIT:
+                    # Appended AFTER the real outcome is computed (below), so we keep the
+                    # navigated/unchanged signal AND add the steer.
+                    _setup_steer = (
+                        f" ⚠ You have taken {setup_streak} setup actions in a row without "
+                        "scrolling. The sort/filter is ALREADY SET — do NOT change it again. Your "
+                        "job now is to SCROLL to load more listings. Use the 'scroll' action.")
 
         # SEARCH LOCK — the caller already drove the site's own search controls to the right
         # results. Wandering off to another search throws that away (and the agent invented URLs
@@ -879,6 +929,10 @@ def run_agent(
                         action.outcome = (action.outcome or "") + f" — the box suggested: {sug}"
             except Exception:
                 pass
+        # Fold in the setup-budget steer now that the real outcome exists (kept the
+        # navigated/unchanged signal, and adds "stop fiddling, scroll").
+        if _setup_steer:
+            action.outcome = (action.outcome or "") + _setup_steer
         log.debug("Action outcome: %s", action.outcome)
 
         # ── Auto-submit: type landed in an input but page didn't move ─────────

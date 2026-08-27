@@ -225,6 +225,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 .thread-row .tr-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .thread-row .tr-count{font-size:11px;color:var(--dim);white-space:nowrap}
 .thread-row .tr-snip{font-size:12px;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* "What was shown to this person" — an oversight block under an assistant turn in the Chats
+   viewer. Deliberately quieter than a real message: it's context, not conversation. */
+.shown-block{align-self:stretch;background:var(--bg);border:1px dashed var(--border);border-radius:8px;padding:8px 10px;margin:-2px 0 2px;font-size:12px}
+.shown-head{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
+.shown-row{display:flex;align-items:baseline;gap:6px;padding:2px 0;color:var(--text)}
+.shown-row .shown-star{color:#f5b301;font-size:11px;white-space:nowrap}
+.shown-row .shown-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shown-row .shown-price{color:var(--dim);white-space:nowrap}
+.shown-more{color:var(--dim);font-size:11px;padding-top:3px}
 .access-card{background:#2a2413;border:1px solid #7a6320;border-radius:8px;padding:11px 13px;margin-bottom:12px}
 .access-card .ac-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .access-card .ac-who{flex:1 1 auto;font-size:13px;min-width:180px}
@@ -2006,7 +2015,38 @@ async function openChatThread(key) {
     const prefix = m.admin ? '🧑‍💼 You: ' : '';
     const div = appendMsg(m.role, prefix + historyText(m.content || ''), 'chats-convo', m.ts || null);
     if (m.admin) div.classList.add('admin-note');
+    // Oversight context: render WHAT this turn actually showed the person (listings, proposed
+    // watches). Without this the admin sees "here are 5 matches" but not the matches themselves.
+    if (m.shown) appendShown(m.shown, 'chats-convo');
   }
+}
+
+// Compact, read-only rendering of what a turn put on screen — for the admin Chats viewer.
+function appendShown(shown, boxId) {
+  const box = document.getElementById(boxId);
+  if (!box || !shown) return;
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const parts = [];
+  for (const r of (shown.listings || [])) {
+    const stars = r.rating ? '★'.repeat(Math.max(0, Math.min(5, r.rating))) : '';
+    const price = r.price ? ` · ${esc(r.price)}` : '';
+    const title = esc(r.title || '(listing)');
+    const link = (r.url || '').startsWith('http')
+      ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">open</a>` : '';
+    parts.push(`<div class="shown-row"><span class="shown-star">${stars}</span>`
+      + `<span class="shown-title">${title}</span><span class="shown-price">${price}</span> ${link}</div>`);
+  }
+  if (shown.more) parts.push(`<div class="shown-more">…and ${shown.more} more shown</div>`);
+  for (const n of (shown.proposed_watches || [])) {
+    parts.push(`<div class="shown-row">🆕 <span class="shown-title">proposed watch: ${esc(n)}</span></div>`);
+  }
+  if (!parts.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'shown-block';
+  wrap.innerHTML = `<div class="shown-head">shown to them</div>` + parts.join('');
+  box.appendChild(wrap);
+  box.scrollTop = box.scrollHeight;
 }
 
 async function sendThreadMessage() {

@@ -2203,6 +2203,36 @@ def _strip_html(text: str) -> str:
     return out
 
 
+def _shown_summary(result: dict) -> dict:
+    """A compact, display-only record of what a turn actually put on screen — the listings and any
+    proposed watch — so the admin Chats viewer can reconstruct the context, not just the prose.
+    Small on purpose (it lives in the saved history): a handful of listings, key fields only."""
+    out: dict = {}
+    listings = result.get("listings")
+    if isinstance(listings, list) and listings:
+        rows = []
+        for r in listings[:8]:
+            if not isinstance(r, dict):
+                continue
+            rows.append({
+                "title":  str(r.get("title") or "")[:120],
+                "price":  str(r.get("price_text") or r.get("price") or "")[:24],
+                "url":    str(r.get("url") or "")[:400],
+                "rating": r.get("rating"),
+            })
+        if rows:
+            out["listings"] = rows
+            if len(listings) > len(rows):
+                out["more"] = len(listings) - len(rows)
+    sugg = (result.get("watch_suggestions")
+            or ([result["watch_suggestion"]] if result.get("watch_suggestion") else []))
+    names = [str(s.get("name") or "").strip() for s in sugg if isinstance(s, dict)]
+    names = [n for n in names if n]
+    if names:
+        out["proposed_watches"] = names[:5]
+    return out
+
+
 def _persist_chat_turn(messages: list, result: dict, owner: str | None) -> None:
     """Save the exchange on EVERY turn that had a user message — including degraded/error turns —
     so a transient model hiccup can't punch a permanent hole in the saved chat. (An older gate only
@@ -2229,7 +2259,16 @@ def _persist_chat_turn(messages: list, result: dict, owner: str | None) -> None:
         user_msg = dict(last)
         user_msg.setdefault("ts", now)
         history.append(user_msg)
-        history.append({"role": "assistant", "content": reply_text, "ts": now})
+        assistant_turn = {"role": "assistant", "content": reply_text, "ts": now}
+        # Record WHAT WAS SHOWN alongside the prose, so the admin's Chats viewer can render the
+        # full context a person saw — not just "here are 5 matches" with the matches gone. Kept in
+        # a SEPARATE display-only field (never in `content`): the model is fed role+content only,
+        # so this can't bloat or pollute the conversation it reads back. Compact by design —
+        # title/price/url/rating per listing, capped — this is an oversight aid, not the store.
+        shown = _shown_summary(result)
+        if shown:
+            assistant_turn["shown"] = shown
+        history.append(assistant_turn)
         _save_watcher_history(history[-200:], owner)
     except Exception as exc:
         log.warning("Watcher chat: could not persist turn: %s", exc)

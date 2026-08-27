@@ -1401,20 +1401,39 @@ def _cross_watch_match(
 # ai-marketplace-monitor's design (their best idea). A listing is a "match" (alertable)
 # when its rating >= the watch's min_rating (default 3).
 _RATING_RUBRIC = (
-    "Rate how well each listing matches the user's criteria on a 1-5 scale:\n"
-    "  1 = No match: the WRONG KIND OF THING. This includes toys/models/diecast/replicas of "
-    "the item, spare PARTS or ACCESSORIES for it, and listings from an unrelated category "
-    "(e.g. furniture when the user wants a vehicle). A $15 'Hot Wheels Silverado', a GPS "
-    "tracker, a bottle of antifreeze, or a dresser are all a 1 for a used-vehicle search. "
-    "Also 1 for obvious spam/scams.\n"
-    "  2 = Weak: right kind of thing but missing essential info (condition, model, key spec) "
-    "or barely relevant.\n"
-    "  3 = Acceptable: matches the basics but with some mismatch or missing detail.\n"
-    "  4 = Good match: clearly meets the criteria with relevant details.\n"
-    "  5 = Great deal: fully matches with excellent condition and/or price.\n"
-    "The actual real item the user wants — not a toy/part/accessory version of it — is the "
-    "ONLY thing that should score 3 or higher."
+    "Rate how well each listing matches the user's criteria on a 1-5 scale.\n"
+    "THE SCORE MEASURES ONE THING: does this listing satisfy what the user ASKED FOR — every "
+    "stated requirement (brand/model, item type, location, price, specs). A listing that is a "
+    "perfectly nice REAL item but fails a stated requirement is NOT a match.\n"
+    "  1 = Wrong KIND of thing entirely: toys/models/diecast/replicas of the item, spare PARTS "
+    "or ACCESSORIES for it, unrelated categories (a dresser for a vehicle search, GOLF CLUBS "
+    "for a sailboat search that shares a brand name), or obvious spam/scams.\n"
+    "  2 = Right kind of thing but FAILS a stated requirement: wrong brand or model (a C&C or "
+    "J30 sailboat when the user asked for a MacGregor), outside the stated area, over the "
+    "stated budget, or missing a required spec (automatic when manual was required).\n"
+    "  3 = Meets every stated requirement, but a detail is unconfirmed (the ad doesn't say).\n"
+    "  4 = Clearly meets EVERY stated requirement with confirming details.\n"
+    "  5 = Meets every stated requirement AND is an unusually good deal or condition.\n"
+    "HARD RULE: if your own reason says the listing fails a requirement — wrong make, outside "
+    "the area, too far, over budget — the rating MUST be 2 or lower. Never write a failing "
+    "reason with a passing score."
 )
+
+
+# Prose that admits the listing FAILS a requirement. The batch judge kept writing reasons like
+# "Not within radius" / "Too far away" and then rating the listing a PASSING 3 — so listings the
+# judge itself had rejected sailed into Results. The score is what gates; this makes a failing
+# reason override a passing score deterministically, whatever the model felt like emitting.
+_FAILING_REASON_RE = re.compile(
+    r"\b(outside|too far|not within|beyond the|over budget|over the (stated |)budget|"
+    r"wrong (make|model|brand|kind|type|category|item)|not a match|no match|"
+    r"does\s?n[o']t match|unrelated|excluded|not the right|different (make|model|brand)|"
+    r"another (country|state|region)|not rated by judge)\b", re.IGNORECASE)
+
+
+def _reason_contradicts_pass(rating: int, why: str, threshold: int) -> bool:
+    """True when the judge's own words reject the listing while its score passes the gate."""
+    return rating >= threshold and bool(_FAILING_REASON_RE.search(why or ""))
 
 
 # How far over a stated budget a listing may be and still come through — the "on the edge" grace
@@ -1603,6 +1622,12 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             # STILL unrated after a retry → treat as a NON-MATCH, not a free pass. Defaulting
             # unrated→keep is exactly how toys/parts/a dresser flooded Results.
             rating, why = by_idx.get(i, (2, "not rated by judge — treated as non-match"))
+            # The judge's own words override its score: "Not within radius" with a passing 3
+            # is a rejection, whatever the number says. Demote deterministically.
+            if _reason_contradicts_pass(rating, why, threshold):
+                log.info("   demoted (reason contradicts score %d): %s — %s",
+                         rating, (l.title or "")[:60], why[:60])
+                rating = threshold - 1
             l.rating = rating
             l.judge_reason = why or getattr(l, "judge_reason", "")
             if rating >= threshold:
@@ -1613,6 +1638,11 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             if getattr(l, "rating", threshold) < threshold:
                 log.info("   rated %d: %s %s — %s", l.rating,
                          (l.title or "(no title)")[:70], l.price, getattr(l, "judge_reason", ""))
+        # PASS 2 — verify each survivor INDIVIDUALLY. The batch call is a cheap screen, but it
+        # judges by local index over a long numbered list, and small models drift: the C&C 25's
+        # verdict arrived carrying the J30's reason. One listing per call cannot misalign, and
+        # it runs only on the few that passed, so the cost is bounded.
+        keep = _verify_kept_listings(keep, watch, cfg, threshold)
         return keep
     except Exception as exc:
         if fail_closed:
@@ -1621,6 +1651,86 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             return []
         log.warning("Rating judge failed for %r (%s) — alerting all new listings", watch.name, exc)
         return new_listings
+
+
+# Per-sweep cap on individual verifications — pass 2 exists to catch the batch judge's mistakes
+# on the handful of listings that PASSED, not to re-judge a flood. Past the cap, the batch
+# verdict stands (logged, so a capped sweep is diagnosable).
+_VERIFY_CAP = 12
+
+
+def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: int) -> list:
+    """Pass 2 of the judge: re-ask about each KEPT listing on its own.
+
+    One listing per call, so a verdict cannot land on the wrong row (the batch pass judges by
+    index over a numbered list, and small models drift — a C&C 25 arrived carrying the J30's
+    reason). The question is also sharper than the batch one: not "rate these 20", but "does
+    THIS listing satisfy THESE criteria" — which is exactly the question the user cares about,
+    asked the way the Vet button asks it.
+
+    Demotes (never promotes): a listing the verifier rejects drops below threshold with the
+    verifier's reason attached; one it confirms keeps its batch rating. On any per-listing error
+    the batch verdict stands — this pass only ever REMOVES false positives, so its failure mode
+    is 'no worse than before'."""
+    if not kept:
+        return kept
+    to_check, over_cap = kept[:_VERIFY_CAP], kept[_VERIFY_CAP:]
+    if over_cap:
+        log.info("Verify pass: %d listing(s) over the cap of %d for %r — batch verdict stands "
+                 "for the overflow", len(over_cap), _VERIFY_CAP, watch.name)
+    confirmed = []
+    for l in to_check:
+        why_ver = ""
+        try:
+            details = (getattr(l, "details", "") or "")[:900]
+            body = f"{l.title or ''} {l.price or ''}"
+            if details:
+                body += f"\nAD DETAILS: {details}"
+            content = llm.chat(
+                [
+                    {"role": "system", "content":
+                        "You verify ONE marketplace listing against a user's criteria. Answer "
+                        "strictly from what the listing says. A listing that fails ANY stated "
+                        "requirement (brand/model, item type, location, price, spec) is NOT a "
+                        "match — being a real, nice example of the general category is not "
+                        "enough. Return ONLY JSON: "
+                        '{"match": true|false, "why": "<10 words or fewer>"}'},
+                    {"role": "user", "content":
+                        f"Criteria: {watch.instruction}\n{watch.judgment_prompt or ''}\n\n"
+                        f"Listing:\n{body}\n\nDoes this listing satisfy the criteria?"},
+                ],
+                role="judge",
+                local_model=cfg.models.effective_council_model,
+                cfg=cfg, format_json=True, cache_system=True, timeout=45.0,
+            )
+            data = json.loads(content)
+            raw_match = data.get("match") if isinstance(data, dict) else None
+            if raw_match is None:
+                # No verdict in the reply at all → INCONCLUSIVE, not a rejection. Only an
+                # explicit false may remove a listing; a malformed reply keeps the batch verdict.
+                confirmed.append(l)
+                continue
+            ok = bool(raw_match)
+            why_ver = str(data.get("why", "")).strip()
+            # The verifier contradicting itself gets the same deterministic rule as the batch.
+            if ok and _FAILING_REASON_RE.search(why_ver):
+                ok = False
+            if not ok:
+                l.rating = threshold - 1
+                l.judge_reason = f"verify: {why_ver or 'does not satisfy the criteria'}"
+                log.info("   verify REMOVED: %s %s — %s",
+                         (l.title or "")[:60], l.price, l.judge_reason[:70])
+                continue
+            if why_ver:
+                l.judge_reason = why_ver
+        except Exception as exc:
+            log.debug("verify pass errored on %r (%s) — batch verdict stands",
+                      (l.title or "")[:50], exc)
+        confirmed.append(l)
+    if len(confirmed) != len(to_check):
+        log.info("Verify pass confirmed %d/%d kept listing(s) for %r",
+                 len(confirmed), len(to_check), watch.name)
+    return confirmed + over_cap
 
 
 def _alert_new_listings(

@@ -214,11 +214,19 @@ def build_search_request(url: str, instruction: str = "") -> SearchRequest:
     price_min, price_max = cl_geo._pull_price_aliases(dict(q))
     zip5 = cl_geo.url_zip(url)
 
-    # craigslist category lives in the path (/search/cta), not a param.
+    # craigslist category: the classic shape carries it in the path (/search/cta), the current
+    # site as a ?cat= param (/search/area/skagit?cat=boo — the shape the hub's own links and our
+    # human-first landings produce). Read BOTH, or a watch stored with a modern URL silently
+    # loses its category — and a lost category is the golf-clubs-in-a-sailboat-watch bug again,
+    # via the extraction side this time. The param wins when both disagree (it's the live one).
     category = None
     if p and "craigslist" in host:
-        m = re.search(r"/search/([a-z]{3})\b", p.path or "")
-        category = m.group(1) if m else None
+        cat_param = _get(("cat",))
+        if cat_param and re.fullmatch(r"[a-z]{3}", cat_param.strip().lower()):
+            category = cat_param.strip().lower()
+        else:
+            m = re.search(r"/search/([a-z]{3})\b", p.path or "")
+            category = m.group(1) if m else None
 
     # Mine the query TEXT for params the model left inline ("tacoma under 5k 98221"), so the
     # terms we type are clean keywords and the stragglers fill any empty structured field.

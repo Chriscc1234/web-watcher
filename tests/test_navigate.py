@@ -226,3 +226,21 @@ def test_category_and_keyword_are_both_applied_not_either_or():
 
     assert applied["categorized"] is True and applied["searched"] is True
     assert [c[0] for c in calls] == ["category", "search"]   # category FIRST
+
+
+def test_category_extracts_from_both_url_shapes_including_for_sale():
+    """The classic path shape (/search/boo) and the modern param shape (?cat=sss — what the hub's
+    own links and human-first landings produce) must BOTH yield the category. A watch that says
+    'look in for sale' (sss) or any other section drives that section, not the default."""
+    from web_watcher import navigate as N
+    assert N.build_search_request(
+        "https://skagit.craigslist.org/search/boo?query=x", "x").category == "boo"
+    assert N.build_search_request(
+        "https://www.craigslist.org/search/area/skagit?cat=sss&query=x", "x").category == "sss"
+    assert N.build_search_request(
+        "https://www.craigslist.org/search/city/anacortes-wa?query=x", "x").category is None
+    # 'for sale' is clickable on the hub (139 category links incl. cat=sss, verified live
+    # 26 Aug 2026), so a for-sale watch passes the drive gate like any other category.
+    req = N.build_search_request(
+        "https://www.craigslist.org/search/area/skagit?cat=sss&query=macgregor", "x")
+    assert N.can_fully_drive(req, N.hints_for("https://craigslist.org")) is True

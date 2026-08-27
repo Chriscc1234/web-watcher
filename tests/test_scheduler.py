@@ -930,3 +930,88 @@ def test_repair_leaves_the_url_alone_when_it_cannot_tell():
     from web_watcher import cl_geo
     u = "https://skagit.craigslist.org/search/mvt?max_price=15000"
     assert cl_geo.repair_craigslist_category(u, "something vague") == u
+
+
+# ── the two-pass judge: contradiction guard + per-listing verify ──────────────────
+# Live failures these pin down: (a) "Not within radius" rated a PASSING 3 → sailed into Results;
+# (b) the C&C 25 carrying the J30's reason (batch index drift) → non-MacGregors rated 4/5.
+
+def test_failing_reason_overrides_passing_score(monkeypatch):
+    from web_watcher.scheduler import _filter_listings_by_judgment
+    import web_watcher.llm as llm_mod
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="MacGregor sailboats within 300 miles", min_rating=3)
+    listings = [_kw_listing(0, "MacGregor 26D Spokane Valley")]
+    monkeypatch.setattr("httpx.Client", _rating_reply([
+        {"i": 0, "r": 3, "why": "Too far away"},        # the exact live contradiction
+    ]))
+    kept = _filter_listings_by_judgment(listings, w, cfg)
+    assert kept == []                                    # prose wins over the score
+    assert listings[0].rating == 2                       # demoted below threshold
+
+
+def test_verify_pass_removes_a_false_positive(monkeypatch):
+    from web_watcher.scheduler import _verify_kept_listings
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="MacGregor sailboats only", min_rating=3)
+    good = _kw_listing(0, "MacGregor 26X Lynden");  good.rating = 4
+    bad  = _kw_listing(1, "J30 Sailboat Anacortes"); bad.rating = 4   # batch judge's mistake
+    replies = {
+        "MacGregor 26X": '{"match": true, "why": "MacGregor, in area"}',
+        "J30":           '{"match": false, "why": "not a MacGregor"}',
+    }
+    def _fake_chat(messages, **kw):
+        user = messages[-1]["content"]
+        for k, v in replies.items():
+            if k in user:
+                return v
+        return '{"match": true, "why": ""}'
+    monkeypatch.setattr(sch.llm, "chat", _fake_chat)
+    kept = _verify_kept_listings([good, bad], w, cfg, threshold=3)
+    assert kept == [good]
+    assert bad.rating == 2 and "not a MacGregor" in bad.judge_reason
+
+
+def test_verify_pass_is_inconclusive_on_malformed_reply(monkeypatch):
+    # A reply with no explicit verdict must KEEP the batch verdict — this pass only ever
+    # removes confirmed false positives; a confused verifier changes nothing.
+    from web_watcher.scheduler import _verify_kept_listings
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="x", min_rating=3)
+    l = _kw_listing(0, "item"); l.rating = 4
+    monkeypatch.setattr(sch.llm, "chat", lambda *a, **k: '{"ratings": []}')   # wrong shape
+    assert _verify_kept_listings([l], w, cfg, threshold=3) == [l]
+    monkeypatch.setattr(sch.llm, "chat", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert _verify_kept_listings([l], w, cfg, threshold=3) == [l]             # error → stands
+
+
+def test_verify_pass_self_contradiction_is_a_rejection(monkeypatch):
+    # match:true with a failing reason ("outside the area") is the same lie the batch told —
+    # the deterministic rule applies to the verifier too.
+    from web_watcher.scheduler import _verify_kept_listings
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="x", min_rating=3)
+    l = _kw_listing(0, "item"); l.rating = 4
+    monkeypatch.setattr(sch.llm, "chat",
+                        lambda *a, **k: '{"match": true, "why": "outside the stated area"}')
+    assert _verify_kept_listings([l], w, cfg, threshold=3) == []
+
+
+def test_verify_pass_caps_per_sweep(monkeypatch):
+    from web_watcher.scheduler import _verify_kept_listings, _VERIFY_CAP
+    import web_watcher.scheduler as sch
+    cfg = AppConfig.model_validate({})
+    w = _cont_watch(judgment_prompt="x", min_rating=3)
+    n_calls = {"n": 0}
+    def _count(*a, **k):
+        n_calls["n"] += 1
+        return '{"match": true, "why": "ok"}'
+    monkeypatch.setattr(sch.llm, "chat", _count)
+    listings = [_kw_listing(i, f"item {i}") for i in range(_VERIFY_CAP + 5)]
+    for l in listings: l.rating = 4
+    kept = _verify_kept_listings(listings, w, cfg, threshold=3)
+    assert len(kept) == len(listings)            # overflow keeps the batch verdict
+    assert n_calls["n"] == _VERIFY_CAP           # but is never re-judged

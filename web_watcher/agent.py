@@ -308,6 +308,9 @@ class AgentResult:
     # Set to the URL when a challenge we could NOT clear ended the run. The caller uses this to
     # tell the user (they can clear it by hand) instead of silently reporting an empty sweep.
     challenge_blocked: Optional[str]     = None
+    # Struggle counters, for the sweep-issue log (the caller has the watch context we don't).
+    stuck_count:    int                  = 0    # times the get-unstuck council was convened
+    forced_scrolls: int                  = 0    # times the setup budget had to scroll for it
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +406,8 @@ def run_agent(
     # Non-scroll interactions since the last scroll — the "am I still setting up, or fiddling?"
     # counter. Only meaningful on a harvest sweep (exploration_mode), where scrolling IS the job.
     setup_streak = 0
+    stuck_count = 0      # ↑ each get-unstuck council; surfaced on AgentResult for the issue log
+    forced_scrolls = 0   # ↑ each setup-budget forced scroll
 
     # Emit focus events so DataDome sees a normal tab-activation sequence
     _emit_focus_events(page)
@@ -527,6 +532,7 @@ def run_agent(
                                    and is_listing_url((action.text or "")) )  # rare; navigate covers most
                 setup_streak = 0 if _opened_listing else setup_streak + 1
                 if setup_streak >= _SETUP_HARD_LIMIT:
+                    forced_scrolls += 1
                     log.info("Agent has taken %d setup actions without scrolling — forcing a "
                              "scroll (setup is done; the job is to load listings)", setup_streak)
                     try:
@@ -820,6 +826,7 @@ def run_agent(
                     _human_pause(*ACTION_PAUSE)
                     continue
 
+            stuck_count += 1
             log.warning(
                 "Agent stuck (%dx same action: %s) — running get-unstuck pass",
                 consecutive_same, action.action,
@@ -1006,6 +1013,8 @@ def run_agent(
         history     = history,
         scratchpad  = scratchpad,
         challenge_blocked = challenge_blocked,
+        stuck_count = stuck_count,
+        forced_scrolls = forced_scrolls,
     )
 
 

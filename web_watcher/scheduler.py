@@ -509,6 +509,11 @@ def _execute_continuous_watch(
                                "likely renders listings with JavaScript; switching to the AI "
                                "agent for this watch")
                         log.warning("Continuous watch %r: %s", watch_name, msg)
+                        try:
+                            from web_watcher import issues
+                            issues.record_issue("blind_escalation", watch_name, msg)
+                        except Exception:
+                            pass
                         save_run(RunRecord(watch_name, datetime.now(timezone.utc).isoformat(),
                                            found=False, summary=f"auto-switched to AI agent ({msg})",
                                            perception_mode_used="continuous"), db_path)
@@ -827,6 +832,12 @@ def _run_agent_continuous_sweep(
                     sweep_index, plan["start_url"], exc)
         _save_error(watch.name, run_ts, f"navigation: {exc}", db_path,
                     perception_mode="continuous-agent")
+        try:
+            from web_watcher import issues
+            issues.record_issue("nav_failed", watch.name,
+                                f"could not load {plan['start_url'][:80]}: {type(exc).__name__}")
+        except Exception:
+            pass
         return
 
     dismiss_popups(page)
@@ -916,6 +927,9 @@ def _run_agent_continuous_sweep(
                 f"If you want it back sooner, open it yourself, clear the check, then say "
                 f"“resume {host}”.",
                 cfg.notifications, html=True)
+            from web_watcher import issues
+            issues.record_issue("challenge", watch.name,
+                                f"{host} showed a human check we couldn't clear — resting {mins}m")
         except Exception as exc:
             log.debug("could not send the challenge alert: %s", exc)
 
@@ -928,6 +942,25 @@ def _run_agent_continuous_sweep(
     listings = list(harvested.values())
     log.info("Continuous agent sweep %d for %r: harvested %d unique listing(s) while browsing",
              sweep_index, watch.name, len(listings))
+
+    # Record how this sweep STRUGGLED, if it did — one aggregated place to see recurring trouble
+    # per watch, instead of it scrolling past in the raw log. Best-effort; never breaks a sweep.
+    try:
+        from web_watcher import issues
+        sc = getattr(_agent_result, "stuck_count", 0) or 0
+        fs = getattr(_agent_result, "forced_scrolls", 0) or 0
+        if not listings:
+            issues.record_issue("no_listings", watch.name,
+                                "sweep completed but harvested nothing (blind extractor or empty feed)")
+        if sc:
+            issues.record_issue("stuck", watch.name,
+                                f"agent hit the get-unstuck council {sc}× this sweep")
+        if fs:
+            issues.record_issue("forced_scroll", watch.name,
+                                f"setup budget scrolled for the agent {fs}× (it kept re-fiddling controls)")
+    except Exception as exc:
+        log.debug("could not record sweep struggle: %s", exc)
+
     _process_sweep_listings(watch, cfg, db_path, sweep_index, listings, run_ts,
                             mode_label="continuous-agent",
                             page=page, fetch_bodies=bool(watch.judgment_prompt),
@@ -1791,6 +1824,13 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
                 l.judge_reason = f"verify: {why_ver or 'does not satisfy the criteria'}"
                 log.info("   verify REMOVED: %s %s — %s",
                          (l.title or "")[:60], l.price, l.judge_reason[:70])
+                try:
+                    from web_watcher import issues
+                    issues.record_issue("false_positive", watch.name,
+                                        f"batch judge wrongly kept {(l.title or '')[:60]!r} — "
+                                        f"verify caught it: {why_ver[:80]}")
+                except Exception:
+                    pass
                 continue
             if why_ver:
                 l.judge_reason = why_ver

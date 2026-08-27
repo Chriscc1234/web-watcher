@@ -930,6 +930,15 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "budget": llm.budget_state(_load_cfg()),
                 "recent": llm.escalations(max(1, min(limit, 200)))}
 
+    @app.get("/api/sweep/issues")
+    def sweep_issues(limit: int = 100):
+        """What has gone WRONG while watching — the browsing/judging counterpart to the cloud
+        escalation log. Aggregated by kind and by watch so a recurring problem (a watch that keeps
+        getting stuck, a site that keeps challenging us) is visible instead of scrolled past."""
+        from web_watcher import issues
+        return {"summary": issues.issue_summary(),
+                "recent": issues.issues(max(1, min(limit, 200)))}
+
     # ------------------------------------------------------------------
     # Site drill — can we actually use this site?
     # ------------------------------------------------------------------
@@ -3895,8 +3904,27 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
             content = llm.chat(msgs, role="extract", local_model=model, cfg=cfg,
                                format_json=True, timeout=60.0, force_local=True)
         else:
+            # Extraction is the app's most consequential call, and it had the WEAKEST check —
+            # the default validator only asks "is this valid JSON?", so a local model that
+            # returned an EMPTY {} on a turn where the assistant just PROMISED to set up a watch
+            # sailed through and never escalated. The result: the assistant says "setting up your
+            # Miata watch" and no watch is created. This validator ties the extraction to the
+            # reply: if the reply committed to a create/change, the extraction MUST carry an
+            # action; otherwise (a no-op turn) an empty result is correct and stays local.
+            def _extract_usable(text: str) -> bool:
+                try:
+                    d = json.loads(llm._extract_json_text(text))
+                except Exception:
+                    return False
+                if not isinstance(d, dict):
+                    return False
+                if _reply_commits_to_action(reply or ""):
+                    return bool(d.get("watch_suggestion") or d.get("watch_suggestions")
+                                or d.get("watch_actions"))
+                return True
             content = llm.chat_smart(msgs, role="extract", local_model=model, cfg=cfg,
-                                     format_json=True, timeout=60.0).get("text", "")
+                                     format_json=True, timeout=60.0,
+                                     validate=_extract_usable).get("text", "")
         data = _parse_chat_response(content)
     except Exception as exc:
         log.warning("action-extraction failed: %s", exc)

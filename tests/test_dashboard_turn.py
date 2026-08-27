@@ -638,3 +638,57 @@ def test_watcher_health_line_flags_dry_watch(tmp_path, monkeypatch):
     ctx = S._build_watches_context(cfg, mgr)
     assert "0 matched of 30 seen" in ctx
     assert "DIAGNOSIS" in ctx
+
+
+# ── extract escalation validator: tie the extraction to the reply ─────────────────
+# Extraction is the app's most consequential call ("a wrong one is a watch that quietly finds
+# nothing for a week") but it had the WEAKEST check — the default validator only asked "is this
+# valid JSON?". A local model that returned {} on a turn where the assistant PROMISED to set up a
+# watch passed, and no watch was created. The validator now requires an action when the reply
+# committed to one.
+
+def test_extract_validator_rejects_empty_when_the_reply_promised_an_action():
+    from web_watcher.dashboard import server as S
+    # Sanity: the reply-commit detector recognises a commitment.
+    assert S._reply_commits_to_action("Setting up a Miata watch under $8k near Anacortes now.")
+
+    # Simulate the validator's logic (the closure lives inside _extract_watch_action).
+    import json
+    from web_watcher import llm
+    reply = "Setting up a Miata watch under $8k near Anacortes now."
+
+    def _extract_usable(text: str) -> bool:
+        try:
+            d = json.loads(llm._extract_json_text(text))
+        except Exception:
+            return False
+        if not isinstance(d, dict):
+            return False
+        if S._reply_commits_to_action(reply):
+            return bool(d.get("watch_suggestion") or d.get("watch_suggestions")
+                        or d.get("watch_actions"))
+        return True
+
+    assert _extract_usable('{}') is False                       # promised, delivered nothing → escalate
+    assert _extract_usable('{"watch_suggestion": {"urls": ["https://x"]}}') is True
+
+
+def test_extract_validator_accepts_empty_on_a_no_action_turn():
+    from web_watcher.dashboard import server as S
+    import json
+    from web_watcher import llm
+    reply = "You have three watches running."             # no commitment to a change
+
+    def _extract_usable(text: str) -> bool:
+        try:
+            d = json.loads(llm._extract_json_text(text))
+        except Exception:
+            return False
+        if not isinstance(d, dict):
+            return False
+        if S._reply_commits_to_action(reply):
+            return bool(d.get("watch_suggestion") or d.get("watch_suggestions")
+                        or d.get("watch_actions"))
+        return True
+
+    assert _extract_usable('{}') is True                  # correctly-empty → stay local, do not pay

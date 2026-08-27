@@ -61,9 +61,11 @@ _HEARTBEAT_EVERY_S = 12 * 3600    # default quiet-period before a check-in (conf
 _HEARTBEAT_SCAN_S  = 20 * 60      # how often the loop evaluates whether one is due
 _VET_TIMEOUT       = 180.0        # how long to wait for a Deep Inspect verdict before saying so
 _TYPING_REFRESH_S  = 4.0          # re-send "typing" this often (Telegram expires it after ~5s)
-_SLOW_TURN_S       = 20.0         # a normal local turn already takes ~12s, so nudge only well past
-                                  # that — #1 at ~20s (genuinely slow), #2 at ~45s (rare) — else the
-                                  # "hang on" lands on top of the answer.
+_SLOW_TURN_S       = 35.0         # MEASURED: real model turns run ~12–24s, so a nudge at 20s landed
+                                  # ~4s before the answer — pointless noise right as the reply
+                                  # arrived. The typing indicator already covers the whole wait; the
+                                  # nudge is only for a turn that is genuinely DRAGGING, well past
+                                  # the normal range. #1 at 35s, #2 at 60s. Rare by design.
 _TOP_COOLDOWN_S    = 25.0         # ignore a second "Show top N" tap within this long (a burst takes a bit)
 _CHAT_CARDS_MAX    = 5            # a chat lookup of this many or fewer is shown as rich cards, not a list
 
@@ -424,7 +426,7 @@ class TelegramBridge:
             # reassurance never reads the same twice.
             with self._typing_until_sent(to, slow_nudges=[
                     (_SLOW_TURN_S, random.choice(_THINKING_NUDGES)),
-                    (45.0, random.choice(_STILL_WORKING_NUDGES))]):
+                    (60.0, random.choice(_STILL_WORKING_NUDGES))]):
                 result = self._ask_watcher(text, owner, sender_name)
         except Exception as exc:
             log.warning("Telegram: assistant turn failed: %s", exc)

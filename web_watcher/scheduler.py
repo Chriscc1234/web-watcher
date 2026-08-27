@@ -597,7 +597,19 @@ def _open_continuous_browser(old: Optional["BrowserSession"], watch: Watch, cfg:
         record_video_dir = rec_dir,
     )
     session.__enter__()
-    page = session.new_page()
+    # A PERSISTENT context opens with its own about:blank page. Calling new_page() here added a
+    # SECOND tab beside it, so every login-profile sweep ran with a stray blank tab sitting next
+    # to the real one — visible to the user, and it shows up as a 0-byte .webm in the recordings
+    # (which is how it was finally pinned down). Reuse the context's own page when there is one.
+    # The same fix already landed in the Connect Facebook flow; this is the sweep path.
+    page = None
+    try:
+        existing = [p for p in (session.context.pages if session.context else []) if not p.is_closed()]
+        page = existing[0] if existing else None
+    except Exception:
+        page = None
+    if page is None:
+        page = session.new_page()
     return session, page
 
 

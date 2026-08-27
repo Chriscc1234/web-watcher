@@ -445,6 +445,7 @@ class BrowserSession:
         inject_scripts: bool | None = None,
         clean_launch:   bool | None = None,
         spoof_ua:       bool | None = None,
+        record_video_dir: str | Path | None = None,
     ) -> None:
         self._headless = headless
         # `inject_patches` USED TO MEAN THREE UNRELATED THINGS AT ONCE — whether to add init
@@ -469,6 +470,12 @@ class BrowserSession:
         # from location (OfferUp, store locators) show the WATCH's area, not a default
         # (a fresh automated browser has no location → OfferUp was serving Florida junk).
         self._geolocation = geolocation
+        # Record the session to video for LATER REVIEW. Playwright writes one .webm per page,
+        # finalised when the context closes. Off by default (it costs disk and a little CPU);
+        # switched on for supervised runs on a site where we want a record of exactly what the
+        # agent did — Facebook above all, where "what did it actually click?" is the question
+        # that matters and a log line is a poor substitute for seeing it.
+        self._record_video_dir = Path(record_video_dir) if record_video_dir else None
         # NOTE: `stealth` is deliberately unused. The fingerprint patches (webdriver/UA/cores/
         # memory/screen) are applied to EVERY session — turning them off has no user benefit and
         # a bare Playwright fingerprint gets instantly flagged. What the Settings "stealth" flag
@@ -533,6 +540,12 @@ class BrowserSession:
         if self._spoof_ua:
             major = self._ua_major()
             ctx_kwargs.update(self._ua_headers(major))
+        if self._record_video_dir:
+            self._record_video_dir.mkdir(parents=True, exist_ok=True)
+            ctx_kwargs["record_video_dir"] = str(self._record_video_dir)
+            # A fixed recording size keeps the file sane and the playback steady; without it
+            # Playwright follows the (maximised, variable) window.
+            ctx_kwargs["record_video_size"] = {"width": 1280, "height": 720}
         # Viewport, geolocation and permissions below apply in EVERY mode. They used to be
         # skipped along with the UA on the hands-off path, which silently dropped the watch's
         # location — the exact defect that had OfferUp serving Florida results.
@@ -751,6 +764,43 @@ class BrowserSession:
             ctx_kwargs.pop("storage_state", None)
             self._context = self._browser.new_context(**ctx_kwargs)
 
+    _MAX_RECORDINGS = 20   # keep the newest N .webm per watch; prune the rest so disk can't run away
+
+    def _finalize_recordings(self, videos) -> None:
+        """Rename this session's videos to a sortable, human name and prune old ones.
+
+        Playwright names each file by an internal hash; after the context closes we move it to
+        <recordings>/<YYYYmmdd-HHMMSS>-<n>.webm so a run is findable by when it happened. Then we
+        keep only the newest _MAX_RECORDINGS in the folder — a supervised debugging aid should not
+        silently fill the disk over weeks of sweeps. Best-effort throughout; a rename that fails
+        just leaves the original file in place."""
+        import time as _t
+        d = self._record_video_dir
+        try:
+            stamp = _t.strftime("%Y%m%d-%H%M%S")
+            for i, v in enumerate(videos or []):
+                try:
+                    src = Path(v.path())
+                except Exception:
+                    continue
+                if not src.exists():
+                    continue
+                dst = d / (f"{stamp}.webm" if i == 0 else f"{stamp}-{i+1}.webm")
+                try:
+                    src.replace(dst)
+                    log.info("Saved session recording: %s (%d KB)", dst.name, dst.stat().st_size // 1024)
+                except Exception as exc:
+                    log.debug("could not rename recording %s: %s", src.name, exc)
+            # Prune: newest _MAX_RECORDINGS survive.
+            webms = sorted(d.glob("*.webm"), key=lambda f: f.stat().st_mtime, reverse=True)
+            for old in webms[self._MAX_RECORDINGS:]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except Exception as exc:
+            log.debug("recording finalisation failed: %s", exc)
+
     def __exit__(self, *_) -> None:
         if self._context:
             # Persistent mode: the profile dir on disk IS the source of truth, so
@@ -773,10 +823,24 @@ class BrowserSession:
                         log.debug("Browser state saved to %s", _BROWSER_STATE)
                 except Exception as exc:
                     log.warning("Could not save browser state: %s", exc)
+            # Playwright finalises the .webm on context close, so grab each page's video path
+            # BEFORE closing, then rename the opaque hashes to a timestamped, watch-legible name
+            # once the files exist. This is what makes "the 09:05 Facebook run" findable later.
+            _video_paths = []
+            if self._record_video_dir:
+                try:
+                    for pg in self._context.pages:
+                        v = getattr(pg, "video", None)
+                        if v is not None:
+                            _video_paths.append(v)
+                except Exception as exc:
+                    log.debug("could not enumerate videos: %s", exc)
             try:
                 self._context.close()
             except Exception as exc:
                 log.debug("Context close failed: %s", exc)
+            if self._record_video_dir:
+                self._finalize_recordings(_video_paths)
         if self._browser:
             self._browser.close()
         if self._pw:

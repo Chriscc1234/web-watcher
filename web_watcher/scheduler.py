@@ -570,6 +570,17 @@ def _open_continuous_browser(old: Optional["BrowserSession"], watch: Watch, cfg:
     is one stable window instead of flickering open/closed each sweep.
     """
     _close_continuous_browser(old)
+    # RECORD the session when the watch asks for it. Written as one .webm per page under
+    # data/recordings/<watch>/, finalised when the session closes. Off unless requested: it is
+    # for supervised runs where "what did the agent actually click?" needs an answer better than
+    # a log line — Facebook above all, where the account is the thing at risk and the user is
+    # not necessarily at the screen.
+    rec_dir = None
+    if getattr(watch, "record_video", False):
+        from web_watcher import paths
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", watch.name)[:60]
+        rec_dir = paths.data_dir() / "recordings" / safe
+        log.info("Recording this watch's browser to %s", rec_dir)
     session = BrowserSession(
         headless    = cfg.browser.headless,
         stealth     = cfg.browser.stealth,
@@ -577,6 +588,7 @@ def _open_continuous_browser(old: Optional["BrowserSession"], watch: Watch, cfg:
         profile_dir = cfg.browser.profile_dir,
         show_cursor = cfg.browser.show_agent_cursor,
         geolocation = _watch_geolocation(watch),
+        record_video_dir = rec_dir,
     )
     session.__enter__()
     page = session.new_page()

@@ -120,3 +120,26 @@ def test_notification_api_is_never_removed():
     instead of rendering — a functional break, not just a fingerprint issue."""
     from web_watcher.browser import _STEALTH_ARGS
     assert not any("disable-notifications" in a for a in _STEALTH_ARGS)
+
+
+# ── session video recording (supervised-run review aid) ──────────────────────────
+
+def test_recording_is_off_by_default_and_opt_in():
+    from web_watcher.browser import BrowserSession
+    assert BrowserSession(headless=True)._record_video_dir is None
+    s = BrowserSession(headless=True, record_video_dir="/tmp/x")
+    assert s._record_video_dir is not None
+
+
+def test_record_video_is_a_watch_field_defaulting_off():
+    from web_watcher.config import Watch
+    w = Watch(name="w", urls=["https://x"], instruction="x", interval_minutes=30)
+    assert w.record_video is False
+    w2 = Watch(name="w", urls=["https://x"], instruction="x", interval_minutes=30,
+               record_video=True)
+    assert w2.record_video is True
+
+
+def test_recordings_are_capped():
+    from web_watcher.browser import BrowserSession
+    assert BrowserSession._MAX_RECORDINGS <= 50   # a debug aid must not fill the disk

@@ -242,6 +242,12 @@ class Watch(BaseModel):
     # Use the persistent login browser profile (for sites that require sign-in, e.g. Facebook)
     use_login_profile: bool = False
 
+    # Record this watch's browser session to video (one .webm per page, under
+    # data/recordings/<watch>/). Off by default — it costs disk and a little CPU. Meant for
+    # SUPERVISED runs on a site where the account is what's at risk and you want to review
+    # exactly what the agent did afterwards, rather than inferring it from log lines.
+    record_video: bool = False
+
     # ── Goal watch (monitor a CONDITION, not listings) ────────────────────────
     # goal_kind "" = a normal listings watch (everything above). "restock" = watch a specific
     # product page (urls[0]) for a size/variant coming back IN STOCK, and alert on the flip.

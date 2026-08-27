@@ -109,3 +109,32 @@ def test_hands_off_mode_uses_vanilla_launch_flags():
     normal = BrowserSession(headless=False, persistent=True)._launch_args()
     assert any("IsolateOrigins" in a for a in normal)
     assert any("AutomationControlled" in a for a in normal)
+
+
+# ── the User-Agent must not lie about the engine ──────────────────────────────────
+# The persistent path launches the user's INSTALLED Chrome but advertised a hardcoded
+# constant: Chrome 124 from an actual Chrome 151 — ~2 years and 27 majors adrift. Facebook
+# handed that stale UA a legacy bundle and the two-factor page rendered blank.
+
+def test_hands_off_sends_no_user_agent_override():
+    from web_watcher.browser import BrowserSession
+    kw = BrowserSession(headless=False, persistent=True,
+                        inject_patches=False)._build_ctx_kwargs()
+    assert "user_agent" not in kw              # the real Chrome speaks for itself
+    assert "extra_http_headers" not in kw      # ...including its own Sec-CH-UA
+
+
+def test_normal_sessions_still_get_a_consistent_ua():
+    from web_watcher.browser import BrowserSession
+    kw = BrowserSession(headless=False, persistent=True)._build_ctx_kwargs()
+    assert "Chrome/" in kw["user_agent"]
+    major = kw["user_agent"].split("Chrome/")[1].split(".")[0]
+    # The UA major and the Sec-CH-UA major must agree — a mismatch is its own tell.
+    assert f'"Google Chrome";v="{major}"' in kw["extra_http_headers"]["Sec-CH-UA"]
+
+
+def test_installed_chrome_version_is_read_or_falls_back_safely():
+    from web_watcher.browser import _installed_chrome_version
+    import re as _re
+    v = _installed_chrome_version()
+    assert v == "" or _re.fullmatch(r"\d+(\.\d+){1,3}", v)   # never garbage

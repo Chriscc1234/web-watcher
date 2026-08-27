@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +76,49 @@ SCREENSHOT_TIMEOUT = 15_000
 # overrides this with the ACTUAL bundled Chromium version so the UA never goes stale and
 # mismatches the engine — a classic fingerprint tell we were previously guilty of.
 _DEFAULT_CHROME_FULL = "124.0.6367.243"
+
+
+def _installed_chrome_version() -> str:
+    """The REAL version of the Chrome we're about to drive, or "" if it can't be read.
+
+    The persistent path launches the user's INSTALLED Chrome but used to advertise the stale
+    constant above — 124 from an actual 151 on this machine, ~2 years and 27 majors adrift. A UA
+    that disagrees with the engine is both a fingerprint tell and a functional hazard: sites
+    feature-gate on it, and Facebook handed that UA a legacy bundle that rendered as a blank page.
+    Read once per process; a failure just falls back to the constant."""
+    global _INSTALLED_CHROME_CACHE
+    if _INSTALLED_CHROME_CACHE is not None:
+        return _INSTALLED_CHROME_CACHE
+    version = ""
+    try:
+        import subprocess, os as _os
+        for base in (_os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                     _os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                     _os.environ.get("LOCALAPPDATA", "")):
+            if not base:
+                continue
+            exe = Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
+            if not exe.exists():
+                continue
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Item '{exe}').VersionInfo.ProductVersion"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            cand = (out.stdout or "").strip()
+            if re.fullmatch(r"\d+(\.\d+){1,3}", cand):
+                version = cand
+                break
+    except Exception as exc:
+        log.debug("could not read the installed Chrome version: %s", exc)
+    _INSTALLED_CHROME_CACHE = version
+    if version:
+        log.info("Detected installed Chrome %s (UA will match the real engine)", version)
+    return version
+
+
+_INSTALLED_CHROME_CACHE: str | None = None
 
 # A small pool of real, common desktop viewport sizes. Using a FIXED 1920x1080 every
 # session is itself a (weak) signal; rotating across realistic sizes is more human.
@@ -389,8 +433,19 @@ class BrowserSession:
         """Context options shared by ephemeral and persistent launch paths. Uses a UA
         matched to the ACTUAL bundled Chromium version (set in _enter_ephemeral) and a
         per-session randomized viewport so the fingerprint isn't a fixed constant."""
+        ctx_kwargs: dict = {"locale": "en-US"}
+        # NO UA OVERRIDE when a person is driving. This window runs the user's REAL Chrome,
+        # which already sends a correct, current User-Agent — replacing it with ours could only
+        # ever make it wrong, and it was: the persistent path never updated _chrome_full, so we
+        # announced Chrome 124 from an actual Chrome 151 (measured on this machine). Facebook
+        # served that stale UA a legacy bundle and the two-factor page rendered as a blank
+        # screen with a lone Meta logo. Let the browser speak for itself.
+        if not self._inject_patches:
+            if not self._headless:
+                ctx_kwargs["no_viewport"] = True
+            return ctx_kwargs
         major = (self._chrome_full.split(".")[0] or "124")
-        ctx_kwargs: dict = {
+        ctx_kwargs = {
             "locale": "en-US",
             # Real Windows Chrome UA whose version tracks the engine we're actually running,
             # so DataDome's UA/engine and platform cross-checks line up.
@@ -482,6 +537,11 @@ class BrowserSession:
             )
         self._profile_lock_held = True
         self._profile_dir.mkdir(parents=True, exist_ok=True)
+        # Match the UA to the Chrome we're actually launching. Without this the persistent path
+        # kept advertising the stale module constant while driving a far newer browser.
+        real = _installed_chrome_version()
+        if real:
+            self._chrome_full = real
         ctx_kwargs = self._build_ctx_kwargs()
         last_exc: Exception | None = None
         for channel in ("chrome", "msedge", None):

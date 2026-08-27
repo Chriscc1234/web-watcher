@@ -786,11 +786,26 @@ def _run_agent_continuous_sweep(
             return True
         return False
 
+    drove = False        # bound before the try so the run_agent call below can always read it
     try:
-        # Sometimes land on the homepage first (like a person) before the deep search URL,
-        # so we're not always teleporting straight to a results page — a subtle bot tell.
-        maybe_warm_homepage(page, plan["start_url"])
-        page.goto(plan["start_url"], timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+        # HUMAN-FIRST, same as the scraper path. This used to be warm-the-homepage-then-teleport:
+        # visit the front page 40% of the time, wait a second, then goto the deep parametric URL
+        # anyway — which is theatre, not navigation. It never touched the site's own search box,
+        # so every agent sweep still announced itself by materialising on a deep results URL.
+        # _human_first_navigate drives the real controls (search box, zip, distance) and is gated
+        # by can_fully_drive, so a location or price is never silently dropped; when it can't
+        # fully drive the site we fall back to the old warm+goto path unchanged.
+        if cfg.browser.stealth:
+            try:
+                drove = _human_first_navigate(page, plan["start_url"], watch)
+            except Exception as exc:
+                log.debug("agent sweep: human-first navigation errored, falling back: %s", exc)
+        if drove:
+            log.info("Continuous agent sweep %d for %r: drove the site's own search controls "
+                     "(human-first) → %s", sweep_index, watch.name, page.url[:100])
+        else:
+            maybe_warm_homepage(page, plan["start_url"])
+            page.goto(plan["start_url"], timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
     except Exception as exc:
         log.warning("Continuous agent sweep %d: navigation failed for %s: %s",
                     sweep_index, plan["start_url"], exc)
@@ -855,6 +870,9 @@ def _run_agent_continuous_sweep(
             on_step       = _harvest,
             should_stop   = _should_stop,
             exploration_mode = True,
+            # Lock the search ONLY when we actually drove the site's controls to it. If we fell
+            # back to a plain goto, the agent may still need to fix the query itself.
+            search_locked = drove,
         )
     except Exception as exc:
         # Process whatever we harvested before the error rather than losing the sweep.

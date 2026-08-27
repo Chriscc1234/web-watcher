@@ -70,6 +70,22 @@ from web_watcher.llm import gpu_slot as _gpu_slot
 # size"). Give the vision calls explicit headroom so they don't fail on big monitors.
 _VISION_NUM_CTX = 8192
 
+# The DECISION call's context window. This used to be unset, which means Ollama's default of
+# 4096 — and Ollama does not error on overflow, it silently truncates FROM THE FRONT, i.e. it
+# eats the system prompt (the action spec and the rules) first. The agent's prompt carries the
+# system spec + a vision description + ~1500 chars of page text + up to 60 labelled elements +
+# the scratchpad + the action history, which comfortably exceeds 4096: the agent was routinely
+# deciding with its own instructions cut off, which is why its 'thought' came back empty 799
+# times in one session and why it read as unstable. qwen2.5:14b handles 32k; 16k leaves plenty
+# of headroom on a 16GB card (the 9GB model + KV cache) while giving the history room to grow.
+_AGENT_NUM_CTX = 16_384
+
+# How many past steps the agent is shown. Ten was a budget imposed by the 4096 window, not a
+# considered choice — with max_steps=15 the agent literally could not see the start of its own
+# run, so it re-tried things it had already ruled out. See also _tried_ledger, which summarises
+# the WHOLE run per control regardless of this window.
+_HISTORY_STEPS = 25
+
 # ---- human-pace timing ----
 ACTION_PAUSE    = (0.4, 1.1)   # pause between agent actions (seconds)
 PAGE_SETTLE     = (0.9, 1.8)   # pause after navigation / page change (seconds)
@@ -277,6 +293,7 @@ def run_agent(
     on_step:       Optional[Callable[[Page], None]] = None,
     should_stop:   Optional[Callable[[Page], bool]] = None,
     exploration_mode: bool = False,
+    search_locked: bool = False,
 ) -> AgentResult:
     """
     Run the agent loop on an already-loaded page.
@@ -296,6 +313,13 @@ def run_agent(
     True the loop ends immediately. The continuous watch uses it to bail the instant
     the page leaves the target site or hits a login wall — so the agent never
     interacts with a login form (it must never enter credentials) or wanders off-site.
+
+    search_locked: the caller already established the correct search results (by driving the
+    site's own search box, zip and distance). The agent may read them, scroll, page, and open
+    individual listings — but NOT navigate to some other search. Without this the agent threw
+    away a precise regional query and re-navigated to a URL it invented
+    (www.craigslist.org/search/city/anacortes-wa), which dropped the region AND the category and
+    returned golf clubs for a MacGregor SAILBOAT watch. Opening a listing stays allowed.
     """
     history:        list[AgentAction] = []
     scratchpad:     dict[str, str]    = {}
@@ -307,6 +331,16 @@ def run_agent(
     page_context:     str              = ""   # vision description, refreshed on path change
     last_vision_path: str              = ""   # netloc+path at which page_context was captured
     start_url:        str              = page.url  # used to detect premature done
+    # What EARLIER sweeps learned about this site, as a tree of {page_kind: {control: effect}}.
+    # Read once per run and merged back at the end, so a dead control discovered on sweep 1 is
+    # still known on sweep 151 instead of being rediscovered every two minutes.
+    try:
+        from web_watcher.storage import get_control_map
+        _prior_controls = get_control_map(page.url) or {}
+    except Exception:
+        _prior_controls = {}
+    # Which kind of page each action was taken on — the branch the observation belongs under.
+    _kind_by_step: dict[int, str] = {}
 
     def _harvest() -> None:
         if on_step is None:
@@ -399,7 +433,8 @@ def run_agent(
         # ── LLM decision ────────────────────────────────────────────────────
         try:
             action = _query_llm(model, instruction, page, elements, history, scratchpad,
-                                vision_model, ocr_threshold, page_context)
+                                vision_model, ocr_threshold, page_context,
+                                prior_controls=_prior_controls)
             consecutive_errs = 0
         except Exception as exc:
             log.error("Agent LLM call failed: %s", exc)
@@ -409,7 +444,26 @@ def run_agent(
                 break
             continue
 
+        _kind_by_step[len(history)] = page_kind(page.url)   # branch this action belongs under
         history.append(action)
+
+        # SEARCH LOCK — the caller already drove the site's own search controls to the right
+        # results. Wandering off to another search throws that away (and the agent invented URLs
+        # that silently dropped the region and category). Reading a listing is still allowed.
+        if search_locked and action.action == "navigate":
+            _want = (action.text or "").strip()
+            if _search_lock_violation(page.url, _want):
+                log.info("Agent tried to navigate away from the search results to %s — refusing "
+                         "(search is locked to the query we already set up)", _want[:80])
+                action.outcome = (
+                    "REFUSED: you are ALREADY on the correct search results — they were set up by "
+                    "typing the search and the location into this site's own controls. Do not "
+                    "navigate to another search URL. To see more, SCROLL or use the site's next-page "
+                    "control. To read an item, click the listing itself."
+                )
+                _human_pause(*ACTION_PAUSE)
+                continue
+
         _detail = ""
         if action.action == "type":
             _el = f" el={action.element_index}" if action.element_index is not None else ""
@@ -658,6 +712,15 @@ def run_agent(
                 _council_model,
                 elements,
             )
+            # The council's favourite escape from a scroll loop is "navigate somewhere else",
+            # and that is exactly how the invented search URL got in — the agent was stuck, and
+            # the recovery advice replaced a correct query with a broken one. Under a search lock
+            # the council may recover on THIS page (scroll, click, page) but may not relocate.
+            if (rec and rec.action == "navigate" and search_locked
+                    and _search_lock_violation(page.url, (rec.text or "").strip())):
+                log.info("Council recommended navigating to %s — refusing (search locked)",
+                         (rec.text or "")[:80])
+                rec = None
             if rec and rec.action != "done":
                 log.info("Council recommends: %s — %s", rec.action, rec.thought[:80])
                 _pre_url  = page.url
@@ -773,6 +836,20 @@ def run_agent(
 
         _human_pause(*ACTION_PAUSE)
         _harvest()   # harvest listings from the page this action landed on
+
+    # Fold this run's experience back into the site's tree so the NEXT sweep starts knowing it.
+    # Best-effort: a storage hiccup must never cost us a completed sweep's listings.
+    try:
+        from urllib.parse import urlparse as _urlparse
+        from web_watcher.storage import merge_control_map
+        _learned = learned_controls(history, _kind_by_step)
+        if _learned:
+            merge_control_map(start_url, _learned)
+            log.info("Agent remembered %d control(s) across %d page kind(s) for %s",
+                     sum(len(v) for v in _learned.values()), len(_learned),
+                     _urlparse(start_url).netloc or start_url[:40])
+    except Exception as exc:
+        log.debug("could not persist the site control map: %s", exc)
 
     return AgentResult(
         final_text  = _extract_text(page),
@@ -1660,9 +1737,10 @@ def _query_llm(
     vision_model:  str | None = None,
     ocr_threshold: int = 200,
     page_context:  str = "",
+    prior_controls: dict | None = None,
 ) -> AgentAction:
     history_text = ""
-    for i, a in enumerate(history[-10:]):
+    for i, a in enumerate(history[-_HISTORY_STEPS:]):
         history_text += f"  step {i+1}: {a.action}"
         if a.action == "remember":
             history_text += f" {a.memory_key!r}={a.memory_value!r}"
@@ -1770,9 +1848,10 @@ def _query_llm(
         + f"{page_text_label}\n{page_snippet}\n\n"
         f"Interactive elements:\n{_elements_text(elements)}\n\n"
         + scratchpad_section
-        # WHAT-I-ALREADY-TRIED comes BEFORE the step log: it covers the whole run (the step log is
-        # capped at 10) and it is the block that stops the agent re-clicking a dead control.
-        + _tried_ledger(history)
+        # WHAT-I-ALREADY-TRIED comes BEFORE the step log: it covers the whole run (and, via the
+        # persisted site tree, earlier runs too), and it is the block that stops the agent
+        # re-clicking a control it has already proved does nothing.
+        + _tried_ledger(history, prior_controls, page_kind(page.url))
         + (f"Previous actions:\n{history_text}" if history_text else "No previous actions yet.")
         + text_field_hint
         + "\n\nWhat is your next action?"
@@ -1790,6 +1869,9 @@ def _query_llm(
         # weaker machines). Capable instruct models still fill the 'thought' field
         # in this mode; weaker ones at least produce parseable output every time.
         "format": "json",
+        # Say how much we need read. Without this Ollama uses 4096 and silently drops the
+        # front of the prompt — the system spec — leaving the agent to guess its own rules.
+        "options": {"num_ctx": _AGENT_NUM_CTX},
     }
 
     with _gpu_slot(), httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
@@ -2226,23 +2308,109 @@ def _url_path(url: str) -> str:
         return url
 
 
-def _tried_ledger(history: list) -> str:
+def is_listing_url(url: str) -> bool:
+    """Does this URL point at ONE listing (an ad to read) rather than a search/browse page?
+
+    Deliberately generous: opening a listing is the agent's job, so an unrecognised shape is
+    treated as a listing only when it plainly is not a search page. Used by the search-lock."""
+    u = (url or "").lower()
+    if not u.startswith("http"):
+        return False
+    from urllib.parse import urlparse
+    path = urlparse(u).path
+    # Search/browse shapes across the marketplaces we drive.
+    if re.search(r"/(search|browse|categories|area|city|sub)\b", path):
+        return False
+    # Listing shapes: craigslist /view/d/<slug>/<id> and .../<digits>.html, ebay /itm/,
+    # offerup /item/, facebook /marketplace/item/.
+    return bool(re.search(r"/(view|itm|item|d|p)/|/\d{6,}(?:\.html)?$|\.html$", path))
+
+
+def _search_lock_violation(current_url: str, target_url: str) -> bool:
+    """True when `target_url` would abandon the search results we already established.
+
+    Allowed: opening a listing, and staying on the same page (an anchor/hash change — craigslist's
+    own sort/view controls only rewrite the fragment, so blocking those would break real browsing).
+    Refused: any other navigation, which in practice means 'go to a different search'."""
+    if not target_url:
+        return False
+    if is_listing_url(target_url):
+        return False
+    from urllib.parse import urldefrag
+    return urldefrag(target_url)[0].rstrip("/") != urldefrag(current_url or "")[0].rstrip("/")
+
+
+def page_kind(url: str) -> str:
+    """Which KIND of page this is — the branch of the site tree we're standing on.
+
+    A site's controls only mean something relative to the kind of page they sit on: 'reply' in a
+    search feed and 'reply' on an ad are different controls, and a sort control that is dead on a
+    listing page may be alive on results. So learned knowledge branches here rather than being one
+    flat list per domain."""
+    u = (url or "").lower()
+    if not u.startswith("http"):
+        return "other"
+    from urllib.parse import urlparse
+    p = urlparse(u)
+    if is_listing_url(u):
+        return "listing"
+    if re.search(r"/(search|browse|categories)\b", p.path) or p.query:
+        return "search"
+    if p.path in ("", "/"):
+        return "home"
+    return "other"
+
+
+def learned_controls(history: list, url_by_step: dict | None = None) -> dict:
+    """This run's experience as a TREE: {page_kind: {label: {outcome, n, dead}}}.
+
+    Same source data as the rendered ledger, in the shape that gets persisted and merged into
+    the site profile — so what one sweep discovers is available to the next."""
+    tree: dict[str, dict] = {}
+    for i, a in enumerate(history):
+        label = (getattr(a, "element_label", "") or "").strip()
+        if not label or a.action not in ("click", "type", "select"):
+            continue
+        kind = (url_by_step or {}).get(i) or "search"
+        branch = tree.setdefault(kind, {})
+        rec = branch.setdefault(label, {"n": 0, "outcome": "", "dead": True})
+        rec["n"] += 1
+        out = (a.outcome or "").strip()
+        # "page unchanged" is the only outcome that means the control did nothing.
+        if out and out != "page unchanged":
+            rec["outcome"], rec["dead"] = out[:160], False
+        elif not rec["outcome"]:
+            rec["outcome"] = out or "page unchanged"
+    return tree
+
+
+def _tried_ledger(history: list, prior: dict | None = None, kind: str = "search") -> str:
     """"I have already pushed that button, and here is what it did."
 
-    The step-by-step history only shows the last 10 steps and is ordered by time, so a control
-    tried at step 2 is invisible by step 13 — which is exactly how the agent ended up clicking the
-    same craigslist sort control five times with slightly reworded reasoning. This is the opposite
-    view: keyed by the CONTROL, deduped, covering the WHOLE run, and stating the observed effect.
+    The step log is time-ordered and windowed, so a control tried early scrolls out of view —
+    which is exactly how the agent clicked the same craigslist sort control five times with
+    slightly reworded reasoning. This is the opposite view: keyed by the CONTROL, deduped, and
+    covering the whole run. `prior` folds in what earlier SWEEPS learned about this kind of page
+    (the persisted site tree), so knowledge is not thrown away when a sweep ends.
 
-    A control that produced no effect is called out as pointless, because "page unchanged" is the
-    single most useful thing the agent can know and the thing it most reliably forgot."""
+    A control that produced no effect is named as pointless: "page unchanged" is the single most
+    useful thing the agent can know and the thing it most reliably forgot."""
     seen: dict[str, dict] = {}
+    # Start from what previous sweeps learned about THIS kind of page, then let this run's own
+    # observations override — the live page always wins over a remembered one.
+    for label, info in ((prior or {}).get(kind) or {}).items():
+        if isinstance(info, dict):
+            seen[label] = {"n": int(info.get("n") or 1),
+                           "outcome": "page unchanged" if info.get("dead", True)
+                                      else (info.get("outcome") or ""),
+                           "remembered": True}
     for a in history:
         label = (getattr(a, "element_label", "") or "").strip()
         if not label or a.action not in ("click", "type", "select"):
             continue
-        rec = seen.setdefault(label, {"n": 0, "outcome": ""})
+        rec = seen.setdefault(label, {"n": 0, "outcome": "", "remembered": False})
         rec["n"] += 1
+        rec["remembered"] = False
         # Keep the most informative outcome we ever saw for this control: a real effect beats
         # "page unchanged", which in turn beats nothing at all.
         out = (a.outcome or "").strip()
@@ -2251,13 +2419,14 @@ def _tried_ledger(history: list) -> str:
     if not seen:
         return ""
     lines = []
-    for label, rec in list(seen.items())[:14]:
+    for label, rec in list(seen.items())[:18]:
         out = rec["outcome"] or "no observable effect"
         if out == "page unchanged":
             out = "NOTHING CHANGED — this control does not help; do not click it again"
         times = f" (tried {rec['n']}×)" if rec["n"] > 1 else ""
-        lines.append(f"  - {label!r}{times} → {out[:110]}")
-    return ("CONTROLS YOU HAVE ALREADY USED ON THIS PAGE — do NOT try these again unless the "
+        when = " [learned on an earlier visit]" if rec.get("remembered") else ""
+        lines.append(f"  - {label!r}{times}{when} → {out[:110]}")
+    return ("CONTROLS ALREADY USED ON THIS KIND OF PAGE — do NOT try these again unless the "
             "result below says they helped:\n" + "\n".join(lines) + "\n\n")
 
 

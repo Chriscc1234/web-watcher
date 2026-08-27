@@ -233,6 +233,13 @@ def init_db(db_path: Path | None = None) -> None:
         sp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(site_profiles)").fetchall()]
         if "understanding" not in sp_cols:
             conn.execute("ALTER TABLE site_profiles ADD COLUMN understanding TEXT")
+        # Migration: `control_map` — what the agent has LEARNED BY DOING on this site, shaped as
+        # a tree: {page_kind: {control_label: {outcome, n, dead}}}. A site isn't a flat list of
+        # buttons; the same label means different things on a search page and a listing page, so
+        # the knowledge branches by page kind. Survives restarts, so sweep 151 starts knowing
+        # what sweep 1 discovered instead of re-clicking the same dead controls forever.
+        if "control_map" not in sp_cols:
+            conn.execute("ALTER TABLE site_profiles ADD COLUMN control_map TEXT")
 
 
 def save_run(record: RunRecord, db_path: Path | None = None) -> int:
@@ -726,6 +733,77 @@ def save_site_understanding(url_or_host: str, understanding: dict,
             "VALUES (?, ?, ?)", (domain, domain, domain.split(".")[0]))
         conn.execute("UPDATE site_profiles SET understanding=? WHERE domain=?",
                      (json.dumps(understanding), domain))
+
+
+def get_control_map(url_or_host: str, db_path: Path | None = None) -> dict:
+    """What the agent has learned by DOING on this site: {page_kind: {label: {...}}}.
+
+    A tree rather than a flat list, because a site's controls only mean anything relative to the
+    kind of page they're on — 'reply' on a listing page and 'reply' in a search feed are not the
+    same control. Empty dict when nothing has been learned yet."""
+    domain = site_key(url_or_host)
+    if not domain:
+        return {}
+    path = _resolve(db_path)
+    if not path.exists():
+        return {}
+    try:
+        with _connect(path) as conn:
+            row = conn.execute(
+                "SELECT control_map FROM site_profiles WHERE domain=?", (domain,)).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not row or not row["control_map"]:
+        return {}
+    try:
+        got = json.loads(row["control_map"])
+        return got if isinstance(got, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def merge_control_map(url_or_host: str, learned: dict, db_path: Path | None = None) -> dict:
+    """Fold this sweep's observations into the site's stored control tree and save it.
+
+    Merge rules, per (page_kind, label):
+      • attempt counts add up — that's how "we have tried this 9 times across 5 sweeps" emerges;
+      • a REAL effect always beats 'nothing changed' — one useful outcome outweighs any number of
+        no-ops, so a control is never written off because it happened to no-op once;
+      • a control is 'dead' only while every observation of it has been a no-op.
+    Returns the merged tree. Best-effort: never raises into a sweep."""
+    domain = site_key(url_or_host)
+    if not domain or not isinstance(learned, dict):
+        return {}
+    try:
+        tree = get_control_map(domain, db_path)
+        for kind, controls in learned.items():
+            if not isinstance(controls, dict):
+                continue
+            branch = tree.setdefault(str(kind), {})
+            for label, info in controls.items():
+                if not isinstance(info, dict):
+                    continue
+                prev = branch.get(str(label)) or {}
+                n = int(prev.get("n") or 0) + int(info.get("n") or 1)
+                prev_out, new_out = prev.get("outcome") or "", info.get("outcome") or ""
+                # Prefer whichever outcome actually says something happened.
+                if prev.get("dead", True) is False:
+                    outcome, dead = prev_out, False
+                elif info.get("dead", True) is False:
+                    outcome, dead = new_out, False
+                else:
+                    outcome, dead = (new_out or prev_out), True
+                branch[str(label)] = {"outcome": outcome[:160], "n": n, "dead": bool(dead)}
+        path = _resolve(db_path)
+        with _connect(path) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO site_profiles (domain, display_name, key_prefix) "
+                "VALUES (?, ?, ?)", (domain, domain, domain.split(".")[0]))
+            conn.execute("UPDATE site_profiles SET control_map=? WHERE domain=?",
+                         (json.dumps(tree), domain))
+        return tree
+    except Exception:
+        return {}
 
 
 def get_goal_state(watch_id: str, db_path: Path | None = None) -> dict | None:

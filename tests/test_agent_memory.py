@@ -72,7 +72,7 @@ def test_empty_history_yields_no_block():
 
 def test_ledger_is_capped_so_it_cannot_swamp_the_prompt():
     led = _tried_ledger([_click(f"control {i}") for i in range(40)])
-    assert len([ln for ln in led.splitlines() if ln.strip().startswith("- ")]) <= 14
+    assert len([ln for ln in led.splitlines() if ln.strip().startswith("- ")]) <= 18
 
 
 # ── the label is captured, not re-resolved ────────────────────────────────────────
@@ -90,3 +90,69 @@ def test_action_carries_the_label_it_was_chosen_against():
 
 def test_default_label_is_none_for_a_plain_action():
     assert AgentAction(thought="", action="scroll").element_label is None
+
+
+# ── the site tree: knowledge that outlives a single sweep ─────────────────────────
+
+def test_page_kind_branches_the_tree():
+    from web_watcher.agent import page_kind
+    assert page_kind("https://skagit.craigslist.org/search/boo?query=x") == "search"
+    assert page_kind("https://skagit.craigslist.org/view/d/a-boat/12345678.html") == "listing"
+    assert page_kind("https://skagit.craigslist.org/") == "home"
+
+
+def test_learned_controls_shapes_a_tree_by_page_kind():
+    from web_watcher.agent import learned_controls
+    h = [_click("sort"), _click("reply", outcome="opened the reply form")]
+    tree = learned_controls(h, {0: "search", 1: "listing"})
+    assert tree["search"]["sort"]["dead"] is True          # no-op on results
+    assert tree["listing"]["reply"]["dead"] is False       # did something on an ad
+    assert "reply" not in tree["search"]                   # kinds stay separate
+
+
+def test_prior_knowledge_is_recalled_with_no_history_at_all():
+    # The whole point: a fresh sweep starts already knowing what the last one proved.
+    prior = {"search": {"boat type": {"outcome": "page unchanged", "n": 3, "dead": True}}}
+    led = _tried_ledger([], prior, "search")
+    assert "boat type" in led and "NOTHING CHANGED" in led
+    assert "earlier visit" in led
+
+
+def test_prior_knowledge_for_another_page_kind_is_not_shown():
+    prior = {"listing": {"reply": {"outcome": "opened form", "n": 1, "dead": False}}}
+    assert _tried_ledger([], prior, "search") == ""
+
+
+def test_live_observation_overrides_a_stale_memory():
+    # Remembered as dead, but it worked just now → the live page wins and the tag is dropped.
+    prior = {"search": {"sort": {"outcome": "page unchanged", "n": 5, "dead": True}}}
+    led = _tried_ledger([_click("sort", outcome="navigated -> sorted by price")], prior, "search")
+    assert "navigated -> sorted by price" in led
+    assert "earlier visit" not in led
+
+
+# ── the search lock ───────────────────────────────────────────────────────────────
+
+def test_search_lock_refuses_an_invented_search_url():
+    from web_watcher.agent import _search_lock_violation
+    # The exact real-world failure: a precise regional query replaced by a made-up one.
+    assert _search_lock_violation(
+        "https://skagit.craigslist.org/search/boo?query=MacGregor&postal=98221",
+        "https://www.craigslist.org/search/city/anacortes-wa?cat=boo") is True
+
+
+def test_search_lock_allows_opening_a_listing_and_same_page_anchors():
+    from web_watcher.agent import _search_lock_violation
+    cur = "https://skagit.craigslist.org/search/boo?query=MacGregor"
+    assert _search_lock_violation(cur, "https://skagit.craigslist.org/view/d/x/12345678.html") is False
+    assert _search_lock_violation(cur, cur + "#search=2~list~0") is False
+    assert _search_lock_violation(cur, "") is False
+
+
+# ── the context window that caused the amnesia in the first place ─────────────────
+
+def test_agent_context_window_is_set_and_generous():
+    # Unset meant Ollama's 4096 default, which silently truncates the SYSTEM prompt away.
+    from web_watcher.agent import _AGENT_NUM_CTX, _HISTORY_STEPS
+    assert _AGENT_NUM_CTX >= 16_384
+    assert _HISTORY_STEPS >= 25

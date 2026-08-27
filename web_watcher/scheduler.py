@@ -1971,6 +1971,19 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
             l.judge_reason = why or getattr(l, "judge_reason", "")
             if rating >= threshold:
                 keep.append(l)
+            else:
+                # A rejection on grounds the judge had no basis for — model geography the
+                # gazetteer contradicts, or a budget the user never stated — gets the verify
+                # second look instead of a silent death here (the overturn lives in verify,
+                # which a failing batch rating never reaches: that asymmetry re-killed an
+                # Ocean Shores MacGregor at ~110 mi even after the verify-side fix). Verify
+                # re-checks EVERY criterion, so a wrong-brand boat still dies there.
+                tag = _appealable_rejection(watch, why, l.title or "")
+                if tag:
+                    log.info("   second look (%s): %r was rejected as %r — sending to verify",
+                             tag, (l.title or "")[:50], (why or "")[:40])
+                    l.rating = threshold
+                    keep.append(l)
         log.info("Rating judge kept %d/%d (>=%d) for %r",
                  len(keep), len(new_listings), threshold, watch.name)
         for l in new_listings:
@@ -2001,8 +2014,60 @@ _VERIFY_CAP = 12
 # A rejection that is ABOUT the listing's location (vs brand/price/spec). Used to decide when
 # the deterministic gazetteer is allowed to overturn the judge.
 _LOCATION_REASON_RE = re.compile(
-    r"\b(location|too far|not (?:in|near)|is [A-Z][a-z]+ not|outside (?:the )?(?:area|radius|region|state)|"
+    r"\b(location|too far|not (?:in|near)|is [A-Z][a-z]+ not|"
+    r"out(?:side)?(?: of)? (?:the |stated |the stated )?(?:area|radius|region|state)|"
+    r"beyond (?:the |stated |the stated )?(?:area|radius|region)|"
     r"miles? (?:away|from)|wrong (?:area|city|town|state)|different (?:city|state))\b", re.IGNORECASE)
+
+# A rejection that is ABOUT the price. Appealable only when the watch never stated one.
+# 'price mismatch' is here because marketplace cards show a struck-through OLD price next to
+# the current one (a price DROP) — the judge reads the two numbers as an inconsistency and
+# rejects a perfectly good listing for a display artifact.
+_PRICE_REASON_RE = re.compile(
+    r"\b(over ?priced|over (?:the |stated |the stated )?budget|price (?:is )?too high|"
+    r"too expensive|above (?:the |stated |the stated )?(?:budget|price)|"
+    r"outside (?:the |stated |the stated )?budget|exceeds? (?:the )?budget|"
+    r"price (?:mismatch|does ?n[o']t match|discrepanc|inconsisten))", re.IGNORECASE)
+
+
+def _watch_states_price(watch) -> bool:
+    """Did the user actually write a price constraint into this watch? Only then is price a
+    legitimate ground for rejection."""
+    text = f"{getattr(watch, 'instruction', '') or ''} {getattr(watch, 'judgment_prompt', '') or ''}"
+    return bool(re.search(
+        r"[$€£]\s?\d|\b\d{1,3}k\b|\b(?:under|below|budget|max(?:imum)?\s+price|"
+        r"less than|no more than|cheap)\b", text, re.IGNORECASE))
+
+
+def _appealable_rejection(watch, why: str, title: str) -> str:
+    """'' when a judge's rejection stands; otherwise a short tag naming why it deserves a
+    second look. Two appealable grounds, both deterministic:
+
+      geo   — the reason is about LOCATION and the gazetteer places the listing within
+              range. Models are bad at geography; the map is not.
+      price — the reason is about PRICE and the watch never stated a price. The rubric says
+              'never invent a budget', but the model still writes "Price too high" against
+              nothing (observed twice on the same $21,500 boat) — prompts ask, this enforces.
+
+    Any OTHER failure cited alongside (wrong brand, parts, toy…) makes the rejection stand:
+    the appeal exists for criteria the judge had no basis to apply, never to soften real ones.
+    """
+    why = why or ""
+    rest, grounds = why, []
+    if _LOCATION_REASON_RE.search(why):
+        miles = _listing_miles(watch, title or "")
+        if miles is None or miles > _NEAR_MILES:
+            return ""                      # can't clear it, or genuinely far — stands
+        grounds.append(f"geo {miles:.0f}mi")
+        rest = _LOCATION_REASON_RE.sub(" ", rest)
+    if _PRICE_REASON_RE.search(rest):
+        if _watch_states_price(watch):
+            return ""                      # the user DID state a price — stands
+        grounds.append("no stated budget")
+        rest = _PRICE_REASON_RE.sub(" ", rest)
+    if not grounds or _FAILING_REASON_RE.search(rest):
+        return ""
+    return ", ".join(grounds)
 
 
 def _listing_miles(watch: Watch, text: str) -> float | None:
@@ -2122,15 +2187,15 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
             # The verifier contradicting itself gets the same deterministic rule as the batch.
             if ok and _FAILING_REASON_RE.search(why_ver):
                 ok = False
-            # Deterministic geography beats model geography: a LOCATION-based rejection of a
-            # listing the gazetteer places within range is overturned. The prefilter already
-            # screened confidently-far listings before any judge saw this one; a model
-            # re-rejecting it for location is second-guessing map data with vibes.
-            if not ok and _LOCATION_REASON_RE.search(why_ver):
-                miles = _listing_miles(watch, l.title or "")
-                if miles is not None and miles <= _NEAR_MILES:
-                    log.info("   verify OVERTURNED (geo): %s is %.0f mi away — within range; "
-                             "judge said %r", (l.title or "")[:50], miles, why_ver[:60])
+            # Deterministic facts beat model vibes: a rejection on grounds the judge had no
+            # basis for — geography the gazetteer contradicts (the prefilter already screened
+            # confidently-far listings before any judge saw this one), or a budget the user
+            # never stated — is overturned. Real failures (brand, type, parts) always stand.
+            if not ok:
+                tag = _appealable_rejection(watch, why_ver, l.title or "")
+                if tag:
+                    log.info("   verify OVERTURNED (%s): %s — judge said %r",
+                             tag, (l.title or "")[:50], why_ver[:60])
                     ok, why_ver = True, ""
             if not ok:
                 l.rating = threshold - 1

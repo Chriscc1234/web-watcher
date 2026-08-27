@@ -244,3 +244,53 @@ def test_product_queries_are_not_bare_locations():
     for t in ("macgregor sailboat", "Catalina", "Ford Ranger XLT", "Georgia font pack",
               "MacGregor 26X WA trailer", "manual civic", "Ranger bass boat", ""):
         assert not _is_bare_location(t), t
+
+
+# --------------------------------------------------------------------------
+# The appeal: rejections on grounds the judge had no basis for
+# --------------------------------------------------------------------------
+
+def test_geo_rejection_within_range_is_appealable():
+    tag = scheduler._appealable_rejection(_watch(), "Outside stated area",
+                                          "MacGregor 26s Ocean Shores, WA")
+    assert "geo" in tag
+
+
+def test_location_phrasings_all_caught():
+    """The model rewords its rejection every run — 'Outside stated area', 'Out of stated
+    area', 'Too far from Seattle'. All shapes must reach the appeal."""
+    for why in ("Outside stated area", "Out of stated area", "outside the area",
+                "Out of the region", "Too far from Seattle", "beyond the radius"):
+        tag = scheduler._appealable_rejection(_watch(), why, "MacGregor 26 Everett, WA")
+        assert tag, why
+
+
+def test_far_listing_is_not_appealable():
+    assert scheduler._appealable_rejection(_watch(), "Outside stated area",
+                                           "MacGregor 26X Miami, FL") == ""
+
+
+def test_invented_budget_is_appealable_when_no_price_stated():
+    for why in ("Over budget", "Price too high", "Outside stated budget", "too expensive",
+                "Price mismatch"):
+        tag = scheduler._appealable_rejection(_watch(), why, "MacGregor 26m Bothell, WA")
+        assert "budget" in tag, why
+
+
+def test_price_rejection_stands_when_the_watch_states_a_price():
+    w = _watch(instruction="MacGregor sailboats under $8000 near Anacortes WA")
+    assert scheduler._appealable_rejection(w, "Over budget", "MacGregor 26m Bothell, WA") == ""
+
+
+def test_wrong_brand_alongside_location_stands():
+    """The appeal never softens a real failure — location plus wrong-brand stays rejected."""
+    tag = scheduler._appealable_rejection(
+        _watch(), "Wrong brand, and outside the area", "Catalina 30 Seattle, WA")
+    assert tag == ""
+
+
+def test_watch_states_price_detection():
+    assert scheduler._watch_states_price(_watch(instruction="boats under $8000"))
+    assert scheduler._watch_states_price(_watch(instruction="cheap project boats"))
+    assert not scheduler._watch_states_price(
+        _watch(instruction="Look for MacGregor sailboats near Seattle WA"))

@@ -86,12 +86,21 @@ _HARDWARE_POOL = [(4, 8), (6, 8), (8, 8), (8, 16), (12, 16), (16, 16)]
 # one can't stall a sweep waiting for the auto-dismiss.
 _NO_NATIVE_DIALOGS_JS = r"""
 (() => {
+  const noop = () => undefined;
+  // EACH patch is independently guarded. A single throw used to take the whole script — and
+  // with it whatever the page did next. Facebook's login bundle went to a WHITE SCREEN because
+  // 'print' was defined non-writable/non-configurable here and their code assigns to it, which
+  // throws a TypeError in strict mode. Stay writable + configurable: the goal is to stop an
+  // ACCIDENTAL native dialog, not to win a fight with the page.
   try {
-    const noop = () => undefined;
-    Object.defineProperty(window, 'print', {value: noop, writable: false, configurable: false});
+    Object.defineProperty(window, 'print', {value: noop, writable: true, configurable: true});
+  } catch (_) { try { window.print = noop; } catch (__) {} }
+  try {
     window.alert   = noop;
     window.confirm = () => false;
     window.prompt  = () => null;
+  } catch (_) {}
+  try {
     // Some sites call print() from a beforeprint/keyboard handler; swallow the event too.
     window.addEventListener('beforeprint', e => { e.preventDefault && e.preventDefault(); }, true);
     // Ctrl/Cmd+P from a stray synthetic keystroke would open the same dialog.
@@ -326,8 +335,18 @@ class BrowserSession:
         profile_dir: str | Path | None = None,
         show_cursor: bool = False,
         geolocation: tuple[float, float] | None = None,
+        inject_patches: bool = True,
     ) -> None:
         self._headless = headless
+        # HANDS-OFF MODE (inject_patches=False): add NO init scripts at all — no fingerprint
+        # patches, no fake cursor, no dialog blocking. For the "Connect Facebook" window, where
+        # a REAL PERSON types their own password into Facebook's own page. Nothing we inject can
+        # help there and everything we inject can hurt: each patch is one more thing that can
+        # break a heavy login bundle (it did — a non-configurable window.print override sent the
+        # login page to a white screen) and one more surface for the most detection-happy site
+        # we deal with to notice. A plain Chrome profile with a human driving is the most
+        # legitimate thing we can possibly present.
+        self._inject_patches = inject_patches
         # (lat, lon) to report via the Geolocation API — so sites that show "your area"
         # from location (OfferUp, store locators) show the WATCH's area, not a default
         # (a fresh automated browser has no location → OfferUp was serving Florida junk).
@@ -418,6 +437,9 @@ class BrowserSession:
         # Inject our supplemental stealth patches on every new page before site JS runs,
         # then this session's randomized fingerprint values (cores/memory/screen) on top.
         assert self._context is not None
+        if not self._inject_patches:
+            log.info("Browser: hands-off mode — no init scripts injected (a person is driving)")
+            return self
         self._context.add_init_script(_EXTRA_STEALTH_JS)
         self._context.add_init_script(self._session_fingerprint_js())
         # Never let a page open a NATIVE dialog. window.print() draws an OS-level print dialog

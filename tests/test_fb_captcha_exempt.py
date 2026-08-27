@@ -62,3 +62,32 @@ def test_the_halt_survives_a_restart(tmp_path):
     # Persisted to disk on purpose: an app restart must not silently resume a flagged account.
     fb_safety.engage_halt("checkpoint", "W", tmp_path)
     assert fb_safety.halt_state(tmp_path) is not None     # re-read from disk, no memory involved
+
+
+# ── the Connect Facebook window is HANDS OFF ──────────────────────────────────────
+# A person types their own password into Facebook's own page there. Everything we inject is
+# useless to them and can break the page: a non-configurable window.print override from the
+# dialog guard threw inside Facebook's login bundle and left a WHITE SCREEN.
+
+def test_dialog_guard_never_makes_print_non_configurable():
+    from web_watcher.browser import _NO_NATIVE_DIALOGS_JS as js
+    assert "configurable: true" in js and "writable: true" in js
+    assert "configurable: false" not in js
+    # every patch independently guarded, so one throw can't take the whole script
+    assert js.count("try {") >= 3
+
+
+def test_browser_session_supports_hands_off_mode():
+    import inspect as _i
+    from web_watcher.browser import BrowserSession
+    sig = _i.signature(BrowserSession.__init__)
+    assert "inject_patches" in sig.parameters
+    assert sig.parameters["inject_patches"].default is True     # normal sweeps unchanged
+
+
+def test_connect_facebook_opens_a_clean_window():
+    # The flow that hands the browser to a human must ask for no injections at all.
+    import inspect as _i
+    from web_watcher.services import ServiceManager
+    src = _i.getsource(ServiceManager.connect_facebook)
+    assert "inject_patches=False" in src

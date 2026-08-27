@@ -718,9 +718,17 @@ class ServiceManager:
 
         try:
             cfg = load_config()
+            # HANDS OFF. This window is a PERSON typing their own password into Facebook's own
+            # page — we inject nothing into it. Our patches cannot help here and can only hurt:
+            # a non-configurable window.print override from the dialog guard threw inside
+            # Facebook's login bundle and left the user staring at a white screen, and every
+            # injected script is one more surface for the most detection-happy site we touch.
+            # A plain Chrome profile with a human driving it is the most legitimate thing we can
+            # present. The cookies it leaves behind are what the watches reuse.
             with BrowserSession(
                 headless=False, stealth=cfg.browser.stealth,
                 persistent=True, profile_dir=cfg.browser.profile_dir,
+                inject_patches=False,
             ) as session:
                 page = session.new_page()
                 page.goto("https://www.facebook.com/", timeout=60_000, wait_until="domcontentloaded")

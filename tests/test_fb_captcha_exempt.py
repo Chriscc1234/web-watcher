@@ -138,3 +138,15 @@ def test_installed_chrome_version_is_read_or_falls_back_safely():
     import re as _re
     v = _installed_chrome_version()
     assert v == "" or _re.fullmatch(r"\d+(\.\d+){1,3}", v)   # never garbage
+
+
+def test_persistent_launch_asks_for_the_real_chrome_sandbox():
+    """Playwright defaults chromium_sandbox to False, which passes --no-sandbox: Chrome warns
+    about an unsupported flag and runs the renderer UNSANDBOXED. Facebook's two-factor step
+    will not render in that state (the login page survives it; 2FA does not), and it is a plain
+    automation tell. Sandbox=False remains only as a fallback."""
+    import inspect as _i
+    from web_watcher.browser import BrowserSession
+    src = _i.getsource(BrowserSession._enter_persistent)
+    assert "chromium_sandbox=sandbox" in src
+    assert "for sandbox in (True, False)" in src      # real sandbox FIRST, fallback second

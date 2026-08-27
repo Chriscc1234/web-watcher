@@ -550,23 +550,35 @@ class BrowserSession:
             self._chrome_full = real
         ctx_kwargs = self._build_ctx_kwargs()
         last_exc: Exception | None = None
-        for channel in ("chrome", "msedge", None):
-            try:
-                self._context = self._pw.chromium.launch_persistent_context(
-                    user_data_dir=str(self._profile_dir),
-                    headless=self._headless,
-                    args=self._launch_args(),
-                    **({"channel": channel} if channel else {}),
-                    **ctx_kwargs,
-                )
-                log.info(
-                    "Persistent browser launched (profile=%s) via channel=%r",
-                    self._profile_dir.name, channel or "bundled",
-                )
-                return
-            except Exception as exc:
-                last_exc = exc
-                log.debug("Persistent launch via channel=%r failed: %s", channel, exc)
+        # Ask for the REAL Chrome sandbox first. Playwright defaults chromium_sandbox to False,
+        # which passes --no-sandbox: Chrome then warns "You are using an unsupported
+        # command-line flag" and, far more importantly, runs the renderer UNSANDBOXED —
+        # Facebook's two-factor step will not render in that state (the login page survives it,
+        # 2FA does not). It is a plain automation tell too. Sandbox=False stays as a fallback so
+        # a machine that genuinely cannot sandbox still gets a browser instead of an error.
+        for sandbox in (True, False):
+            for channel in ("chrome", "msedge", None):
+                try:
+                    self._context = self._pw.chromium.launch_persistent_context(
+                        user_data_dir=str(self._profile_dir),
+                        headless=self._headless,
+                        args=self._launch_args(),
+                        chromium_sandbox=sandbox,
+                        **({"channel": channel} if channel else {}),
+                        **ctx_kwargs,
+                    )
+                    log.info(
+                        "Persistent browser launched (profile=%s) via channel=%r, sandbox=%s",
+                        self._profile_dir.name, channel or "bundled", sandbox,
+                    )
+                    if not sandbox:
+                        log.warning("Chrome sandbox unavailable — running with --no-sandbox. "
+                                    "Some pages (Facebook's 2FA) may not render.")
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    log.debug("Persistent launch channel=%r sandbox=%s failed: %s",
+                              channel, sandbox, exc)
         # All channels failed — release the profile lock before raising, since
         # __exit__ is NOT called when __enter__ raises (would otherwise leak the lock).
         if self._profile_lock_held:

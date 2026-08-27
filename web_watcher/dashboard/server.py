@@ -600,6 +600,11 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "autonomous":       w.autonomous,
                 "max_agent_steps":  w.max_agent_steps,
                 "judgment_prompt":  w.judgment_prompt,
+                # Surfaced so you can SEE whether a supervised run is being recorded and whether
+                # it uses the saved login — both matter before starting a Facebook sweep, and
+                # both were previously invisible in the list (you had to guess).
+                "record_video":     w.record_video,
+                "use_login_profile": w.use_login_profile,
                 "mode":             w.mode,
                 "continuous_scroll_passes":    w.continuous_scroll_passes,
                 "continuous_idle_seconds":     w.continuous_idle_seconds,

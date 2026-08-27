@@ -52,7 +52,10 @@ _STEALTH_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-infobars",
-    "--disable-notifications",
+    # NOT --disable-notifications: that does not merely suppress prompts, it REMOVES the
+    # Notification API entirely (measured: `Notification is not defined`). Every real browser
+    # has it, so its absence is a glaring anomaly — and a site that calls it throws instead of
+    # rendering. Permission prompts are already handled by never granting the permission.
     "--start-maximized",
     "--lang=en-US",
 ]
@@ -141,9 +144,44 @@ _VIEWPORT_POOL = [
     (1920, 1080), (1536, 864), (1600, 900), (1680, 1050), (1440, 900), (1366, 768),
 ]
 
-# Self-consistent (cores, memory-GB) pairs — a 4-core machine reporting 32 GB, or a
-# 16-core reporting 4 GB, is incoherent and flaggable. Pick a plausible pairing.
+# Self-consistent (cores, memory-GB) pairs, used ONLY when we cannot read the real machine.
+# Overriding these with a random pair was worse than leaving them alone: measured on this box,
+# navigator reported 8 cores / 8 GB while the machine has 32 / 32 — a lie with no upside, and
+# one that contradicts every other signal (WebGL happily reports the real RTX card). Real values
+# are self-consistent by construction; invented ones are only as good as the pairing table.
 _HARDWARE_POOL = [(4, 8), (6, 8), (8, 8), (8, 16), (12, 16), (16, 16)]
+
+
+def _real_hardware() -> tuple[int, int] | None:
+    """(cores, memory-GB) for THIS machine, or None. Preferred over the pool: the truth is
+    always self-consistent, and it cannot contradict the GPU/UA/screen we report alongside."""
+    try:
+        import os as _os
+        cores = _os.cpu_count() or 0
+        mem_gb = 0
+        try:
+            import ctypes
+
+            class _MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            st = _MS()
+            st.dwLength = ctypes.sizeof(_MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                mem_gb = int(st.ullTotalPhys / (1024 ** 3))
+        except Exception:
+            pass
+        if cores and mem_gb:
+            # navigator.deviceMemory is capped at 8 by the spec and reported in powers of two.
+            capped = min(8, 2 ** (mem_gb.bit_length() - 1))
+            return cores, capped
+    except Exception:
+        pass
+    return None
 
 
 # A visible fake cursor injected into the agent's pages so you can SEE where its synthetic
@@ -295,19 +333,16 @@ _EXTRA_STEALTH_JS = """
     } catch (e) {}
 
     // ── window.chrome completeness ────────────────────────────────────────────
-    // Real Chrome exposes chrome.runtime, chrome.loadTimes, chrome.csi.
-    // Playwright Chromium leaves these absent or stub-only.
+    // Real Chrome exposes chrome.loadTimes and chrome.csi; when we drive the INSTALLED Chrome
+    // both are already there and these blocks are no-ops.
+    //
+    // chrome.runtime is DELIBERATELY NOT FABRICATED. It was, and that was backwards: measured
+    // against a bare channel="chrome" launch, real Chrome reports chrome.runtime === undefined
+    // on an ordinary page (it appears for extension pages). Adding it made window.chrome's key
+    // list read "loadTimes,csi,app,runtime" where a real browser says "loadTimes,csi,app" — so
+    // the stealth patch was the thing that stood out. Absent is correct.
     try {
         if (!window.chrome) window.chrome = {};
-        if (!window.chrome.runtime) {
-            window.chrome.runtime = {
-                id: '',
-                connect: function () {},
-                sendMessage: function () {},
-                onMessage: { addListener: function () {}, removeListener: function () {} },
-                PlatformOs: { WIN: 'win', MAC: 'mac', ANDROID: 'android', LINUX: 'linux' },
-            };
-        }
         if (!window.chrome.loadTimes) {
             window.chrome.loadTimes = function () {
                 return {
@@ -347,11 +382,16 @@ _EXTRA_STEALTH_JS = """
     }
 
     // ── navigator properties ──────────────────────────────────────────────────
-    // Align with the Windows Chrome UA we declared in the context.
+    // Align with the Windows Chrome UA we declared in the context. platform only: we run a real
+    // Windows Chrome, so 'Win32' is what it already says and the line is a harmless no-op.
+    //
+    // hardwareConcurrency and deviceMemory were HARDCODED to 8 here. Measured against a bare
+    // channel="chrome" launch on this machine, the real values are 32 and 32 — so the "stealth"
+    // was announcing a weaker machine than the one running, while WebGL sat right beside it
+    // reporting the genuine RTX card. That contradiction is a stronger signal than either
+    // number alone. The browser's own values are self-consistent; leave them.
     try {
-        Object.defineProperty(navigator, 'platform',          { get: function () { return 'Win32'; }, configurable: true });
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: function () { return 8; },     configurable: true });
-        Object.defineProperty(navigator, 'deviceMemory',      { get: function () { return 8; },       configurable: true });
+        Object.defineProperty(navigator, 'platform', { get: function () { return 'Win32'; }, configurable: true });
     } catch (e) {}
 
     // navigator.connection.effectiveType
@@ -364,18 +404,12 @@ _EXTRA_STEALTH_JS = """
     } catch (e) {}
 
     // ── screen dimensions ─────────────────────────────────────────────────────
-    // Ensure screen properties are consistent with a 1920×1080 consumer display.
-    try {
-        ['width','height','availWidth','availHeight','colorDepth','pixelDepth'].forEach(function (k) {
-            var val = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040,
-                        colorDepth: 24, pixelDepth: 24 }[k];
-            if (screen[k] !== val) {
-                Object.defineProperty(screen, k, { get: function () { return val; }, configurable: true });
-            }
-        });
-        Object.defineProperty(window, 'outerWidth',  { get: function () { return 1920; }, configurable: true });
-        Object.defineProperty(window, 'outerHeight', { get: function () { return 1040; }, configurable: true });
-    } catch (e) {}
+    // DELIBERATELY NOT OVERRIDDEN. This block used to force screen to 1920x1080 and
+    // outerWidth/Height to 1920x1040 regardless of the real window. Measured, that produced an
+    // impossible browser: screen 1920x1080 and outer 1920x1040 while innerWidth/Height stayed
+    // 1280x720 — 640px of browser chrome that does not exist, in a window bigger than the
+    // screen it claims to sit on. Any page doing the arithmetic sees a contradiction; the
+    // browser's own numbers already agree with each other.
 
 })();
 """
@@ -454,7 +488,10 @@ class BrowserSession:
         # browsing session is internally consistent (it doesn't change cores/screen
         # mid-session) while DIFFERING from run to run.
         self._viewport       = random.choice(_VIEWPORT_POOL)
-        self._cores, self._mem_gb = random.choice(_HARDWARE_POOL)
+        # Prefer the REAL cores/memory. See _real_hardware: an invented pair contradicted the
+        # actual machine (8/8 reported on a 32/32 box) while WebGL cheerfully reported the real
+        # GPU next to it, so the override created the inconsistency it was meant to prevent.
+        self._cores, self._mem_gb = _real_hardware() or random.choice(_HARDWARE_POOL)
         self._chrome_full    = _DEFAULT_CHROME_FULL   # overridden once the real build is known
 
     def _ua_major(self) -> str:
@@ -515,22 +552,26 @@ class BrowserSession:
         return ctx_kwargs
 
     def _session_fingerprint_js(self) -> str:
-        """A tiny per-session init script that overrides hardwareConcurrency / deviceMemory
-        / screen size with this session's randomized-but-coherent values. Injected AFTER the
-        static stealth script so these win, and applied before any site JS runs."""
-        w, h = self._viewport
-        return f"""
-        (function () {{
-            try {{
-                Object.defineProperty(navigator, 'hardwareConcurrency',
-                    {{ get: function () {{ return {self._cores}; }}, configurable: true }});
-                Object.defineProperty(navigator, 'deviceMemory',
-                    {{ get: function () {{ return {self._mem_gb}; }}, configurable: true }});
-                Object.defineProperty(screen, 'width',  {{ get: function () {{ return {w}; }}, configurable: true }});
-                Object.defineProperty(screen, 'height', {{ get: function () {{ return {h}; }}, configurable: true }});
-            }} catch (e) {{}}
-        }})();
+        """Per-session navigator overrides — now deliberately EMPTY, and that is the fix.
+
+        This block used to rewrite hardwareConcurrency, deviceMemory and screen.width/height.
+        Measured against a bare channel="chrome" launch, every one of those overrides made the
+        browser LESS coherent, not more:
+
+          • screen was forced to the session viewport, producing an impossible browser —
+            screen 1920x1080 with innerWidth/Height 1280x720 and outerWidth/Height 1920x1040,
+            i.e. a window claiming more chrome than exists inside a screen it cannot fit.
+          • cores/memory were drawn from a pool and reported 8/8 on a machine with 32/32,
+            while WebGL sat alongside happily reporting the real RTX card.
+
+        We drive the user's REAL Chrome, which already reports real, self-consistent values. An
+        override can only introduce a contradiction — including a well-meant one: capping
+        deviceMemory to the spec's 8 would itself disagree with the 32 this browser actually
+        reports. The honest number is the one the browser already has.
+
+        Kept as a method (returning nothing to inject) so the call site and tests stay stable.
         """
+        return ""
 
     def __enter__(self) -> "BrowserSession":
         self._pw = sync_playwright().start()
@@ -545,7 +586,9 @@ class BrowserSession:
             log.info("Browser: no init scripts injected for this session (a person is driving)")
             return self
         self._context.add_init_script(_EXTRA_STEALTH_JS)
-        self._context.add_init_script(self._session_fingerprint_js())
+        _fp = self._session_fingerprint_js()
+        if _fp.strip():
+            self._context.add_init_script(_fp)
         # Never let a page open a NATIVE dialog. window.print() draws an OS-level print dialog
         # that Playwright cannot see or dismiss, so the browser hangs until a human clicks it —
         # observed live, a sweep froze for minutes after the agent clicked craigslist's 'print'.

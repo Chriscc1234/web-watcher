@@ -735,6 +735,20 @@ def _run_agent_continuous_sweep(
     profiles = list_site_profiles(db_path)
 
     def _harvest(pg) -> None:
+        # Do NOT harvest a marketplace's HOME page. Its tiles are recommendations and promos,
+        # not results for this search — and they sit on the same /itm/-style URLs, so the
+        # extractor cannot tell them apart. A live eBay sweep hit an error page, recovered by
+        # navigating to ebay.com, and banked fifteen homepage tiles (flip-flops, an iPhone,
+        # earbuds) into a MacGregor sailboat watch — which then spent twelve real deep-reads
+        # on them. Passing through the home page on the way to the search is normal and fine;
+        # taking its contents as findings is not.
+        try:
+            from web_watcher.agent import page_kind
+            if page_kind(pg.url) == "home":
+                log.debug("Not harvesting the site home page (%s) — promos, not results", pg.url[:60])
+                return
+        except Exception:
+            pass
         for l in extract_listings(pg, max_items=200, profiles=profiles):
             cur = harvested.get(l.key)
             if cur is None or len(l.title) > len(getattr(cur, "title", "")):
@@ -1255,9 +1269,14 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
             # lazy-loaded parts of the page (seller block, full description) have arrived
             # by the time we extract, so the body we get is more complete, not just more
             # human. See monitor.human_read.
-            human_read(tab, stop_event)
+            spent = human_read(tab, stop_event)
             l.details = extract_listing_body(tab)
             l.posted_at = extract_listing_posted_at(tab)
+            # One line per ad. Reading properly turned this phase from seconds into minutes,
+            # and a phase that logs nothing for six minutes is indistinguishable from a hang —
+            # which is exactly the question asked of the last silent run.
+            log.info("Read %d/%d: %s (%.0fs, %d chars)", i + 1, len(listings),
+                     (l.title or l.url)[:52], spent, len(l.details or ""))
             # Freeze the page while we're on it — self-contained MHTML, no extra visit. Held in a
             # TEMP file; the persist step keeps it only if this listing matched, discards it
             # otherwise. See web_watcher/archive.py.

@@ -394,7 +394,9 @@ _BODY_JS = r"""() => {
         '.attrgroup',                 // craigslist structured attributes
         '#postingbody',               // craigslist description
         '[data-testid="x-item-description"], .x-item-description',  // ebay
+        '.x-about-this-item, [data-testid="ux-layout-section--about"]',  // ebay item specifics
         '#viewad-description, .ad-description',                     // generic classifieds
+        '[data-testid="marketplace_pdp_component"]',                // fb marketplace
         'article', '[itemprop="description"]', '.description',
     ];
     const seen = new Set();
@@ -405,14 +407,68 @@ _BODY_JS = r"""() => {
         });
     }
     let text = parts.join(' — ');
-    if (text.length < 40) {            // nothing matched → trimmed page body fallback
-        text = clean(document.body ? document.body.innerText : '');
+
+    // ---- Fallback, for a site whose ad container we don't know yet ----------------
+    // This used to be a flat `document.body.innerText`, and it was quietly the worst thing
+    // in the deep-read: on eBay it returned 8,000 characters of the global category menu
+    // ("Antiques Art Baby Books Business & Industrial…"), which LOOKS like a successful
+    // extraction — nothing errors, the length is healthy — while handing the judge pure
+    // navigation. Strip the page furniture first, then take the densest block of PROSE
+    // rather than whatever the body happens to concatenate.
+    if (text.length < 40 && document.body) {
+        const doc = document.body.cloneNode(true);
+        doc.querySelectorAll(
+            'nav, header, footer, script, style, noscript, svg, form, select, ' +
+            '[role="navigation"], [role="banner"], [role="contentinfo"], [role="search"], ' +
+            '[aria-hidden="true"], .nav, .navbar, .menu, .breadcrumb, .cookie, ' +
+            '#gh, #glbfooter, .gh-header, .site-header, .site-footer'
+        ).forEach(el => el.remove());
+
+        // A navigation blob is mostly links; an ad description is mostly text. Score each
+        // candidate by its non-link character count and keep the richest one.
+        let best = '', bestScore = 0;
+        const cands = doc.querySelectorAll('div, section, main, article, td, li');
+        for (const el of cands) {
+            const t = clean(el.innerText);
+            if (t.length < 60 || t.length > 12000) continue;
+            let linkChars = 0;
+            el.querySelectorAll('a').forEach(a => { linkChars += clean(a.innerText).length; });
+            const score = t.length - 2 * linkChars;     // links count against it, twice
+            if (score > bestScore) { bestScore = score; best = t; }
+        }
+        text = best || clean(doc.innerText);
     }
     // 8000, not 2000: sellers put phone numbers and "call me at…" at the END of long ads, so a
     // tight cap deleted exactly the contact info the user saves the ad for. Still bounded so the
-    // whole-page fallback above can't store megabytes.
+    // fallback above can't store megabytes.
     return text.slice(0, 8000);
 }"""
+
+# eBay puts the seller's actual description in a SEPARATE, cross-origin iframe served from
+# ebaydesc.com, so no selector on the main document can ever see it — which is why the eBay
+# deep-read fell through to the page-furniture fallback. Playwright can address that frame
+# directly; the DOM cannot. Any site that isolates its description this way benefits.
+_DESC_FRAME_HINTS = ("desc_ifr", "ebaydesc.com", "/itmdesc", "description")
+
+
+def _description_frame_text(page: Page) -> str:
+    """The seller's description when a site isolates it in its own iframe (eBay). Returns ''
+    when there is no such frame — the common case. Best-effort; never raises."""
+    try:
+        for fr in page.frames:
+            if fr == page.main_frame:
+                continue
+            ident = f"{fr.name or ''} {fr.url or ''}".lower()
+            if not any(h in ident for h in _DESC_FRAME_HINTS):
+                continue
+            txt = (fr.evaluate(
+                "() => (document.body ? document.body.innerText : '').replace(/\\s+/g,' ').trim()"
+            ) or "").strip()
+            if len(txt) > 40:
+                return txt[:6000]
+    except Exception as exc:
+        log.debug("description-frame read failed: %s", exc)
+    return ""
 
 
 def extract_listing_body(page: Page) -> str:
@@ -420,12 +476,19 @@ def extract_listing_body(page: Page) -> str:
     Return the meaningful text of a single listing-detail page (attributes +
     description), so the judge can match on what's IN the ad rather than just the card
     title. Best-effort and bounded; returns '' on any failure.
+
+    Reads the main document AND any separate description iframe (eBay serves the seller's
+    description cross-origin, where no page-level selector can reach it).
     """
     try:
-        return (page.evaluate(_BODY_JS) or "").strip()
+        main = (page.evaluate(_BODY_JS) or "").strip()
     except Exception as exc:
         log.debug("Listing body extraction failed: %s", exc)
-        return ""
+        main = ""
+    frame = _description_frame_text(page)
+    if frame and frame not in main:
+        main = f"{main} — {frame}".strip(" —") if main else frame
+    return main[:8000]
 
 
 # When the listing was POSTED. The card only carries a relative "2h ago" that changes

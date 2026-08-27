@@ -244,6 +244,12 @@ class AgentAction:
     memory_key:    Optional[str]   = None
     memory_value:  Optional[str]   = None
     outcome:       Optional[str]   = None  # what observably changed after this action
+    # The element's LABEL as it read AT THE MOMENT WE ACTED. Element indices are positional and
+    # are recomputed every step (the snapshot sorts by viewport + y), so they shift on every
+    # scroll — resolving an old action's index against the CURRENT element list rendered a
+    # FABRICATED memory ("step 3: click [12] 'condition'" for a click that hit 'boat type').
+    # The agent then re-clicked things it had already tried. Captured once, never re-resolved.
+    element_label: Optional[str]   = None
 
 
 @dataclass
@@ -423,6 +429,14 @@ def run_agent(
         # quietly shrinks what it will ever find, and "flag", "favourite" and "delete" sit on the
         # same card. Both lists run: the site-agnostic one everywhere, Facebook's stricter one on
         # top of it there.
+        # Stamp the element's label onto the action NOW, while `elements` still describes the page
+        # this action was chosen against. One step later the indices have moved and the label can
+        # no longer be recovered truthfully. This is what the action history is rendered from.
+        if action.action in ("click", "type", "select") and action.element_index is not None:
+            _el = next((e for e in elements if e["index"] == action.element_index), None)
+            if _el and (_el.get("label") or "").strip():
+                action.element_label = str(_el["label"]).strip()[:60]
+
         if action.action == "click" and action.element_index is not None:
             _tgt = next((e for e in elements if e["index"] == action.element_index), None)
             _label = (_tgt or {}).get("label", "")
@@ -1653,9 +1667,14 @@ def _query_llm(
         if a.action == "remember":
             history_text += f" {a.memory_key!r}={a.memory_value!r}"
         elif a.element_index is not None:
-            el = next((e for e in elements if e["index"] == a.element_index), None)
-            if el:
-                history_text += f" [{a.element_index}] {el['label']!r}"
+            # The label STORED WITH THE ACTION — never re-resolved against the current element
+            # list, whose indices have shifted with every scroll since. Indexes are deliberately
+            # not shown: they are meaningless once the page has moved, and printing a stale one
+            # invited the agent to "re-use" an index that now points somewhere else entirely.
+            if a.element_label:
+                history_text += f" {a.element_label!r}"
+            else:
+                history_text += " (element no longer identifiable)"
         if a.text:
             history_text += f" text={a.text!r}"
         if a.key:
@@ -1751,6 +1770,9 @@ def _query_llm(
         + f"{page_text_label}\n{page_snippet}\n\n"
         f"Interactive elements:\n{_elements_text(elements)}\n\n"
         + scratchpad_section
+        # WHAT-I-ALREADY-TRIED comes BEFORE the step log: it covers the whole run (the step log is
+        # capped at 10) and it is the block that stops the agent re-clicking a dead control.
+        + _tried_ledger(history)
         + (f"Previous actions:\n{history_text}" if history_text else "No previous actions yet.")
         + text_field_hint
         + "\n\nWhat is your next action?"
@@ -2202,6 +2224,41 @@ def _url_path(url: str) -> str:
         return f"{p.netloc}{p.path}".rstrip("/")
     except Exception:
         return url
+
+
+def _tried_ledger(history: list) -> str:
+    """"I have already pushed that button, and here is what it did."
+
+    The step-by-step history only shows the last 10 steps and is ordered by time, so a control
+    tried at step 2 is invisible by step 13 — which is exactly how the agent ended up clicking the
+    same craigslist sort control five times with slightly reworded reasoning. This is the opposite
+    view: keyed by the CONTROL, deduped, covering the WHOLE run, and stating the observed effect.
+
+    A control that produced no effect is called out as pointless, because "page unchanged" is the
+    single most useful thing the agent can know and the thing it most reliably forgot."""
+    seen: dict[str, dict] = {}
+    for a in history:
+        label = (getattr(a, "element_label", "") or "").strip()
+        if not label or a.action not in ("click", "type", "select"):
+            continue
+        rec = seen.setdefault(label, {"n": 0, "outcome": ""})
+        rec["n"] += 1
+        # Keep the most informative outcome we ever saw for this control: a real effect beats
+        # "page unchanged", which in turn beats nothing at all.
+        out = (a.outcome or "").strip()
+        if out and (not rec["outcome"] or rec["outcome"] == "page unchanged"):
+            rec["outcome"] = out
+    if not seen:
+        return ""
+    lines = []
+    for label, rec in list(seen.items())[:14]:
+        out = rec["outcome"] or "no observable effect"
+        if out == "page unchanged":
+            out = "NOTHING CHANGED — this control does not help; do not click it again"
+        times = f" (tried {rec['n']}×)" if rec["n"] > 1 else ""
+        lines.append(f"  - {label!r}{times} → {out[:110]}")
+    return ("CONTROLS YOU HAVE ALREADY USED ON THIS PAGE — do NOT try these again unless the "
+            "result below says they helped:\n" + "\n".join(lines) + "\n\n")
 
 
 def _action_outcome(pre_url: str, post_url: str, pre_title: str, post_title: str) -> str:

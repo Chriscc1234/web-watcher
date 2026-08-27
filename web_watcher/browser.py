@@ -55,6 +55,18 @@ _STEALTH_ARGS = [
     "--start-maximized",
     "--lang=en-US",
 ]
+# The launch flags for a window a PERSON is driving (Connect Facebook). No automation-hiding,
+# no engine surgery — just the two flags that stop Chrome nagging a first-run profile.
+# Crucially this DROPS --disable-features=IsolateOrigins,site-per-process: that switches off
+# Chrome's site isolation, and Facebook's two-factor step runs in cross-origin iframes, which is
+# exactly the kind of thing that then fails to render. It also drops
+# --disable-blink-features=AutomationControlled, which exists only to hide automation and has no
+# business in a window where the automation is a human being.
+_CLEAN_ARGS = [
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+
 ACTION_TIMEOUT = 10_000
 SCREENSHOT_TIMEOUT = 15_000
 
@@ -453,6 +465,12 @@ class BrowserSession:
             self._context.add_init_script(_CURSOR_JS)
         return self
 
+    def _launch_args(self) -> list[str]:
+        """Chrome flags for this session. Hands-off mode gets a VANILLA set: the stealth args
+        exist to make automation look human, which is pointless when a human is driving, and
+        actively harmful here — disabling site isolation broke Facebook's two-factor step."""
+        return list(_CLEAN_ARGS if not self._inject_patches else _STEALTH_ARGS)
+
     def _enter_persistent(self) -> None:
         """Launch a persistent-profile context (full user-data-dir on disk)."""
         # Serialize shared-profile access so concurrent login-profile watches don't
@@ -471,7 +489,7 @@ class BrowserSession:
                 self._context = self._pw.chromium.launch_persistent_context(
                     user_data_dir=str(self._profile_dir),
                     headless=self._headless,
-                    args=_STEALTH_ARGS,
+                    args=self._launch_args(),
                     **({"channel": channel} if channel else {}),
                     **ctx_kwargs,
                 )
@@ -500,7 +518,7 @@ class BrowserSession:
                 try:
                     self._browser = self._pw.chromium.launch(
                         headless=False,
-                        args=_STEALTH_ARGS,
+                        args=self._launch_args(),
                         **( {"channel": channel} if channel else {} ),
                     )
                     log.info("Browser launched (visible) via channel=%r", channel or "bundled")
@@ -510,7 +528,7 @@ class BrowserSession:
         else:
             self._browser = self._pw.chromium.launch(
                 headless=True,
-                args=_STEALTH_ARGS,
+                args=self._launch_args(),
             )
         if self._browser is None:
             raise RuntimeError("Could not launch any browser in visible mode")

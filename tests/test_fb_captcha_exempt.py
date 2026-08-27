@@ -91,3 +91,21 @@ def test_connect_facebook_opens_a_clean_window():
     from web_watcher.services import ServiceManager
     src = _i.getsource(ServiceManager.connect_facebook)
     assert "inject_patches=False" in src
+
+
+def test_hands_off_mode_uses_vanilla_launch_flags():
+    """The Connect window gets plain Chrome flags — no automation-hiding, no engine surgery.
+
+    --disable-features=IsolateOrigins,site-per-process switches OFF Chrome's site isolation, and
+    Facebook's two-factor step runs in cross-origin iframes: it rendered as a blank page with a
+    lone Meta logo. --disable-blink-features=AutomationControlled exists only to hide automation,
+    which is meaningless when the automation is a person."""
+    from web_watcher.browser import BrowserSession
+    hands_off = BrowserSession(headless=False, persistent=True, inject_patches=False)._launch_args()
+    assert not any("IsolateOrigins" in a for a in hands_off)
+    assert not any("AutomationControlled" in a for a in hands_off)
+    assert "--no-first-run" in hands_off            # harmless first-run nags still suppressed
+    # Normal sweeps are UNCHANGED — this is a carve-out, not a policy change.
+    normal = BrowserSession(headless=False, persistent=True)._launch_args()
+    assert any("IsolateOrigins" in a for a in normal)
+    assert any("AutomationControlled" in a for a in normal)

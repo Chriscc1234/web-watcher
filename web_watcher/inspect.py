@@ -33,9 +33,12 @@ OLLAMA_URL = "http://localhost:11434"
 
 # Preference order for the deep model when the user hasn't pinned one: a GENERAL reasoning
 # model (NOT the coder tune — coding models are the wrong tool for reading an ad and judging a
-# scam), biggest first. Whichever of these is installed wins; else we fall back to the council
-# model (always present). qwen2.5:72b is the quality tier the user opted into.
-_INSPECT_PREFERENCE = ("qwen2.5:72b", "qwen2.5:32b", "llama3.3:70b", "qwen2.5:14b")
+# scam), QUALITY first — but quality the machine can actually deliver. qwen3:14b leads: its
+# thinking mode gives deep per-listing reasoning (~30s, fine for an on-demand vet) while fitting
+# a 16GB card entirely on GPU. The huge models come AFTER it deliberately: on this hardware a
+# 47GB qwen2.5:72b runs mostly on CPU and a "quality tier" that takes minutes per listing is
+# worse than a thoughtful one that takes thirty seconds. Bigger-is-better only when it fits.
+_INSPECT_PREFERENCE = ("qwen3:14b", "qwen2.5:72b", "qwen2.5:32b", "llama3.3:70b", "qwen2.5:14b")
 
 # Documented shape of the verdict the model returns (enforced via format=json + prompt).
 INSPECT_SCHEMA = {

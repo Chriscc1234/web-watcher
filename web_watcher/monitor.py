@@ -75,7 +75,7 @@ _EXTRACT_JS = """() => {
         const seen = new Set();
         el.querySelectorAll('a[href]').forEach(x => {
             const h = (x.href || '').split('?')[0];
-            if (/\\/\\d{7,}(?:\\.html|\\/|$)|\\/(?:itm|item|listing|offer|marketplace\\/item)\\/|\\/view\\/[dp]\\//i.test(h))
+            if (/\\/\\d{7,}(?:\\.html|\\/|$)|\\/(?:itm|item|listing|offer|marketplace\\/item)\\/|\\/view\\/[dp]\\/|\\/(?:boat|vehicle|ad)\\/[^\\/]*-\\d{6,}(?:\\/|$)/i.test(h))
                 seen.add(h);
         });
         return seen.size;
@@ -130,6 +130,11 @@ _PAT_FB      = re.compile(r"/marketplace/item/(\d{10,})")        # fb marketplac
 _PAT_CL_NEW  = re.compile(r"/view/(?:d|p)/[^/]+/([A-Za-z0-9_-]{8,})")
 _PAT_CL      = re.compile(r"/(\d{8,})\.html")                    # legacy craigslist post ids
 _PAT_GENERIC = re.compile(r"/(?:item|listing|product|offer)/[^?#]*?(\d{7,})")
+# Slug-then-id shape: /boat/2000-macgregor-26x-10276099/ (BoatTrader, verified live 27 Aug
+# 2026; AutoTrader and several classifieds use the same idea). The id trails a hyphenated
+# slug, so the digits-after-a-slash generics above can never see it — which made the
+# extractor completely blind on BoatTrader while the page plainly showed 31 listings.
+_PAT_SLUG_ID = re.compile(r"/(?:boat|vehicle|listing|ad)/[^?#]*-(\d{6,})(?:/|$)")
 # OfferUp item ids are UUIDs, not digits: /item/detail/f9c730b0-02c9-3382-a7b3-5271d033fb79
 # (verified live 26 Aug 2026). _PAT_GENERIC demands 7+ DIGITS after /item/, so every OfferUp
 # card was rejected and the harvest came back 0 while the vision model could plainly see the
@@ -309,8 +314,12 @@ def _listing_key(url: str, profiles: list[dict] | None = None) -> str | None:
         if any(p.get("domain") == sk and p.get("listing_url_regex") for p in profiles):
             return None
 
-    # Unknown host: keyword pattern first, then a conservative long-numeric fallback.
+    # Unknown host: keyword pattern first, then slug-id, then a conservative long-numeric
+    # fallback.
     m = _PAT_GENERIC.search(path)
+    if m:
+        return f"listing:{m.group(1)}"
+    m = _PAT_SLUG_ID.search(path)
     if m:
         return f"listing:{m.group(1)}"
     m = _PAT_NUMERIC.search(path)

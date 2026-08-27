@@ -129,6 +129,20 @@ def place_latlon(name: str, anchor: tuple[float, float] | None = None) -> tuple[
     return None
 
 
+def place_latlon_in_state(name: str, state: str) -> tuple[float, float] | None:
+    """Coordinates for 'City, ST' when the STATE is known — the unambiguous case. 'Miami'
+    alone is many towns (FL, OK, AZ…) and unresolvable without a nearby anchor; 'Miami, FL'
+    is exact. Listings write the state right on the card, so use it."""
+    cands = _place_table().get((name or "").strip().lower())
+    st = (state or "").strip().upper()
+    if not cands or not st:
+        return None
+    matches = [c for c in cands if c[0].upper() == st]
+    if len(matches) == 1:
+        return (matches[0][1], matches[0][2])
+    return None
+
+
 def nearest_zip(lat: float, lon: float) -> str | None:
     """The zip whose centroid is closest to (lat, lon) — turns a resolved place into a
     postal= filter craigslist understands."""
@@ -222,13 +236,22 @@ def _extract_in_place(text: str, anchor: tuple[float, float] | None = None,
     if not m:
         return text, None
     words = re.findall(r"[a-z.'\-]+", m.group(1).lower())
+    # "near Everett WA" — the state the user wrote makes an otherwise-AMBIGUOUS town exact.
+    # Without this, 'everett' (many states) resolved to None here, the caller fell through to
+    # its bare-word scan, and 'Catalina sailboats near Everett WA' anchored a Washington watch
+    # to Catalina, ARIZONA — the brand word happens to be a nationally-unique town name.
+    st = None
+    for k, w in enumerate(words):
+        if w.upper() in _US_STATES and k > 0:
+            st, words = w.upper(), words[:k]
+            break
     for n in range(min(3, len(words)), 0, -1):
         # Strip sentence punctuation off the ends — an instruction almost always ends in a
         # period ("...in Anacortes.") and a trapped trailing '.' fails the gazetteer lookup.
         cand = " ".join(words[:n]).strip(" .'-")
         if not cand:
             continue
-        ll = place_latlon(cand, anchor)
+        ll = (place_latlon_in_state(cand, st) if st else None) or place_latlon(cand, anchor)
         if ll:
             text = re.sub(r"\b(?:in|near|around)\s+" + re.escape(cand),
                           " ", text, count=1, flags=re.I)
@@ -888,8 +911,29 @@ def place_from_text(text: str) -> tuple[float, float] | None:
 
     Tries two-word names first ("Mount Vernon") so they aren't split, skips words that are never
     places, and relies on place_latlon refusing ambiguous names — guessing a state would quietly
-    watch the wrong coast."""
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z.'-]+", text or "")]
+    watch the wrong coast.
+
+    The phrase AFTER 'in/near/around' wins over a bare left-to-right scan. 'Catalina sailboats
+    near Everett WA' anchored a watch to Catalina, ARIZONA — the brand word resolved first
+    because it happens to be a nationally-unique town name. The user told us where they meant;
+    the preposition is where they said it."""
+    text = text or ""
+    # 1. "near <place> [ST]" — the stated location. A trailing state abbreviation makes the
+    #    lookup exact; otherwise longest-chunk-first with the ambiguity rules unchanged.
+    for m in _IN_PLACE_RE.finditer(text):
+        words = re.findall(r"[A-Za-z][A-Za-z.'-]+", m.group(1))
+        st = words.pop() if words and words[-1].upper() in _US_STATES else None
+        for size in (2, 1):
+            for i in range(len(words) - size + 1):
+                chunk = words[i:i + size]
+                if any(w.lower() in _PLACE_STOPWORDS for w in chunk):
+                    continue
+                name = " ".join(chunk)
+                got = (place_latlon_in_state(name, st) if st else None) or place_latlon(name)
+                if got:
+                    return got
+    # 2. Fallback: any resolvable town named anywhere in the text.
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z.'-]+", text)]
     if not words:
         return None
     for size in (2, 1):

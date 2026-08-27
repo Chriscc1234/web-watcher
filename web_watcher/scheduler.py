@@ -1712,7 +1712,13 @@ _RATING_RUBRIC = (
     "  5 = Meets every stated requirement AND is an unusually good deal or condition.\n"
     "HARD RULE: if your own reason says the listing fails a requirement — wrong make, outside "
     "the area, too far, over budget — the rating MUST be 2 or lower. Never write a failing "
-    "reason with a passing score."
+    "reason with a passing score.\n"
+    "STATED means STATED: judge only requirements the user actually wrote. If they gave no "
+    "price limit, price is NOT a criterion — never invent a budget. If they gave no location, "
+    "location is NOT a criterion. 'Near <place>' means the surrounding region (a listing one "
+    "or two towns over still qualifies), and listings have already been distance-screened "
+    "before you see them — reject on location only if the AD ITSELF names somewhere clearly "
+    "outside the stated area."
 )
 
 
@@ -1866,6 +1872,12 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
 
     def _entry(i: int, l) -> str:
         line = f"{i}. {l.title} {l.price}".strip()
+        # Stamp the COMPUTED distance on the row. The model's own geography rated a San Juan
+        # in Bremerton "Too far from Seattle" (27 straight-line miles); with the gazetteer's
+        # number on the line there is nothing left to guess.
+        miles = _listing_miles(watch, l.title or "")
+        if miles is not None:
+            line += f"  [~{miles:.0f} mi from the user's area]"
         if l.details:
             line += f"\n   AD DETAILS: {l.details[:600]}"
         return line
@@ -1986,6 +1998,64 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
 _VERIFY_CAP = 12
 
 
+# A rejection that is ABOUT the listing's location (vs brand/price/spec). Used to decide when
+# the deterministic gazetteer is allowed to overturn the judge.
+_LOCATION_REASON_RE = re.compile(
+    r"\b(location|too far|not (?:in|near)|is [A-Z][a-z]+ not|outside (?:the )?(?:area|radius|region|state)|"
+    r"miles? (?:away|from)|wrong (?:area|city|town|state)|different (?:city|state))\b", re.IGNORECASE)
+
+
+def _listing_miles(watch: Watch, text: str) -> float | None:
+    """Straight-line miles from the watch's anchor to the 'City, ST' in a listing's text, or
+    None when either side can't be located. Deterministic — this is the gazetteer speaking,
+    not a model guessing."""
+    try:
+        anchor = _watch_geolocation(watch)
+        if not anchor:
+            return None
+        from web_watcher.cl_geo import (parse_city_state, place_latlon,
+                                        place_latlon_in_state, miles_between)
+        cs = parse_city_state(text or "")
+        if not cs:
+            return None
+        city, st = cs
+        words = re.findall(r"[A-Za-z][A-Za-z.'\-]*", city)
+        for n in range(min(3, len(words)), 0, -1):
+            name = " ".join(words[-n:])
+            # State-qualified first ('Miami, FL' is exact); anchor-disambiguated second.
+            ll = place_latlon_in_state(name, st) or place_latlon(name, anchor)
+            if ll:
+                return miles_between(anchor, ll)
+    except Exception:
+        pass
+    return None
+
+
+# Matches the out-of-area prefilter's default: past this, the prefilter would have dropped the
+# listing before any judge saw it — so anything nearer is, by the watch's own screening
+# standard, in range.
+_NEAR_MILES = 200.0
+
+
+def _geo_fact(watch: Watch, text: str) -> str:
+    """A one-line, deterministic location fact for the judge prompt — or ''.
+
+    The judge kept treating 'near Anacortes' as 'equals Anacortes': a MacGregor in Seattle
+    (62 straight-line miles) was removed as 'Location is Seattle not Anacortes', exactly the
+    reasoning that killed the Puyallup and Ocean Shores boats on the Facebook run. Models are
+    bad at geography; the bundled gazetteer is not. So when we can compute the distance, we
+    STATE it — and state the verdict that follows from it, so there is nothing left for the
+    model to guess about."""
+    miles = _listing_miles(watch, text)
+    if miles is None:
+        return ""
+    if miles <= _NEAR_MILES:
+        return (f"LOCATION FACT (computed, trust it): this listing is about {miles:.0f} miles "
+                f"from the user's area — WITHIN range. Do not reject it for location.")
+    return (f"LOCATION FACT (computed, trust it): this listing is about {miles:.0f} miles "
+            f"from the user's area — outside range.")
+
+
 def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: int) -> list:
     """Pass 2 of the judge: re-ask about each KEPT listing on its own.
 
@@ -2013,6 +2083,7 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
             body = f"{l.title or ''} {l.price or ''}"
             if details:
                 body += f"\nAD DETAILS: {details}"
+            geo = _geo_fact(watch, l.title or "")
             content = llm.chat(
                 [
                     {"role": "system", "content":
@@ -2020,11 +2091,20 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
                         "strictly from what the listing says. A listing that fails ANY stated "
                         "requirement (brand/model, item type, location, price, spec) is NOT a "
                         "match — being a real, nice example of the general category is not "
-                        "enough. Return ONLY JSON: "
+                        "enough.\n"
+                        "Judge ONLY requirements the user actually stated: if they gave no "
+                        "price limit, price is not a criterion; if they gave no location, "
+                        "location is not a criterion. Never invent a budget or a radius.\n"
+                        "'Near <place>' means the surrounding region, not that exact town — a "
+                        "listing one or two towns over still qualifies. When a LOCATION FACT "
+                        "line is present it was computed from map data: it OVERRIDES your own "
+                        "geography.\n"
+                        "Return ONLY JSON: "
                         '{"match": true|false, "why": "<10 words or fewer>"}'},
                     {"role": "user", "content":
-                        f"Criteria: {watch.instruction}\n{watch.judgment_prompt or ''}\n\n"
-                        f"Listing:\n{body}\n\nDoes this listing satisfy the criteria?"},
+                        f"Criteria: {watch.instruction}\n{watch.judgment_prompt or ''}\n"
+                        + (f"{geo}\n" if geo else "")
+                        + f"\nListing:\n{body}\n\nDoes this listing satisfy the criteria?"},
                 ],
                 role="judge",
                 local_model=cfg.models.effective_council_model,
@@ -2042,6 +2122,16 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
             # The verifier contradicting itself gets the same deterministic rule as the batch.
             if ok and _FAILING_REASON_RE.search(why_ver):
                 ok = False
+            # Deterministic geography beats model geography: a LOCATION-based rejection of a
+            # listing the gazetteer places within range is overturned. The prefilter already
+            # screened confidently-far listings before any judge saw this one; a model
+            # re-rejecting it for location is second-guessing map data with vibes.
+            if not ok and _LOCATION_REASON_RE.search(why_ver):
+                miles = _listing_miles(watch, l.title or "")
+                if miles is not None and miles <= _NEAR_MILES:
+                    log.info("   verify OVERTURNED (geo): %s is %.0f mi away — within range; "
+                             "judge said %r", (l.title or "")[:50], miles, why_ver[:60])
+                    ok, why_ver = True, ""
             if not ok:
                 l.rating = threshold - 1
                 l.judge_reason = f"verify: {why_ver or 'does not satisfy the criteria'}"

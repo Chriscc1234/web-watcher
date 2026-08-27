@@ -421,6 +421,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       </div>
     </div>
 
+    <!-- Facebook — kept next to Telegram: both are "connect an account" steps, and this
+         is one of the first things a new user needs, not something to hunt for further down. -->
+    <h3 style="margin-top:22px;font-size:15px">Facebook</h3>
+    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:10px">
+      <div style="flex:1">
+        <div style="font-weight:600;margin-bottom:4px">Connect Facebook</div>
+        <div style="font-size:12px;color:var(--dim)">Opens a browser window so you can log into Facebook once. The saved session is reused by watches that have "Use saved login profile" enabled (e.g. Marketplace). Log in, then close the window.</div>
+        <div id="fb-connect-status" style="font-size:12px;color:var(--dim);margin-top:6px"></div>
+      </div>
+      <button class="primary" id="fb-connect-btn" onclick="connectFacebook()" style="white-space:nowrap">Connect Facebook</button>
+    </div>
+
     <!-- Claude (Anthropic) -->
     <h3 style="margin-top:22px;font-size:15px">Claude (optional — faster, sharper matching)</h3>
     <div class="service-card" style="display:block;padding:16px 20px;max-width:600px">
@@ -671,14 +683,6 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
         </div>
         <span id="cursor-label" style="font-size:13px;color:var(--dim)">Off</span>
       </label>
-    </div>
-    <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:10px">
-      <div style="flex:1">
-        <div style="font-weight:600;margin-bottom:4px">Connect Facebook</div>
-        <div style="font-size:12px;color:var(--dim)">Opens a browser window so you can log into Facebook once. The saved session is reused by watches that have "Use saved login profile" enabled (e.g. Marketplace). Log in, then close the window.</div>
-        <div id="fb-connect-status" style="font-size:12px;color:var(--dim);margin-top:6px"></div>
-      </div>
-      <button class="primary" id="fb-connect-btn" onclick="connectFacebook()" style="white-space:nowrap">Connect Facebook</button>
     </div>
 
     <div class="service-card" style="display:flex;align-items:center;gap:20px;padding:16px 20px;max-width:600px;margin-top:24px;border-color:#7f1d1d">

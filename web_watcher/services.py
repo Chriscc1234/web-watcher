@@ -730,7 +730,17 @@ class ServiceManager:
                 persistent=True, profile_dir=cfg.browser.profile_dir,
                 inject_patches=False,
             ) as session:
-                page = session.new_page()
+                # A persistent context opens with its own about:blank page. Reuse THAT instead of
+                # adding a second tab, so the user gets one clean window rather than a stray
+                # blank tab sitting next to the login (they noticed, and it looks broken).
+                page = None
+                try:
+                    existing = [p for p in session.context.pages if not p.is_closed()]
+                    page = existing[0] if existing else None
+                except Exception:
+                    page = None
+                if page is None:
+                    page = session.new_page()
                 page.goto("https://www.facebook.com/", timeout=60_000, wait_until="domcontentloaded")
                 self._fb_connect_status = "waiting_for_login"
                 log.info("Facebook login window open — waiting for user to sign in and close it")

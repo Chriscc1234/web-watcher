@@ -520,6 +520,12 @@ class BrowserSession:
             self._context.add_init_script(_CURSOR_JS)
         return self
 
+    @property
+    def context(self):
+        """The live BrowserContext (or None). Lets a caller reuse the persistent context's own
+        default page instead of opening a second tab beside it."""
+        return self._context
+
     def _launch_args(self) -> list[str]:
         """Chrome flags for this session. Hands-off mode gets a VANILLA set: the stealth args
         exist to make automation look human, which is pointless when a human is driving, and

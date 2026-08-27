@@ -224,3 +224,23 @@ def test_place_latlon_in_state_is_exact():
     assert ll and 25 < ll[0] < 27
     assert place_latlon_in_state("Miami", "") is None
     assert place_latlon_in_state("Xyzzyville", "WA") is None
+
+
+# --------------------------------------------------------------------------
+# The location typed as a search query (the OfferUp toy-dinosaur sweep)
+# --------------------------------------------------------------------------
+
+def test_bare_locations_are_recognised():
+    from web_watcher.agent import _is_bare_location
+    for t in ("Anacortes WA", "Seattle, WA", "98221", "Mount Vernon WA", "Washington",
+              "washington state", "New York", "Boise ID"):
+        assert _is_bare_location(t), t
+
+
+def test_product_queries_are_not_bare_locations():
+    """Brand words that share town/state names must stay searchable — blocking 'Catalina'
+    or 'Georgia font pack' would break the searches this app exists to run."""
+    from web_watcher.agent import _is_bare_location
+    for t in ("macgregor sailboat", "Catalina", "Ford Ranger XLT", "Georgia font pack",
+              "MacGregor 26X WA trailer", "manual civic", "Ranger bass boat", ""):
+        assert not _is_bare_location(t), t

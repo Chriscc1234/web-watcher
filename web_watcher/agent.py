@@ -648,6 +648,28 @@ def run_agent(
                 _human_pause(*ACTION_PAUSE)
                 continue
 
+        # ── Block the LOCATION typed as a search query ────────────────────────
+        # The mirror of the location-box bug. Observed live on OfferUp: the location control
+        # couldn't be confirmed, so the agent "fixed" it by typing 'Anacortes WA' into the
+        # KEYWORD box — which replaced the product query entirely and harvested toy dinosaurs
+        # and a baby grand piano near Anacortes onto a sailboat watch. A bare place string
+        # ('City ST', 'City, ST', a 5-digit zip) is never a product search; it belongs in a
+        # location control or nowhere.
+        if (action.action == "type" and action.text
+                and not label_is_location_box(action.element_label or "")
+                and _is_bare_location(action.text)):
+            log.info("Agent tried to search for the LOCATION %r in a keyword box — rejecting",
+                     action.text)
+            action.outcome = (
+                f"REJECTED: {action.text!r} is a PLACE, and this box is a keyword search. "
+                "Searching for a place name replaces the product search and returns random "
+                "items near it. Keep PRODUCT terms in the search box; set location only via "
+                "a control labelled for location/zip — and if there isn't one, leave "
+                "location alone and read the results as they are."
+            )
+            _human_pause(*ACTION_PAUSE)
+            continue
+
         # ── Block repeated searches ───────────────────────────────────────────
         # The agent tends to re-type the SAME query it already searched (different
         # element index, same text), thrashing instead of progressing. Reject a
@@ -2498,6 +2520,42 @@ def _goal_states_a_number(instruction: str, kind: str) -> bool:
     if kind == "miles":
         return bool(re.search(r"\bmiles?\b|\bmileage\b|\bradius\b|\bwithin\s+\d|\bkm\b", t))
     return True
+
+
+def _is_bare_location(text: str) -> bool:
+    """True when `text` is a bare PLACE string — 'Anacortes WA', 'Seattle, WA', '98221' —
+    and nothing else. Deliberately narrow: only shapes nobody ever types as a product search.
+    A lone town name ('Catalina') is NOT flagged — brands share town names, and blocking those
+    would break exactly the searches this codebase exists to run."""
+    t = " ".join((text or "").split())
+    if not t:
+        return False
+    if re.fullmatch(r"\d{5}(?:-\d{4})?", t):
+        return True
+    # A full state NAME typed alone — seen live: the agent typed 'Washington' into
+    # BoatTrader's keyword box to satisfy "in Washington state".
+    if t.lower() in _STATE_NAMES:
+        return True
+    m = re.fullmatch(r"([A-Za-z][A-Za-z .'\-]{1,30}?),?\s+([A-Za-z]{2})", t)
+    if m:
+        try:
+            from web_watcher.cl_geo import _US_STATES
+            return m.group(2).upper() in _US_STATES
+        except Exception:
+            return False
+    return False
+
+
+_STATE_NAMES = frozenset({
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+    "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
+    "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+    "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
+    "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island",
+    "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming", "washington state",
+})
 
 
 def _invented_filter_value(label: str, text: str, instruction: str) -> str:

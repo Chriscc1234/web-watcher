@@ -179,3 +179,50 @@ def test_offerup_is_fully_drivable():
                                  instruction="trucks in anacortes under 10k")
     assert req.zip                                   # localized from the instruction
     assert N.can_fully_drive(req, N.hints_for("https://offerup.com/search")) is True
+
+
+# ── category must never be silently dropped (the golf-club bug) ───────────────────
+# A live sweep drove the search box for a "MacGregor sailboat" watch in cat=boo (boats) and
+# landed on cat=sss (ALL for sale), because apply_search_request treated category and keyword as
+# either/or and can_fully_drive only demanded a category link when there was NO keyword. Searching
+# all of craigslist for "macgregor" is how a SAILBOAT watch filled with MacGregor GOLF CLUBS.
+
+def test_a_keyword_watch_with_a_category_needs_the_category_link():
+    from web_watcher import navigate as N
+    url = ("https://skagit.craigslist.org/search/boo?query=MacGregor+sailboat"
+           "&search_distance=300&postal=98221")
+    req = N.build_search_request(url, "MacGregor sailboats within 300 miles of Anacortes")
+    assert req.category == "boo" and req.terms          # both present — the bug's precondition
+    hint = N.hints_for(url)
+    assert N.can_fully_drive(req, hint) is True         # craigslist can click the category
+    # Strip the ability to click the category: driving must now be REFUSED, not silently widened.
+    crippled = {k: v for k, v in hint.items() if k != "category_link"}
+    assert N.can_fully_drive(req, crippled) is False
+
+
+def test_category_and_keyword_are_both_applied_not_either_or():
+    """Category is clicked AND the keyword typed — category first, the way a person narrows to
+    Boats and then searches within it."""
+    from web_watcher import navigate as N
+
+    calls = []
+    # The REAL request object, built from a real URL — a hand-rolled stub drifts from the schema.
+    req = N.build_search_request(
+        "https://skagit.craigslist.org/search/boo?query=MacGregor+sailboat", "MacGregor sailboat")
+    assert req.category == "boo" and req.terms
+
+    def _fake_click(page, category, hint):
+        calls.append(("category", category)); return True
+
+    def _fake_type(page, terms, hint):
+        calls.append(("search", terms)); return True
+
+    orig_click, orig_type = N.click_category, N.type_search
+    try:
+        N.click_category, N.type_search = _fake_click, _fake_type
+        applied = N.apply_search_request(object(), req, {"category_link": "a[href*='cat={cat}']"})
+    finally:
+        N.click_category, N.type_search = orig_click, orig_type
+
+    assert applied["categorized"] is True and applied["searched"] is True
+    assert [c[0] for c in calls] == ["category", "search"]   # category FIRST

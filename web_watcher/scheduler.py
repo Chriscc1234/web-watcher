@@ -939,6 +939,13 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     # Landing on the right page but DROPPING the zip/price would quietly widen the watch to the
     # whole region at any price — worse than the URL we were avoiding. If the request asked for
     # a location or a price and the controls didn't take, fall back rather than sweep wrong.
+    # A dropped CATEGORY silently widens the watch to every section of the site — the same class
+    # of failure as a dropped zip, and the one that put golf clubs in a sailboat watch. Verified
+    # against what actually happened on the page, not against what we hoped was possible.
+    if req.category and not applied.get("categorized"):
+        log.info("Human-first nav on %s: category %r was not applied — falling back to the URL",
+                 p.netloc, req.category)
+        return False
     if req.zip and not applied.get("located"):
         log.info("Human-first nav on %s: location was not applied — falling back to the URL",
                  p.netloc)

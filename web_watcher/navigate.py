@@ -686,10 +686,14 @@ def can_fully_drive(req: "SearchRequest", hint: dict) -> bool:
     if (req.price_min is not None or req.price_max is not None) and not (
             hint.get("price_min") or hint.get("price_max")):
         return False
-    # A category-only watch ("browse cars+trucks", no keyword) is drivable only where we can
-    # CLICK the category the way a person does; without that hint the URL path must handle it,
-    # or we'd land on the site's front page and quietly browse the wrong thing.
-    if not req.terms and req.category and not hint.get("category_link"):
+    # A watch with a CATEGORY is drivable only where we can CLICK that category the way a person
+    # does; without the hint the URL path must handle it, or we'd browse the wrong section.
+    # This deliberately does NOT exempt keyword watches: it used to read `not req.terms and
+    # req.category and ...`, so a watch with a keyword AND a category passed the gate and then
+    # dropped the category on the floor — cat=boo became cat=sss, and a MacGregor SAILBOAT watch
+    # searched all of craigslist and found golf clubs. A dropped category is as wrong as a
+    # dropped location or price, and is now refused on the same terms.
+    if req.category and not hint.get("category_link"):
         return False
     # Something must be drivable at all (terms, a category to click, a location, or a price).
     return bool(req.terms or (req.category and hint.get("category_link"))
@@ -742,13 +746,15 @@ def apply_search_request(page, req: "SearchRequest", hint: dict | None = None) -
         hint = hints_for(getattr(page, "url", "") or "")
     applied = {"searched": False, "categorized": False, "located": False, "filtered": False}
 
+    # Category and keyword are INDEPENDENT, and the category goes FIRST — the way a person does
+    # it: open Boats, then search within Boats. This used to be an either/or (`if terms ... elif
+    # category`), so a watch that had BOTH — "MacGregor sailboat" in cat=boo — typed the keyword
+    # and silently dropped the category, landing on cat=sss (all for sale). Searching all of
+    # craigslist for "macgregor" is how a SAILBOAT watch filled up with MacGregor GOLF CLUBS.
+    if req.category:
+        applied["categorized"] = click_category(page, req.category, hint)
     if req.terms:
         applied["searched"] = type_search(page, req.terms, hint)
-    elif req.category:
-        # No keyword — this is a "browse this category" watch (e.g. craigslist cars+trucks).
-        # Click the category the way a person picks it off the homepage; the filters below then
-        # run on the resulting results page exactly as they do after a keyword search.
-        applied["categorized"] = click_category(page, req.category, hint)
 
     # Location and price are INDEPENDENT — a site may drive one via a dialog and the other inline
     # (OfferUp: location = a dialog, price = inline min/max), so they must not be an either/or.

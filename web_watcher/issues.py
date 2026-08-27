@@ -18,6 +18,8 @@ KINDS are deliberately a small, fixed vocabulary so the summary means something:
   challenge        a site showed a CAPTCHA/checkpoint and we backed off
   nav_failed       navigation to the sweep's start URL failed
   blind_escalation the scraper saw nothing so we escalated the site to the agent
+  cloud_ladder_futile local + every cloud rung failed one validation check — paid for nothing
+                   (when this recurs, the VALIDATOR is probably wrong, not the models)
 
 Like the escalation log, this is DELIBERATELY NOT wired back into any automated decision. It is a
 record for a person to read and act on — pull a better term list, fix a selector, rest a site —
@@ -44,7 +46,7 @@ log = logging.getLogger(__name__)
 # set is what makes the by-kind summary legible instead of a pile of one-off strings.
 KINDS = frozenset({
     "stuck", "no_listings", "forced_scroll", "search_lock", "false_positive",
-    "challenge", "nav_failed", "blind_escalation",
+    "challenge", "nav_failed", "blind_escalation", "cloud_ladder_futile",
 })
 
 _FILENAME = "sweep_issues.jsonl"

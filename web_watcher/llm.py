@@ -713,6 +713,19 @@ def chat_smart(messages: list[dict], *, role: str, local_model: str, cfg=None,
         except Exception as exc:
             log.warning("chat_smart: %s failed for role %r: %s", model, role, exc)
 
-    # 3. Nothing did better than local. Return what we have rather than nothing.
+    # 3. Nothing did better than local. Return what we have rather than nothing — and say so
+    # LOUDLY: when local, Haiku AND Sonnet all "fail" the same check, the most likely broken
+    # thing is the CHECK, and every occurrence costs real money. This exact pattern burned
+    # $0.40 in an afternoon through a validator that looked for a key the extractor never
+    # emits. The issue log makes a repeat visible instead of a silent line item on a bill.
+    log.warning("chat_smart: role %r — local AND every cloud rung failed the check; "
+                "paid for nothing. If this recurs, the validator is probably wrong.", role)
+    try:
+        from web_watcher import issues
+        issues.record_issue("cloud_ladder_futile", f"role:{role}",
+                            "local + all cloud rungs failed the same validation check — "
+                            "paid cloud calls bought nothing (suspect the validator)")
+    except Exception:
+        pass
     return {"text": local_text, "used": "local", "escalated": False,
             "why": "cloud could not do better"}

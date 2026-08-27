@@ -146,3 +146,41 @@ def test_gerunds_are_spelled():
     """'Stoping all 7 of your watches' went to a real user. Never again."""
     src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
     assert "act.title()}ing" not in src, "a bare act.title()+'ing' gerund survives (Stoping)"
+
+
+# --------------------------------------------------------------------------
+# The extract validator matches the extractor's OWN schema
+# --------------------------------------------------------------------------
+
+COMMIT_REPLY = "Got it — I'll set up a watch for a Ford F-150 under $15,000 near Burlington."
+
+
+def test_a_real_create_extraction_passes_validation():
+    """The burn loop: this exact (correct) shape 'failed' the old check, escalating to Haiku
+    then Sonnet on EVERY committed turn — two paid calls per turn, buying nothing."""
+    good = '{"intent": "create", "watches": [{"name": "F-150", "urls": ["https://x"]}]}'
+    assert S._extract_result_usable(good, COMMIT_REPLY)
+
+
+def test_singular_watch_key_passes():
+    assert S._extract_result_usable('{"intent": "create", "watch": {"name": "x"}}', COMMIT_REPLY)
+
+
+def test_actions_pass():
+    assert S._extract_result_usable(
+        '{"intent": "actions", "watch_actions": [{"action": "stop", "name": "x"}]}', COMMIT_REPLY)
+
+
+def test_empty_extraction_on_a_committed_reply_fails():
+    """The case the validator exists FOR: the reply promised a watch, the extraction is empty
+    — that is the real escalation trigger."""
+    assert not S._extract_result_usable('{"intent": "none"}', COMMIT_REPLY)
+
+
+def test_empty_extraction_on_a_chatty_reply_passes():
+    assert S._extract_result_usable('{"intent": "none"}', "Nothing new today — watches are off.")
+
+
+def test_garbage_fails():
+    assert not S._extract_result_usable("not json at all", COMMIT_REPLY)
+    assert not S._extract_result_usable('["a", "list"]', COMMIT_REPLY)

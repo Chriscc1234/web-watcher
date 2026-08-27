@@ -4124,6 +4124,31 @@ def _chat_reply_natural(system: str, messages: list, model: str, force_local: bo
     return (_prose(text), 0, 0, 0)
 
 
+def _extract_result_usable(text: str, reply: str) -> bool:
+    """The escalation check for the extract role: did the extraction actually carry an action
+    when the assistant's reply PROMISED one?
+
+    ⚠ THE KEYS HERE MUST MATCH _EXTRACT_SYSTEM'S OWN SCHEMA (intent / watches / watch /
+    watch_actions) — not the downstream API names. The first version of this check looked for
+    "watch_suggestion", a key the extractor never emits at this layer, so every extraction on a
+    committed reply "failed", escalated to Haiku, whose CORRECT answer failed the same wrong
+    check, then Sonnet, same again — two paid cloud calls per chat turn, buying nothing, forty
+    cents in an afternoon. The validator IS the escalation trigger: a check that can never pass
+    is a bill that never stops.
+    """
+    try:
+        from web_watcher import llm
+        d = json.loads(llm._extract_json_text(text))
+    except Exception:
+        return False
+    if not isinstance(d, dict):
+        return False
+    if _reply_commits_to_action(reply or ""):
+        return bool(d.get("watches") or d.get("watch")
+                    or d.get("watch_actions") or d.get("listing_query"))
+    return True
+
+
 def _extract_watch_action(messages: list, reply: str, cfg, model: str,
                           focus: str | None, force_local: bool = False) -> dict:
     """Phase 2 — decide if the conversation warrants a concrete watch action and, if so,
@@ -4164,20 +4189,10 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
             # Miata watch" and no watch is created. This validator ties the extraction to the
             # reply: if the reply committed to a create/change, the extraction MUST carry an
             # action; otherwise (a no-op turn) an empty result is correct and stays local.
-            def _extract_usable(text: str) -> bool:
-                try:
-                    d = json.loads(llm._extract_json_text(text))
-                except Exception:
-                    return False
-                if not isinstance(d, dict):
-                    return False
-                if _reply_commits_to_action(reply or ""):
-                    return bool(d.get("watch_suggestion") or d.get("watch_suggestions")
-                                or d.get("watch_actions"))
-                return True
             content = llm.chat_smart(msgs, role="extract", local_model=model, cfg=cfg,
                                      format_json=True, timeout=60.0,
-                                     validate=_extract_usable).get("text", "")
+                                     validate=lambda t: _extract_result_usable(t, reply)
+                                     ).get("text", "")
         data = _parse_chat_response(content)
     except Exception as exc:
         log.warning("action-extraction failed: %s", exc)

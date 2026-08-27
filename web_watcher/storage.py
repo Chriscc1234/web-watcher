@@ -240,6 +240,11 @@ def init_db(db_path: Path | None = None) -> None:
         # what sweep 1 discovered instead of re-clicking the same dead controls forever.
         if "control_map" not in sp_cols:
             conn.execute("ALTER TABLE site_profiles ADD COLUMN control_map TEXT")
+        # Migration: `archive_path` — the on-disk frozen MHTML copy of a matched listing, so the
+        # page survives the original being deleted. See web_watcher/archive.py.
+        l_cols = [r["name"] for r in conn.execute("PRAGMA table_info(listings)").fetchall()]
+        if "archive_path" not in l_cols:
+            conn.execute("ALTER TABLE listings ADD COLUMN archive_path TEXT")
 
 
 def save_run(record: RunRecord, db_path: Path | None = None) -> int:
@@ -460,6 +465,18 @@ def record_observation(
             """,
             (watch_id, watch_name, listing_key, ts, ts, int(matched), rating, judge_reason),
         )
+
+
+def set_listing_archive(listing_key: str, path: str, db_path: Path | None = None) -> None:
+    """Record the on-disk frozen MHTML copy for a listing. Best-effort; never raises."""
+    if not listing_key or not path:
+        return
+    try:
+        with _connect(_resolve(db_path)) as conn:
+            conn.execute("UPDATE listings SET archive_path = ? WHERE listing_key = ?",
+                         (str(path), listing_key))
+    except Exception as exc:
+        log.debug("set_listing_archive failed for %s: %s", listing_key, exc)
 
 
 def exclude_listing(url: str, db_path: Path | None = None) -> int:

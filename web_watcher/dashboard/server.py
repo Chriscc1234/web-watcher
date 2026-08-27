@@ -930,6 +930,23 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "budget": llm.budget_state(_load_cfg()),
                 "recent": llm.escalations(max(1, min(limit, 200)))}
 
+    @app.get("/api/listings/archive")
+    def listing_archive(key: str = "", url: str = ""):
+        """Serve the frozen MHTML copy of a matched listing, so a page that has since been
+        deleted still opens and renders. Chrome opens .mhtml directly. Looked up by listing_key
+        or by the listing's url."""
+        from fastapi.responses import FileResponse
+        from web_watcher import archive, storage
+        lk = (key or "").strip()
+        if not lk and url.strip():
+            row = storage.get_listing_by_url(url.strip())
+            lk = (row or {}).get("listing_key", "") if row else ""
+        p = archive.archive_file(lk) if lk else None
+        if not p:
+            raise HTTPException(404, detail="no frozen copy saved for this listing")
+        return FileResponse(str(p), media_type="multipart/related",
+                            filename=f"{lk[:60] or 'listing'}.mhtml")
+
     @app.get("/api/sweep/issues")
     def sweep_issues(limit: int = 100):
         """What has gone WRONG while watching — the browsing/judging counterpart to the cloud

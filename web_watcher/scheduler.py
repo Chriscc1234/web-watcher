@@ -70,6 +70,7 @@ from web_watcher.storage import (
     count_seen_listings,
     upsert_listing,
     record_observation,
+    set_listing_archive,
     find_duplicate,
     list_site_profiles,
 )
@@ -1144,6 +1145,14 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
             dismiss_popups(tab, settle_ms=0)
             l.details = extract_listing_body(tab)
             l.posted_at = extract_listing_posted_at(tab)
+            # Freeze the page while we're on it — self-contained MHTML, no extra visit. Held in a
+            # TEMP file; the persist step keeps it only if this listing matched, discards it
+            # otherwise. See web_watcher/archive.py.
+            try:
+                from web_watcher import archive
+                l._archive_tmp = archive.capture_temp(tab, l.key)
+            except Exception:
+                l._archive_tmp = None
             fetched += 1
             time.sleep(random.uniform(0.8, 2.0))   # "read" the ad before closing the tab
         except Exception as exc:
@@ -1186,6 +1195,21 @@ def _persist_listings(watch, listings: list, matched_keys: set, run_ts: str, db_
                                rating=getattr(l, "rating", None),
                                judge_reason=reason_by_key.get(l.key) or getattr(l, "judge_reason", None),
                                db_path=db_path)
+            # Frozen page captured at deep-read: KEEP it for a match (a listing the user might act
+            # on and later find deleted), discard it otherwise. Records the path on the row.
+            _tmp = getattr(l, "_archive_tmp", None)
+            if _tmp is not None:
+                try:
+                    from web_watcher import archive
+                    if l.key in matched_keys:
+                        kept = archive.keep(_tmp, l.key)
+                        if kept:
+                            set_listing_archive(l.key, str(kept), db_path=db_path)
+                    else:
+                        archive.discard(_tmp)
+                except Exception:
+                    pass
+                l._archive_tmp = None
         except Exception as exc:
             log.debug("Persist listing %s failed: %s", l.key, exc)
 

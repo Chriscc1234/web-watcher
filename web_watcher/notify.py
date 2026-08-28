@@ -54,7 +54,7 @@ class NotificationPayload:
 # Public send functions
 # ---------------------------------------------------------------------------
 
-def _mirror_to_thread(chat_id: str, text: str) -> None:
+def _mirror_to_thread(chat_id: str, text: str, url: str = "", image: str = "") -> None:
     """Record an outbound push in the recipient's chat thread, so the admin's Chats tab shows
     what the person actually RECEIVED — not just what they typed.
 
@@ -74,8 +74,19 @@ def _mirror_to_thread(chat_id: str, text: str) -> None:
         hist = []
         if p.exists():
             hist = _json.loads(p.read_text(encoding="utf-8")) or []
-        hist.append({"role": "assistant", "content": f"📣 {text}".strip(),
-                     "ts": _time.time(), "alert": True})
+        # Store what the person actually SAW: the alert on their phone is a photo card with
+        # stars, title/price, the judge's reason and an Open button — a bare text line in the
+        # admin's viewer under-reports it ("is that what he's actually seeing?" — no, it
+        # wasn't). Plain text (tags stripped: Telegram gets HTML, the viewer renders text),
+        # plus the listing url and thumbnail so the tab can render the same card shape.
+        plain = _re.sub(r"<[^>]+>", "", text or "").strip()
+        entry = {"role": "assistant", "content": f"📣 {plain}".strip(),
+                 "ts": _time.time(), "alert": True}
+        if url:
+            entry["url"] = str(url)[:400]
+        if image:
+            entry["image"] = str(image)[:400]
+        hist.append(entry)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(_json.dumps(hist[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
@@ -168,7 +179,7 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
         # Say WHERE it went — sixteen sends with no destination in the log made "did the
         # buddy get his alerts?" unanswerable without reading source.
         log.info("Telegram notification sent for %r -> chat %s", payload.watch_name, chat_id)
-        _mirror_to_thread(chat_id, text)
+        _mirror_to_thread(chat_id, text, url=payload.result.link or "", image=photo)
         return True
 
     except httpx.HTTPStatusError as exc:

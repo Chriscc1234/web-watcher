@@ -703,5 +703,36 @@ def test_mirror_failure_never_raises(monkeypatch):
 
 def test_send_paths_call_the_mirror():
     src = open("web_watcher/notify.py", encoding="utf-8").read()
-    assert src.count("_mirror_to_thread(chat_id, text)") >= 2, \
+    assert src.count("_mirror_to_thread(chat_id, text") >= 2, \
         "alerts or briefings no longer mirror to the thread"
+
+
+def test_mirror_carries_the_card_not_a_shadow(tmp_path, monkeypatch):
+    """The phone gets a photo card — stars, title/price, the judge's reason, an Open button.
+    The admin's viewer was storing a bare text line, so "is that what he's actually seeing?"
+    was answered by the tab with: no."""
+    import json
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "watcher_history_path",
+                        lambda: tmp_path / "watcher_history.json")
+    notify._mirror_to_thread("77", "★★★★ <b>New match:</b> 2012 Jeep — $14,000\nManual, in budget",
+                             url="https://x/itm/1", image="https://img/1.jpg")
+    h = json.loads((tmp_path / "watcher_history_77.json").read_text(encoding="utf-8"))
+    e = h[-1]
+    assert "<b>" not in e["content"], "HTML tags leaked into the viewer text"
+    assert "★★★★" in e["content"] and "Manual, in budget" in e["content"]
+    assert e["url"] == "https://x/itm/1"
+    assert e["image"] == "https://img/1.jpg"
+
+
+def test_alert_send_passes_image_and_url_to_the_mirror():
+    src = open("web_watcher/notify.py", encoding="utf-8").read()
+    assert "_mirror_to_thread(chat_id, text, url=payload.result.link or \"\", image=photo)" in src
+
+
+def test_viewer_renders_thumbnail_and_open_link():
+    from pathlib import Path
+    import web_watcher.dashboard as D
+    html = (Path(D.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert "alert-thumb" in html and "alert-open" in html
+    assert "Open listing" in html

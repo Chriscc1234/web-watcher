@@ -242,7 +242,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 /* ---- chat bubbles (shared by The Watcher dock) ---- */
 .msg{max-width:82%;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.5}
 .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:3px}
-.msg.alert-note{opacity:.85;border-left:3px solid var(--blue);font-size:12.5px}
+.msg.alert-note{opacity:.92;border-left:3px solid var(--blue);font-size:12.5px;white-space:pre-line}
+.alert-thumb{display:block;max-width:230px;max-height:150px;border-radius:8px;margin:0 0 6px;object-fit:cover}
+.alert-open{display:inline-block;margin-top:6px;font-size:12px;color:var(--blue);text-decoration:none}
+.alert-open:hover{text-decoration:underline}
 .msg.assistant{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:3px}
 .msg.thinking{color:var(--dim);font-style:italic}
 /* "when" divider between chat messages separated by a day or a long quiet gap. */
@@ -2046,7 +2049,26 @@ async function openChatThread(key) {
     const prefix = m.admin ? '🧑‍💼 You: ' : '';
     const div = appendMsg(side, prefix + historyText(m.content || ''), 'chats-convo', m.ts || null);
     if (m.admin) div.classList.add('admin-note');
-    if (m.alert) div.classList.add('alert-note');   // a pushed notification, not conversation
+    if (m.alert) {
+      // Render the alert the way the PERSON received it: their phone got a photo card with a
+      // thumbnail and an Open button, so a bare text line here under-reports what was sent.
+      div.classList.add('alert-note');
+      if (m.image && /^https?:/.test(m.image)) {
+        const img = document.createElement('img');
+        img.src = m.image;
+        img.className = 'alert-thumb';
+        img.loading = 'lazy';
+        img.onerror = () => img.remove();   // a dead listing's dead image just disappears
+        div.prepend(img);
+      }
+      if (m.url && /^https?:/.test(m.url)) {
+        const a = document.createElement('a');
+        a.href = m.url; a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = '🔗 Open listing';
+        a.className = 'alert-open';
+        div.appendChild(a);
+      }
+    }
     // Oversight context: render WHAT this turn actually showed the person (listings, proposed
     // watches). Without this the admin sees "here are 5 matches" but not the matches themselves.
     if (m.shown) appendShown(m.shown, 'chats-convo');

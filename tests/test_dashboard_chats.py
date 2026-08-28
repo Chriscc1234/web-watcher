@@ -825,3 +825,15 @@ def test_chats_poll_is_quiet_when_nothing_changed():
 def test_open_thread_scrolls_to_the_newest_message():
     html = _index_html()
     assert "box.scrollTop = box.scrollHeight;   // a newly-arrived message" in html
+
+
+def test_page_reloads_itself_when_the_server_version_changes():
+    """/api/health was read once on load and never re-checked. A self-update restarts the
+    server but does NOT reload an already-open window, so the page ran the OLD JavaScript
+    against the new backend indefinitely — every shipped UI fix invisible until someone hit
+    refresh. That is exactly how 'I don't see the update in the chats tab' happens while the
+    new code is sitting right there in the response."""
+    html = _index_html()
+    assert "_bootVersion" in html
+    assert "location.reload();" in html
+    assert "if (document.hidden) return;" in html, "would reload a window nobody is watching"

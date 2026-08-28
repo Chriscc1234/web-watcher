@@ -3212,6 +3212,28 @@ pollServices();
 setInterval(pollServices, POLL_MS);
 setTimeout(hideSplash, 12000);   // safety: never leave the splash stuck if status fails
 
+// ── RELOAD THE PAGE WHEN THE SERVER'S VERSION CHANGES ─────────────────────────
+// /api/health was read exactly ONCE, on load, and nothing re-checked it. A self-update
+// restarts the server but does NOT reload an already-rendered window, so the page kept
+// running the OLD JavaScript against the new backend — indefinitely. Every UI fix shipped
+// while the app was open was invisible until someone happened to hit refresh, which is
+// exactly how "I don't see the update in the chats tab" happens with the new code sitting
+// right there in the response. The version the page BOOTED with is the truth to compare
+// against; when the server no longer matches it, this page is stale and reloads itself.
+let _bootVersion = null;
+setInterval(async () => {
+  if (document.hidden) return;                 // don't reload a window nobody is looking at
+  try {
+    const h = await api('/api/health');
+    if (!h || !h.version) return;
+    if (_bootVersion === null) { _bootVersion = h.version; return; }
+    if (h.version !== _bootVersion) {
+      console.info('Web Watcher updated ' + _bootVersion + ' -> ' + h.version + ' — reloading');
+      location.reload();
+    }
+  } catch (_) { /* server restarting mid-update — try again next tick */ }
+}, 5000);
+
 // Fetch version + browser settings once on load
 api('/api/health').then(h => {
   if (h.version) {

@@ -242,6 +242,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 /* ---- chat bubbles (shared by The Watcher dock) ---- */
 .msg{max-width:82%;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.5}
 .msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:3px}
+.msg.alert-note{opacity:.85;border-left:3px solid var(--blue);font-size:12.5px}
 .msg.assistant{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:3px}
 .msg.thinking{color:var(--dim);font-style:italic}
 /* "when" divider between chat messages separated by a day or a long quiet gap. */
@@ -2036,9 +2037,16 @@ async function openChatThread(key) {
   }
   for (const m of history) {
     if (m.role !== 'user' && m.role !== 'assistant') continue;
+    // SIDES ARE FROM THE THREAD'S POINT OF VIEW, not the dock's. The dock reuses role
+    // classes where .user = "you" = right — but in this viewer the `user` is the PERSON
+    // (Jordan), and rendering their replies on the outgoing side made every conversation
+    // read backwards. Outgoing = what we/the Watcher SENT (right); incoming = their
+    // replies (left).
+    const side = (m.role === 'user') ? 'assistant' : 'user';
     const prefix = m.admin ? '🧑‍💼 You: ' : '';
-    const div = appendMsg(m.role, prefix + historyText(m.content || ''), 'chats-convo', m.ts || null);
+    const div = appendMsg(side, prefix + historyText(m.content || ''), 'chats-convo', m.ts || null);
     if (m.admin) div.classList.add('admin-note');
+    if (m.alert) div.classList.add('alert-note');   // a pushed notification, not conversation
     // Oversight context: render WHAT this turn actually showed the person (listings, proposed
     // watches). Without this the admin sees "here are 5 matches" but not the matches themselves.
     if (m.shown) appendShown(m.shown, 'chats-convo');

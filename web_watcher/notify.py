@@ -54,6 +54,34 @@ class NotificationPayload:
 # Public send functions
 # ---------------------------------------------------------------------------
 
+def _mirror_to_thread(chat_id: str, text: str) -> None:
+    """Record an outbound push in the recipient's chat thread, so the admin's Chats tab shows
+    what the person actually RECEIVED — not just what they typed.
+
+    Alerts never touched the chat history: sixteen went to a buddy's phone in one morning
+    while his thread in the app sat unchanged, which read as "he isn't getting updates" when
+    the truth was the opposite. Same file, same shape the dashboard uses; `alert: True` so
+    the viewer can style them apart from conversation. Best-effort — a mirror failure must
+    never block a real notification."""
+    try:
+        import json as _json
+        import re as _re
+        import time as _time
+        from web_watcher import paths
+        base = paths.watcher_history_path()
+        safe = _re.sub(r"[^A-Za-z0-9_-]", "", str(chat_id or ""))[:40]
+        p = base.with_name(f"watcher_history_{safe}.json") if safe else base
+        hist = []
+        if p.exists():
+            hist = _json.loads(p.read_text(encoding="utf-8")) or []
+        hist.append({"role": "assistant", "content": f"📣 {text}".strip(),
+                     "ts": _time.time(), "alert": True})
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(hist[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log.debug("could not mirror notification to thread %s: %s", chat_id, exc)
+
+
 def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
                   chat_id_override: str = "") -> bool:
     """
@@ -137,7 +165,10 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
                 )
                 img_r.raise_for_status()
 
-        log.info("Telegram notification sent for %r", payload.watch_name)
+        # Say WHERE it went — sixteen sends with no destination in the log made "did the
+        # buddy get his alerts?" unanswerable without reading source.
+        log.info("Telegram notification sent for %r -> chat %s", payload.watch_name, chat_id)
+        _mirror_to_thread(chat_id, text)
         return True
 
     except httpx.HTTPStatusError as exc:
@@ -683,7 +714,9 @@ def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: Notifi
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
             r = client.post(f"{TELEGRAM_API}/bot{t.bot_token}/sendMessage", json=body)
             r.raise_for_status()
-        log.info("Baseline briefing sent for %r (%d seen, %d matched)", watch_name, seen, matched)
+        log.info("Baseline briefing sent for %r (%d seen, %d matched) -> chat %s",
+                 watch_name, seen, matched, chat_id)
+        _mirror_to_thread(chat_id, text)
         return True
     except Exception as exc:
         log.warning("Baseline briefing failed for %r: %s", watch_name, exc)

@@ -659,3 +659,49 @@ def test_briefing_without_listings_still_offers_the_buttons(monkeypatch):
     notify.send_baseline_briefing("Cars", 200, 9, cfg, owner_chat_id="1", top=None)
     assert "Want them now? Tap below" in sent.get("text", "")
     assert sent.get("reply_markup")
+
+
+# ---------------------------------------------------------------------------
+# Outbound pushes are mirrored into the recipient's thread
+# ---------------------------------------------------------------------------
+
+def test_mirror_writes_the_owner_thread(tmp_path, monkeypatch):
+    """Sixteen alerts reached a buddy's phone in one morning while his thread in the app sat
+    unchanged — which read as "he isn't getting updates" when the truth was the opposite."""
+    import json
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "watcher_history_path",
+                        lambda: tmp_path / "watcher_history.json")
+    notify._mirror_to_thread("8708818228", "New match: 2012 Jeep Wrangler — $14,000")
+    p = tmp_path / "watcher_history_8708818228.json"
+    assert p.exists()
+    h = json.loads(p.read_text(encoding="utf-8"))
+    assert h[-1]["alert"] is True
+    assert h[-1]["role"] == "assistant"
+    assert "Jeep Wrangler" in h[-1]["content"]
+    assert h[-1]["content"].startswith("📣")
+
+
+def test_mirror_appends_to_an_existing_thread(tmp_path, monkeypatch):
+    import json
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "watcher_history_path",
+                        lambda: tmp_path / "watcher_history.json")
+    p = tmp_path / "watcher_history_77.json"
+    p.write_text(json.dumps([{"role": "user", "content": "hi", "ts": 1}]), encoding="utf-8")
+    notify._mirror_to_thread("77", "New match: boat")
+    h = json.loads(p.read_text(encoding="utf-8"))
+    assert len(h) == 2 and h[0]["content"] == "hi"
+
+
+def test_mirror_failure_never_raises(monkeypatch):
+    from web_watcher import notify, paths
+    monkeypatch.setattr(paths, "watcher_history_path",
+                        lambda: (_ for _ in ()).throw(RuntimeError("disk gone")))
+    notify._mirror_to_thread("77", "x")   # must not raise — mirroring never blocks an alert
+
+
+def test_send_paths_call_the_mirror():
+    src = open("web_watcher/notify.py", encoding="utf-8").read()
+    assert src.count("_mirror_to_thread(chat_id, text)") >= 2, \
+        "alerts or briefings no longer mirror to the thread"

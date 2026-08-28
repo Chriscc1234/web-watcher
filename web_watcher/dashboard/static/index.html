@@ -1060,12 +1060,13 @@ function showTab(name, btn) {
   activeTab = name;
   if (name === 'watches')  { loadWatches(); loadOversight(); }
   if (name === 'results')  loadResults();
-  if (name === 'chats')    loadChatThreads();
+  if (name === 'chats')    { loadChatThreads(); startChatsPoll(); }
   if (name === 'live')     startLive();
   if (name === 'history')  loadHistory();
   if (name === 'claude')   loadClaudeCalls();
   if (name === 'services') loadOrchestrator();
   if (name !== 'live')     stopLive();       // stop the activity poll when off-tab
+  if (name !== 'chats')    stopChatsPoll();
 }
 
 // ============================================================ LIVE ACTIVITY
@@ -1948,6 +1949,7 @@ async function showWatcherGreeting() {
 // Read-only viewer — you act as admin from the dock; this is oversight of who's talking to
 // the bot and what they're asking. Also surfaces access requests from strangers for approval.
 let _chatThreads = [];
+let _chatThreadsSig = '';   // skip a repaint when nothing actually changed
 let _activeThreadOwner = undefined;   // undefined = none selected; null = desktop; string = a chat_id
 
 function _agoFromTs(ts) {
@@ -1959,10 +1961,32 @@ function _agoFromTs(ts) {
   return `${Math.floor(secs/86400)}d ago`;
 }
 
-async function loadChatThreads() {
+// The Chats tab used to load ONCE, on tab switch, and then sit there frozen: a message
+// arriving while you were watching the tab simply never appeared, so a live conversation with
+// a buddy looked like it wasn't happening at all. Poll while the tab is open — the thread list
+// AND the open conversation — and stop when you leave it.
+let _chatsTimer = null;
+
+function startChatsPoll() {
+  stopChatsPoll();
+  _chatsTimer = setInterval(() => {
+    if (activeTab === 'chats' && !document.hidden) loadChatThreads({ quiet: true });
+  }, 5000);
+}
+
+function stopChatsPoll() {
+  if (_chatsTimer) { clearInterval(_chatsTimer); _chatsTimer = null; }
+}
+
+async function loadChatThreads(opts) {
+  const quiet = !!(opts && opts.quiet);      // a background refresh must not steal the view
   await renderAccessRequests();
   let threads = [];
   try { threads = await api('/api/oversight/threads'); } catch (_) { /* offline */ }
+  // Nothing changed → leave the DOM (and the reader's scroll position) alone.
+  const sig = JSON.stringify((threads || []).map(t => [t.owner, t.messages, t.last_ts]));
+  if (quiet && sig === _chatThreadsSig) return;
+  _chatThreadsSig = sig;
   _chatThreads = threads || [];
   const list = document.getElementById('chats-list');
   if (!_chatThreads.length) {
@@ -2019,6 +2043,7 @@ async function openChatThread(key) {
     // watches). Without this the admin sees "here are 5 matches" but not the matches themselves.
     if (m.shown) appendShown(m.shown, 'chats-convo');
   }
+  box.scrollTop = box.scrollHeight;   // a newly-arrived message must be the one you can see
 }
 
 // Compact, read-only rendering of what a turn put on screen — for the admin Chats viewer.

@@ -794,3 +794,34 @@ def test_a_status_question_short_circuits_to_the_renderer(monkeypatch):
     assert r.get("html") is True
     assert r.get("listings") in (None, [])          # never a wall of matches
     assert "Motor Boats Watch" in r["message"]
+
+
+# ---------------------------------------------------------------------------
+# The Chats tab must refresh while you are looking at it
+# ---------------------------------------------------------------------------
+
+def _index_html():
+    from pathlib import Path
+    import web_watcher.dashboard as D
+    return (Path(D.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+
+
+def test_chats_tab_polls_while_open():
+    """It loaded ONCE on tab switch and then sat frozen — a buddy messaging while the tab was
+    open simply never appeared, so a live conversation looked like it wasn't happening."""
+    html = _index_html()
+    assert "startChatsPoll" in html and "stopChatsPoll" in html
+    assert "if (name === 'chats')    { loadChatThreads(); startChatsPoll(); }" in html
+    assert "if (name !== 'chats')    stopChatsPoll();" in html
+
+
+def test_chats_poll_is_quiet_when_nothing_changed():
+    """A background refresh must not repaint the thread you are reading."""
+    html = _index_html()
+    assert "_chatThreadsSig" in html
+    assert "if (quiet && sig === _chatThreadsSig) return;" in html
+
+
+def test_open_thread_scrolls_to_the_newest_message():
+    html = _index_html()
+    assert "box.scrollTop = box.scrollHeight;   // a newly-arrived message" in html

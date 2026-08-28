@@ -131,6 +131,7 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
     # rather than risk losing an alert over a picture.
     photo = str(_known_facts(payload.result.link).get("image") or "").strip()
     _TG_CAPTION_MAX = 1024
+    _local_thumb = None      # set when we save a local copy of the photo we send
 
     try:
         with httpx.Client(timeout=TELEGRAM_TIMEOUT) as client:
@@ -145,6 +146,17 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
                 # scraper stored no thumbnail (agent sweeps miss lazy-loaded images), the helper
                 # recovers it from the listing page's og:image.
                 img = image_bytes_for_listing(photo, payload.result.link)
+                # Keep OUR copy of exactly what the person is being sent. The seller's image
+                # URL dies with the listing; these bytes don't. Serving name is remembered so
+                # the mirrored thread entry can point at the local copy instead of the URL.
+                if img:
+                    try:
+                        from web_watcher import thumbs
+                        from web_watcher.monitor import _listing_key
+                        key = _listing_key(payload.result.link or "") or (payload.result.link or "img")
+                        _local_thumb = thumbs.save_bytes(key, img)
+                    except Exception:
+                        _local_thumb = None
                 if img:
                     data = {"chat_id": chat_id, "caption": text, "parse_mode": "HTML"}
                     if body.get("reply_markup"):
@@ -179,7 +191,9 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
         # Say WHERE it went — sixteen sends with no destination in the log made "did the
         # buddy get his alerts?" unanswerable without reading source.
         log.info("Telegram notification sent for %r -> chat %s", payload.watch_name, chat_id)
-        _mirror_to_thread(chat_id, text, url=payload.result.link or "", image=photo)
+        # Prefer the LOCAL copy for the mirror — the remote URL rots, ours doesn't.
+        _mirror_to_thread(chat_id, text, url=payload.result.link or "",
+                          image=(f"/api/thumb/{_local_thumb}" if _local_thumb else photo))
         return True
 
     except httpx.HTTPStatusError as exc:

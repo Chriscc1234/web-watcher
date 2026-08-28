@@ -1002,6 +1002,18 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "budget": llm.budget_state(_load_cfg()),
                 "recent": llm.escalations(max(1, min(limit, 200)))}
 
+    @app.get("/api/thumb/{name}")
+    def serve_thumb(name: str):
+        """A locally-stored copy of a match's photo — saved at alert time so the card in the
+        Chats viewer survives the seller's image URL dying with the listing."""
+        from fastapi.responses import FileResponse
+        from web_watcher import thumbs
+        p = thumbs.file_for(name)
+        if p is None:
+            raise HTTPException(404, detail="No stored image by that name")
+        return FileResponse(str(p), media_type="image/jpeg",
+                            headers={"Cache-Control": "max-age=86400"})
+
     @app.get("/api/listings/archive")
     def listing_archive(key: str = "", url: str = ""):
         """Serve the frozen MHTML copy of a matched listing, so a page that has since been

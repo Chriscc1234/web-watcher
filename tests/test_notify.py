@@ -727,7 +727,9 @@ def test_mirror_carries_the_card_not_a_shadow(tmp_path, monkeypatch):
 
 def test_alert_send_passes_image_and_url_to_the_mirror():
     src = open("web_watcher/notify.py", encoding="utf-8").read()
-    assert "_mirror_to_thread(chat_id, text, url=payload.result.link or \"\", image=photo)" in src
+    assert "_mirror_to_thread(chat_id, text, url=payload.result.link or" in src
+    # ...and it prefers the LOCAL saved copy over the seller's rotting URL.
+    assert 'image=(f"/api/thumb/{_local_thumb}" if _local_thumb else photo)' in src
 
 
 def test_viewer_renders_thumbnail_and_open_link():

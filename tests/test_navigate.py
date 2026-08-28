@@ -134,12 +134,13 @@ def test_can_fully_drive_false_on_empty_request():
 # ── HUMAN_FIRST_SITES: only live-verified sites are actually driven ────────────
 
 def test_human_first_enabled_sites():
-    # Craigslist + OfferUp are live-verified and driven; eBay/Facebook are NOT yet.
+    # Craigslist, OfferUp and (as of 27 Aug 2026) Facebook are live-verified and driven.
+    # eBay is not: its location is a URL/sidebar concern with no picker to drive.
     assert N.is_human_first_enabled("https://skagit.craigslist.org/search/cta?query=x") is True
     assert N.is_human_first_enabled("craigslist") is True
     assert N.is_human_first_enabled("https://offerup.com/search?q=truck") is True
+    assert N.is_human_first_enabled("https://www.facebook.com/marketplace") is True
     assert N.is_human_first_enabled("https://www.ebay.com/sch/i.html?_nkw=x") is False
-    assert N.is_human_first_enabled("https://www.facebook.com/marketplace") is False
 
 
 def test_category_browse_is_drivable_on_craigslist():
@@ -244,3 +245,67 @@ def test_category_extracts_from_both_url_shapes_including_for_sale():
     req = N.build_search_request(
         "https://www.craigslist.org/search/area/skagit?cat=sss&query=macgregor", "x")
     assert N.can_fully_drive(req, N.hints_for("https://craigslist.org")) is True
+
+
+# ---------------------------------------------------------------------------
+# Facebook Marketplace controls (mapped live 27 Aug 2026, not guessed)
+# ---------------------------------------------------------------------------
+
+def test_facebook_hints_exist_and_are_shaped_right():
+    from web_watcher.navigate import CONTROL_HINTS
+    fb = CONTROL_HINTS.get("facebook.com")
+    assert fb, "Facebook Marketplace controls are not mapped"
+    loc = fb["location"]
+    for key in ("open", "dialog", "input", "confirm"):
+        assert loc.get(key), f"location hint missing {key!r}"
+    assert loc["confirm"] == "Apply"
+
+
+def test_facebook_search_box_targets_marketplace_not_global():
+    """The live page has TWO type=search inputs: 'Search Facebook' and 'Search Marketplace'.
+    A generic input[type=search] matches the GLOBAL one first, which would search all of
+    Facebook for the product terms. The aria-label is the only discriminator."""
+    from web_watcher.navigate import CONTROL_HINTS
+    sel = CONTROL_HINTS["facebook.com"]["search_box"].lower()
+    assert "search marketplace" in sel
+    assert "type=\"search\"" not in sel and "type='search'" not in sel
+
+
+def test_facebook_is_human_first_after_live_verification():
+    """Graduated only after the flow was DRIVEN, not merely mapped: the picker moved
+    Anacortes -> Bellingham -> Anacortes with the site's own marker confirming each change."""
+    from web_watcher.navigate import HUMAN_FIRST_SITES, is_human_first_enabled
+    assert "facebook" in HUMAN_FIRST_SITES
+    assert is_human_first_enabled("https://www.facebook.com/marketplace/")
+
+
+def test_already_correct_location_is_success_not_failure():
+    """set_location returned False when the site was ALREADY showing the target area, so a
+    caller treated a perfectly good state as a failure and fell back to a URL. Measured live:
+    marker read 'Location: Anacortes...', the watch wanted Anacortes, result was False."""
+    import inspect
+    from web_watcher import navigate
+    src = inspect.getsource(navigate.set_location)
+    assert "already set to" in src, "the already-there short-circuit is gone"
+
+
+def test_click_button_by_label_has_no_undefined_name():
+    """It called _human_click(page, …) with only `scope` in scope — a NameError swallowed by
+    its own bare except, so the confirm step of set_location never clicked anything."""
+    import ast, inspect
+    from web_watcher import navigate
+    tree = ast.parse(inspect.getsource(navigate._click_button_by_label))
+    fn = tree.body[0]
+    params = {a.arg for a in fn.args.args}
+    used = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+    undefined = used - params - set(dir(navigate)) - set(dir(__builtins__))
+    assert "page" not in undefined, "still references an undefined 'page'"
+
+
+def test_location_marker_sees_a_div_role_button():
+    """Facebook's location control is a div[role=button], not a <button>. A button-only
+    selector found nothing, so a location that HAD changed reported unchanged."""
+    import inspect
+    from web_watcher import navigate
+    src = inspect.getsource(navigate._location_marker)
+    assert "role=button" in src

@@ -1007,8 +1007,25 @@ def humanized_search(page: Page, url: str) -> bool:
     except Exception:
         pass
 
+    # SECTION-SCOPED SEARCH FIRST. A site can have two search boxes: the global one in the
+    # header and the section's own. On /marketplace/ the generic selectors below would happily
+    # match Facebook's global "Search Facebook" and we'd search the whole site for "macgregor
+    # sailboat" — the wrong-box failure, one level up from typing a keyword into a city picker.
+    # The section name is right there in the URL, so prefer a box that names it.
+    section = ""
+    try:
+        seg = [s for s in (urlparse(landing).path or "").split("/") if s]
+        if seg:
+            section = re.sub(r"[^a-z]", "", seg[0].lower())
+    except Exception:
+        section = ""
+    selectors = list(_SEARCH_BOX_SELECTORS)
+    if len(section) > 3:
+        selectors = [f'input[aria-label*="{section}" i]',
+                     f'input[placeholder*="{section}" i]'] + selectors
+
     box = None
-    for sel in _SEARCH_BOX_SELECTORS:
+    for sel in selectors:
         try:
             loc = page.locator(sel).first
             if loc.count() > 0 and loc.is_visible():

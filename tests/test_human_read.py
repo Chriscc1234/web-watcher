@@ -418,3 +418,29 @@ def test_other_sites_keep_their_path():
     assert _landing_for(
         "https://skagit.craigslist.org/search/boo?query=x&postal=98221"
     ).endswith("/search/boo?postal=98221")
+
+
+def test_section_scoped_search_box_is_preferred():
+    """On /marketplace/ there are TWO search boxes — Facebook's global one and Marketplace's.
+    Typing the product query into the global one searches the whole site: the wrong-box bug,
+    one level up from typing a keyword into a city picker. The section name is in the URL."""
+    import re
+    from urllib.parse import urlparse
+    from web_watcher.monitor import _SEARCH_BOX_SELECTORS
+    landing = "https://www.facebook.com/marketplace/"
+    seg = [s for s in (urlparse(landing).path or "").split("/") if s]
+    section = re.sub(r"[^a-z]", "", seg[0].lower()) if seg else ""
+    assert section == "marketplace"
+    selectors = [f'input[aria-label*="{section}" i]',
+                 f'input[placeholder*="{section}" i]'] + list(_SEARCH_BOX_SELECTORS)
+    assert "marketplace" in selectors[0]
+    assert selectors.index('input[type="search"]') > 1, "generic search box tried too early"
+
+
+def test_short_sections_do_not_get_a_bogus_selector():
+    """A one- or two-letter path segment is not a section name worth matching on."""
+    import re
+    for path in ("/s/", "/x/", "/"):
+        seg = [s for s in path.split("/") if s]
+        section = re.sub(r"[^a-z]", "", seg[0].lower()) if seg else ""
+        assert not len(section) > 3

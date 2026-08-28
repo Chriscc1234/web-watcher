@@ -184,3 +184,86 @@ def test_empty_extraction_on_a_chatty_reply_passes():
 def test_garbage_fails():
     assert not S._extract_result_usable("not json at all", COMMIT_REPLY)
     assert not S._extract_result_usable('["a", "list"]', COMMIT_REPLY)
+
+
+# --------------------------------------------------------------------------
+# A buddy must not be told about other people's watches
+# --------------------------------------------------------------------------
+
+def test_oversight_narration_is_scoped_in_source():
+    """The Watcher's observation feed is GLOBAL ("All eyes on Anacortes boats and cars, but
+    the TEST eBay watch is snoozing") and was injected into every chat turn. A buddy who owns
+    no watches asked "what am I watching?" and was told he was watching the ADMIN's car watch,
+    because the model answered from that narration."""
+    import inspect
+    src = inspect.getsource(S)
+    i = src.index("WHAT YOU'VE RECENTLY OBSERVED")
+    window = src[max(0, i - 1400):i]
+    assert "_is_admin_owner" in window and "_watches_for_owner" in window, \
+        "the narration is not scoped to the speaker's own watches"
+
+
+# --------------------------------------------------------------------------
+# Never promise an action that did not happen
+# --------------------------------------------------------------------------
+
+def test_commit_detector_catches_the_live_phrasing():
+    """The exact sentence a buddy got twice, twelve minutes apart, with nothing created."""
+    for reply in ("Sure thing! I’m setting up that watch on Craigslist now to find manual "
+                  "transmission cars in Anacortes.",
+                  "I'll create a watch for that.",
+                  "Setting up a watch for you now."):
+        assert S._reply_commits_to_action(reply), reply
+
+
+def test_plain_answers_are_not_commitments():
+    for reply in ("Nothing new today — your watches are off.",
+                  "You don't have any watches assigned yet.",
+                  "The second one is a 1974 MacGregor Venture 17, $3,500."):
+        assert not S._reply_commits_to_action(reply), reply
+
+
+def test_empty_promise_is_rewritten_in_source():
+    import inspect
+    src = inspect.getsource(S)
+    assert "reply promised an action with none to perform" in src
+
+
+# --------------------------------------------------------------------------
+# An admin-set label outranks a Telegram profile name
+# --------------------------------------------------------------------------
+
+def test_nickname_is_appended_not_substituted(monkeypatch, tmp_path):
+    """A throwaway account's profile name really can be "Nameless". Keep it — it is who the
+    account IS — and append the nickname we use for them, which is also what
+    "give the watch to Jordan" matches on."""
+    monkeypatch.setattr(S, "_OWNER_NAMES_PATH", tmp_path / "names.json")
+    monkeypatch.setattr(S, "_OWNER_LABELS_PATH", tmp_path / "labels.json")
+    S.set_owner_label("8708818228", "Jordan")
+    S._record_owner_name("8708818228", "Nameless")      # a later Telegram message
+    assert S._load_owner_names()["8708818228"] == "Nameless (Jordan)"
+
+
+def test_nickname_is_not_duplicated_when_it_matches_the_name(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "_OWNER_NAMES_PATH", tmp_path / "names.json")
+    monkeypatch.setattr(S, "_OWNER_LABELS_PATH", tmp_path / "labels.json")
+    S._record_owner_name("7", "Chris Colabella")
+    S.set_owner_label("7", "Chris")
+    assert S._load_owner_names()["7"] == "Chris Colabella"
+
+
+def test_resolve_person_matches_the_nickname(monkeypatch, tmp_path):
+    """The whole point of the nickname: 'give the boats watch to Jordan' must resolve."""
+    monkeypatch.setattr(S, "_load_owner_names", lambda: {"8708818228": "Nameless (Jordan)"})
+    import types as _t
+    tg = _t.SimpleNamespace(chat_id="111", allowed_chat_ids=["8708818228"])
+    cfg = _t.SimpleNamespace(notifications=_t.SimpleNamespace(telegram=tg))
+    cid, label = S._resolve_person("Jordan", cfg, actor=None)
+    assert cid == "8708818228"
+
+
+def test_telegram_name_is_used_when_no_label_set(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "_OWNER_NAMES_PATH", tmp_path / "names.json")
+    monkeypatch.setattr(S, "_OWNER_LABELS_PATH", tmp_path / "labels.json")
+    S._record_owner_name("999", "Real Person")
+    assert S._load_owner_names()["999"] == "Real Person"

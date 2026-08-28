@@ -1307,8 +1307,20 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             snap = manager.oversight_snapshot(limit=14)
         except Exception:
             snap = {"entries": []}
+        entries = snap.get("entries", [])
+        # SCOPE THE NARRATION. The Watcher's observation feed is GLOBAL — "All eyes on Anacortes
+        # boats and cars, but the TEST eBay watch is snoozing" — and it was injected into every
+        # chat turn, including a buddy's. Two harms, both seen live: he was told other people's
+        # watch names, and when he asked "what am I watching?" (he owns none) the model answered
+        # from the narration and named the ADMIN'S car watch as his. A person may only be told
+        # about watches they own; anyone else gets the feed withheld rather than filtered to
+        # fragments, because these lines are prose and a half-redacted sentence still leaks.
+        if owner is not None and not _is_admin_owner(owner, cfg):
+            mine = {w.name for w in _watches_for_owner(cfg, owner)}
+            entries = [e for e in entries
+                       if (e.get("watch") or "") in mine and (e.get("watch") or "")]
         narration = "\n".join(
-            f"  - [{e.get('kind')}] {e.get('text')}" for e in snap.get("entries", [])
+            f"  - [{e.get('kind')}] {e.get('text')}" for e in entries
         ) or "  (nothing observed yet)"
         observed_ctx = (
             "WHAT YOU'VE RECENTLY OBSERVED (your own narration, newest first):\n" + narration
@@ -1701,7 +1713,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         from web_watcher.notify import send_plain_telegram
         ok = send_plain_telegram(text, cfg.notifications, chat_id_override=chat_id)
         if ok and str(body.get("name") or "").strip():
-            _record_owner_name(chat_id, str(body["name"]).strip())
+            set_owner_label(chat_id, str(body["name"]).strip())
         return {"ok": bool(ok)}
 
     @app.post("/api/telegram/detect-chat-id")
@@ -2549,9 +2561,43 @@ _OWNER_NAMES_PATH = _WATCHER_HISTORY_PATH.with_name("watcher_owners.json")
 
 
 def _load_owner_names() -> dict:
+    """Display name per chat_id: what Telegram reports, plus any admin-set nickname.
+
+    The two are SHOWN TOGETHER — "Nameless (Jordan)" — rather than one replacing the other.
+    The Telegram name is who the account actually is (a throwaway can genuinely be called
+    "Nameless"), and losing it would make the person harder to recognise; the nickname is who
+    they are to us, and it is what "give the watch to Jordan" matches on.
+    """
+    names: dict = {}
     try:
         if _OWNER_NAMES_PATH.exists():
             d = json.loads(_OWNER_NAMES_PATH.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                names = {str(k): str(v) for k, v in d.items()}
+    except Exception:
+        pass
+    for cid, label in _load_owner_labels().items():
+        real, label = (names.get(cid) or "").strip(), (label or "").strip()
+        if not real:
+            names[cid] = label
+        elif label.lower() in real.lower():
+            names[cid] = real          # the nickname is already in the name — keep the fuller one
+        else:
+            names[cid] = f"{real} ({label})"
+    return names
+
+
+# Labels the ADMIN chose for a person, which outrank whatever Telegram reports. A throwaway
+# account can carry a profile name like "Nameless" — literally what one buddy's account sends —
+# and that then overwrote the useful label on every single message, so "give the watch to
+# Jordan" had nothing to match. An explicit label is a decision; a profile name is just data.
+_OWNER_LABELS_PATH = _WATCHER_HISTORY_PATH.with_name("watcher_owner_labels.json")
+
+
+def _load_owner_labels() -> dict:
+    try:
+        if _OWNER_LABELS_PATH.exists():
+            d = json.loads(_OWNER_LABELS_PATH.read_text(encoding="utf-8"))
             if isinstance(d, dict):
                 return {str(k): str(v) for k, v in d.items()}
     except Exception:
@@ -2559,12 +2605,30 @@ def _load_owner_names() -> dict:
     return {}
 
 
+def set_owner_label(owner: str, label: str) -> None:
+    """Pin a display name for a person. Survives their Telegram profile name."""
+    owner, label = str(owner or "").strip(), str(label or "").strip()
+    if not owner or not label:
+        return
+    try:
+        d = _load_owner_labels()
+        d[owner] = label
+        _OWNER_LABELS_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2),
+                                      encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not set owner label: %s", exc)
+
+
 def _record_owner_name(owner: str | None, name: str) -> None:
+    """Remember the name TELEGRAM reports for someone. Never overwrites an admin-set label."""
     owner, name = str(owner or "").strip(), str(name or "").strip()
     if not owner or not name:
         return
     try:
-        d = _load_owner_names()
+        d = json.loads(_OWNER_NAMES_PATH.read_text(encoding="utf-8")) \
+            if _OWNER_NAMES_PATH.exists() else {}
+        if not isinstance(d, dict):
+            d = {}
         if d.get(owner) == name:
             return
         d[owner] = name
@@ -4714,6 +4778,20 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # Engine, $12,000, Everett") while the genuine listings travel alongside it. A reader can
         # see through blanks; they cannot see through a fabrication, and someone could drive to
         # Everett for a boat that never existed. Either shape is replaced with a plain lead-in.
+        # NEVER PROMISE WHAT DIDN'T HAPPEN. Seen live with a buddy: the assistant answered
+        # "Yes please" with "Sure thing! I'm setting up that watch on Craigslist now…" — twice,
+        # twelve minutes apart — and created nothing both times. The reply committed while the
+        # create card was dropped upstream (a bare yes/no cannot name a new thing to watch), so
+        # the sentence and the system disagreed and the person was simply misled. If the words
+        # claim an action and no action survived, say the true thing instead: ask for what is
+        # actually needed to do it.
+        if (_reply_commits_to_action(message) and not suggestions and not watch_actions
+                and not listings and not program_action):
+            log.info("chat: reply promised an action with none to perform — asking instead")
+            message = ("I got ahead of myself there — I haven't set anything up yet. Tell me "
+                       "what you'd like watched and I'll get it going: what are you looking "
+                       "for, roughly where, and any price ceiling?")
+
         if listings and _should_replace_prose(message):
             what = (lq or {}).get("watch") or "your watches"
             message = f"Here {'is' if len(listings) == 1 else 'are'} " \

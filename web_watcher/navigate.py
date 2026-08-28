@@ -92,10 +92,30 @@ CONTROL_HINTS: dict[str, dict] = {
     "ebay.com": {
         "search_box": "input#gh-ac, input[name='_nkw'], input[type='text'][aria-label*='Search' i]",
     },
-    # Facebook is DELIBERATELY not seeded here. It's the highest-stakes site (a ban ends the
-    # buddy's use case) and its Marketplace controls must be mapped LIVE under fb_safety in
-    # Phase 4 — encoding guessed selectors now would be exactly the "guess presented as fact"
-    # we avoid. Add it when we probe it for real.
+    # Facebook Marketplace — MAPPED LIVE 27 Aug 2026 against the real logged-in page, exactly
+    # as the previous note here demanded (nothing below is guessed; every selector came off the
+    # page in a read-only probe). Attributes observed:
+    #   search box   input[aria-label="Search Marketplace"] — note the page ALSO has
+    #                input[aria-label="Search Facebook"], and BOTH are type="search". A generic
+    #                input[type=search] matches the GLOBAL one first, which would search all of
+    #                Facebook for "macgregor sailboat". The label is the only discriminator.
+    #   location     div[role=button][aria-label="Location: Anacortes, Washington, Within 100 mi"]
+    #                → dialog with input[aria-label="Location"] (a combobox: you must PICK an
+    #                li[role=option], typing alone does nothing) → div[role=button][aria-label=
+    #                "Apply"]. Radius is a label[role=combobox] reading "Radius 100 miles".
+    # NOT in HUMAN_FIRST_SITES yet: mapped ≠ verified. The flow has to be driven end-to-end
+    # under supervision before Facebook is handed the wheel.
+    "facebook.com": {
+        "search_box": 'input[aria-label*="Search Marketplace" i]',
+        "location": {
+            "open":    'div[role=button][aria-label*="Location:" i], '
+                       '[role=button][aria-label*="Location:" i]',
+            "dialog":  "[role=dialog]",
+            "input":   '[role=dialog] input[aria-label="Location" i]',
+            "confirm": "Apply",
+            "radius":  '[role=dialog] label[role=combobox]',
+        },
+    },
 }
 
 
@@ -122,7 +142,12 @@ def hints_for(url: str) -> dict:
 # rollout incremental + safe: a half-mapped or flaky site (OfferUp's location dialog, which
 # failed live + triggered an IP block) is NEVER driven in production before it's proven. Grows
 # one site per verified release.
-HUMAN_FIRST_SITES: set[str] = {"craigslist", "offerup"}
+# facebook graduated 27 Aug 2026 after its flow was DRIVEN live, not merely mapped: the
+# location picker was moved Anacortes → Bellingham → Anacortes with the site's own marker
+# confirming each change, the already-correct case short-circuited without touching the
+# control, and type_search typed into Marketplace's own box (not Facebook's global search)
+# and returned 64 listings. The account was left exactly as it was found.
+HUMAN_FIRST_SITES: set[str] = {"craigslist", "offerup", "facebook"}
 
 
 def is_human_first_enabled(site_or_url: str) -> bool:
@@ -465,11 +490,18 @@ def _pick_suggestion(page) -> None:
 
 def _click_button_by_label(scope, label: str) -> bool:
     """Click a button whose visible text/aria matches `label` (case-insensitive). scope is a
-    page or locator. Returns True if clicked."""
+    page or locator. Returns True if clicked.
+
+    ⚠ This called _human_click(page, …) while its only parameter is `scope` — an undefined
+    name, so every call raised NameError into the bare except below and returned False. The
+    confirm step of set_location has therefore NEVER clicked anything; it always fell through
+    to its fallback label loop, which had the same bug. Found while mapping Facebook's
+    location dialog, whose Apply is a div[role=button] (get_by_role matches ARIA roles, so it
+    was never the element type that was wrong)."""
     try:
         b = scope.get_by_role("button", name=re.compile(re.escape(label), re.I))
         if b.count() > 0 and b.first.is_visible():
-            _human_click(page, b.first)
+            _human_click(scope, b.first)
             return True
     except Exception:
         pass
@@ -548,6 +580,17 @@ def set_location(page, place: str, radius: int | None = None, hint: dict | None 
     # A marker of the location BEFORE, to confirm a real change afterward.
     before = _location_marker(page)
 
+    # ALREADY THERE. Success is "the site is showing the right area", not "we changed
+    # something" — and this returned False when the location was already correct, so a caller
+    # treated a perfectly good state as a failure and fell back to a URL. Measured live on
+    # Facebook: marker read "Location: Anacortes, Washington, Within 100 mi", the watch wanted
+    # Anacortes, and set_location said False. Not touching a control that is already right is
+    # also what a person does.
+    place_key = re.sub(r"[^a-z]", "", (place.split(",")[0] or "").lower())
+    if place_key and place_key in re.sub(r"[^a-z]", "", (before or "").lower()):
+        log.info("Human location: already set to %r — leaving the control alone", place)
+        return True
+
     if not _open():
         return False
     inp = _find_input()
@@ -593,10 +636,14 @@ def _location_marker(page) -> str:
     """A cheap signal of the page's current location, to detect a real change after setting it —
     the location button's own text (e.g. OfferUp's 'Hollywood: Maximum'), else a slice of body."""
     try:
+        # Facebook's location control is a div[role=button] labelled "Location: Anacortes,
+        # Washington, Within 100 mi" — a <button>-only selector found nothing, so a location
+        # that HAD changed still reported unchanged and set_location returned False.
         t = page.evaluate(
             "() => { const b = document.querySelector("
-            "'button[aria-label*=\"location\" i], [aria-label*=\"set my location\" i]');"
-            " return b ? (b.innerText||b.getAttribute('aria-label')||'').trim() : ''; }")
+            "'button[aria-label*=\"location\" i], [aria-label*=\"set my location\" i], "
+            "[role=button][aria-label*=\"location\" i]');"
+            " return b ? (b.getAttribute('aria-label')||b.innerText||'').trim() : ''; }")
         return (t or "").strip()[:60]
     except Exception:
         return ""

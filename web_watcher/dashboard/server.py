@@ -719,6 +719,25 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         bg.add_task(manager.reload_scheduler)
         return {"ok": True, "name": watch_name}
 
+    @app.post("/api/watches/{watch_name}/transfer")
+    def transfer_watch(watch_name: str, body: dict):
+        """Hand a watch to another person. body: {"owner": "<telegram chat_id>" | "" (the
+        desktop/admin), "owner_name": "<display name>" (optional), "actor": "<chat_id>" of
+        whoever is asking (optional; empty = the desktop admin)}.
+
+        Rules: the ADMIN can transfer any watch; anyone else can transfer only a watch they
+        currently own. The watch keeps its whole identity — id, stats, seen-history, matches
+        all travel with it, because they key on the watch, not the owner. The recipient gets a
+        Telegram note so a watch never just silently appears in their list."""
+        ok, detail = _perform_transfer(watch_name, str(body.get("owner") or "").strip(),
+                                       str(body.get("actor") or "").strip() or None,
+                                       owner_name=str(body.get("owner_name") or "").strip())
+        if not ok:
+            code = 404 if "not found" in detail else 403 if "current owner" in detail else 400
+            raise HTTPException(code, detail=detail)
+        return {"ok": True, "name": watch_name,
+                "owner": str(body.get("owner") or "").strip()}
+
     @app.delete("/api/watches/{watch_name}")
     def delete_watch(watch_name: str, bg: BackgroundTasks):
         from web_watcher.config import load, save, lock as _cfg_lock
@@ -2824,6 +2843,7 @@ def _render_help(owner: str | None) -> str:
         "  • “That's not a match” — I drop the last one I showed you, and can learn to skip "
         "similar ones (just give me a word to avoid, like “utility”)\n"
         "  • “Stop / start / reset the boats watch”\n"
+        "  • “Give the boats watch to Steve” — hand a watch to another user (they get a note)\n"
         "  • “Only alert me on great deals”, or “raise the price to $12k”\n\n"
         "Everything runs on the owner's own computer, and your watches are private to you. "
         "Just talk to me in plain English — that's how you drive me. What should I watch for?")
@@ -3968,6 +3988,96 @@ def _named_lifecycle_action(text: str, cfg, owner):
     return None
 
 
+def _perform_transfer(watch_name: str, new_owner: str, actor: str | None,
+                      owner_name: str = "") -> tuple[bool, str]:
+    """Move a watch to another person. Returns (ok, error-detail). Shared by the API endpoint
+    and the chat path so both enforce the same rules:
+      • the ADMIN can transfer any watch; anyone else only a watch they currently own;
+      • the recipient must be a known person (the main chat or an allowed Telegram user) —
+        otherwise the watch lands with someone who can never see it;
+      • the watch keeps its whole identity (id, stats, seen-history, matches all key on the
+        watch, not the owner) and the recipient gets a Telegram note, so a watch never just
+        silently appears in their list. new_owner "" = the desktop/admin."""
+    from web_watcher.config import load, save, lock as _cfg_lock
+    new_owner = str(new_owner or "").strip()
+    with _cfg_lock():
+        cfg = load()
+        w = next((x for x in cfg.watches if x.name == watch_name), None)
+        if w is None:
+            return (False, f"Watch {watch_name!r} not found")
+        if not _is_admin_owner(actor, cfg) and str(getattr(w, "owner", "") or "") != str(actor):
+            return (False, "Only the admin or the watch's current owner can transfer it")
+        allowed = {str(cfg.notifications.telegram.chat_id or "")} | {
+            str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or [])}
+        if new_owner and new_owner not in allowed:
+            return (False, f"{new_owner!r} isn't a known person — add them to the allowed "
+                           "Telegram users first")
+        old_owner = str(getattr(w, "owner", "") or "")
+        if old_owner == new_owner:
+            return (True, "")
+        w.owner = new_owner
+        save(cfg)
+    if owner_name:
+        _record_owner_name(new_owner, owner_name)
+    if new_owner:
+        try:
+            from web_watcher.notify import send_plain_telegram
+            names = _load_owner_names()
+            giver = names.get(str(actor or ""), "") or ("the owner" if actor is None
+                                                        else "another user")
+            send_plain_telegram(
+                f"📬 {giver} transferred the watch “{watch_name}” to you. "
+                f"Say “what am I watching?” to see it.",
+                load().notifications, chat_id_override=new_owner)
+        except Exception as exc:
+            log.debug("transfer notice not sent: %s", exc)
+    log.info("Watch %r transferred: %r → %r (by %s)", watch_name, old_owner,
+             new_owner, actor or "admin")
+    return (True, "")
+
+
+# "transfer/give/hand the <X> watch to <person>". The recipient phrase is whatever follows the
+# final " to " — names are free text, so parsing keeps it simple and resolution does the work.
+_TRANSFER_RE = re.compile(
+    r"\b(?:transfer|reassign|hand (?:over |off )?|give|pass)\b.{0,60}?\bwatch\b.{0,40}?"
+    r"\bto\s+(?P<who>[A-Za-z0-9@._' -]{2,32})\s*[.!]?\s*$", re.I)
+
+
+def _resolve_person(phrase: str, cfg, actor: str | None) -> tuple[str | None, str]:
+    """A recipient phrase → (chat_id, display label), or (None, why-not). "" chat_id = the
+    desktop/admin. Deterministic and conservative: an unknown or ambiguous name asks rather
+    than guesses — a watch quietly handed to the wrong person is worse than a question."""
+    p = " ".join((phrase or "").split()).strip(" .!?").lower()
+    if not p:
+        return (None, "no name given")
+    if p in ("me", "myself"):
+        return (str(actor or ""), "you")
+    names = _load_owner_names()                       # chat_id -> Telegram display name
+    main = str(cfg.notifications.telegram.chat_id or "")
+    allowed = [main] + [str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or []) if c]
+    allowed = [c for c in dict.fromkeys(allowed) if c]
+    if re.fullmatch(r"\d{3,}", p):                    # a literal chat id
+        return ((p, names.get(p, p)) if p in allowed
+                else (None, f"{p} isn't in the allowed Telegram users"))
+    # A name — match against recorded Telegram names, either direction of containment
+    # ("chris" ↔ "Chris Colabella").
+    hits = [(cid, names[cid]) for cid in allowed if cid in names
+            and (p in names[cid].lower() or names[cid].lower() in p)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        return (None, "that name matches more than one person")
+    # "my buddy" / "my friend" / a pronoun — unambiguous only when exactly ONE other person
+    # exists to mean.
+    if re.search(r"\b(budd\w*|friend|him|her|them)\b", p):
+        others = [c for c in allowed if c != str(actor or "") and c != main] or \
+                 [c for c in allowed if c != str(actor or "")]
+        if len(others) == 1:
+            return (others[0], names.get(others[0], others[0]))
+        return (None, "more than one person that could mean")
+    return (None, f"I don't know anyone called “{phrase.strip()}”")
+
+
 def _is_admin_owner(owner, cfg) -> bool:
     """The admin is the desktop dashboard (owner=None) or the main configured Telegram chat. Only
     the admin may flip the global master switch; a buddy can only touch their own watches."""
@@ -4469,6 +4579,38 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                        f"Got it — I'll check in about every {checkin_hours:g} hour"
                        f"{'' if checkin_hours == 1 else 's'} when there's nothing new.")
             suggestions, watch_actions = [], None
+
+        # ── Deterministic TRANSFER ("give my truck watch to Steve") ─────────
+        # Handing a watch to another person is exact business — a name, a recipient, a
+        # permission — which is precisely where the 14b drifts, so the whole thing is code.
+        # Ambiguity in either the watch or the person becomes a QUESTION, never a guess.
+        _tm = _TRANSFER_RE.search(latest_user or "")
+        if _tm:
+            _remainder = (latest_user or "")[:_tm.start("who")]
+            _wname = _resolve_watch_name(_watch_named_in(_remainder, cfg, owner) or "", cfg)
+            _to, _why = _resolve_person(_tm.group("who"), cfg, owner)
+            if not _wname:
+                mine = _watches_for_owner(cfg, owner)
+                message = ("Which watch do you want to hand over? "
+                           + ", ".join(f"“{w.name}”" for w in mine[:8]))
+            elif _to is None:
+                names = _load_owner_names()
+                known = [names.get(c, c) for c in
+                         [str(cfg.notifications.telegram.chat_id or "")]
+                         + [str(x) for x in (cfg.notifications.telegram.allowed_chat_ids or [])]
+                         if c]
+                message = (f"I couldn't work out who to give it to ({_why}). "
+                           f"People I know: {', '.join(dict.fromkeys(known)) or 'nobody yet — '
+                           'add them to the allowed Telegram users first'}.")
+            else:
+                ok, err = _perform_transfer(_wname, _to, owner)
+                message = (f"Done — “{_wname}” now belongs to {_why if _to else 'you (the desktop)'}"
+                           f"{' and they’ve been told' if _to else ''}."
+                           if ok else f"I couldn't transfer it: {err}")
+            suggestions, watch_actions, listings = [], None, None
+            return {"message": message, "watch_suggestion": None, "watch_suggestions": None,
+                    "listings": None, "watch_actions": None, "program_action": None,
+                    "tokens": 0, "prompt_tokens": 0, "duration_ms": 0, "raw": message}
 
         # ── Deterministic NAMED start/stop ("start up the macgregor watch") ──
         # Same reason as the reset short-circuit above: the 14b is unreliable at emitting the

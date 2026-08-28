@@ -621,8 +621,16 @@ def example_ask(watch_name: str, instruction: str = "") -> str:
 
 
 def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: NotificationsConfig,
-                           owner_chat_id: str = "", instruction: str = "") -> bool:
-    """One message: what the watch just banked, and what you can do about it."""
+                           owner_chat_id: str = "", instruction: str = "",
+                           top: list | None = None) -> bool:
+    """One message: what the watch just banked, and what you can do about it.
+
+    `top` is the best few matched listings, SHOWN INLINE. Without them the briefing was a bare
+    count behind a button, and if the button was never tapped nothing happened at all — no
+    reminder, no expiry, no follow-up. The watch's best current inventory was the one thing a
+    new person would never be shown, because alerts only fire for listings posted AFTER the
+    baseline. Three real cars in the message itself is the difference between "it works" and
+    "it says it works"."""
     t = cfg.telegram
     chat_id = str(owner_chat_id or "").strip() or t.chat_id
     if not t.bot_token or not chat_id or seen <= 0:
@@ -646,10 +654,27 @@ def send_baseline_briefing(watch_name: str, seen: int, matched: int, cfg: Notifi
             "From here on you'll get an alert for anything NEW.")
     buttons = []
     if matched:
+        # Put a few REAL ones in the message. See the docstring: an untapped button meant the
+        # watch's best current inventory stayed invisible forever, because alerts only fire
+        # for listings posted AFTER the baseline.
+        shown = 0
+        for l in (top or [])[:3]:
+            title = str(getattr(l, "title", "") or "").strip()[:70]
+            if not title:
+                continue
+            if shown == 0:
+                text += "\n\nA few worth a look right now:"
+            price = str(getattr(l, "price", "") or "").strip()
+            url = str(getattr(l, "url", "") or "").strip()
+            text += f"\n\n• {title}" + (f" — {price}" if price else "")
+            if url:
+                text += f"\n{url}"
+            shown += 1
         buttons = [[{"text": "⭐ Show top 10", "callback_data": f"{_TOP_PREFIX}{tok}:10"},
                     {"text": "Show top 20", "callback_data": f"{_TOP_PREFIX}{tok}:20"}]]
-        text += ("\n\nWant them now? Tap below — or just ask me, "
-                 f"e.g. “{example_ask(watch_name, instruction)}”.")
+        text += (("\n\nMore? Tap below" if shown else "\n\nWant them now? Tap below")
+                 + " — or just ask me, "
+                 + f"e.g. “{example_ask(watch_name, instruction)}”.")
 
     body: dict = {"chat_id": chat_id, "text": text}
     if buttons:

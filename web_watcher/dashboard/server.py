@@ -672,7 +672,28 @@ def create_app(manager: "ServiceManager") -> FastAPI:
 
             cfg.watches.append(new_watch)
             save(cfg)
-        bg.add_task(manager.reload_scheduler)
+
+        # AUTO-START A NEW CONTINUOUS WATCH. Creating a watch is the act of asking for it to
+        # run; making someone find a Start button afterwards means a watch that looks set up
+        # and quietly does nothing. It also had a second-order cost: knowing continuous watches
+        # sat idle, a watch was once created in SCHEDULE mode to dodge that — which put a
+        # marketplace watch on the generic perception pipeline (load page → "is the condition
+        # met?") instead of the listings pipeline, and it extracted zero listings. Remove the
+        # limitation and the temptation goes with it.
+        #
+        # Ordering matters: the reload below re-registers every continuous watch as STOPPED,
+        # so starting before it would be undone (measured — the start was silently reverted).
+        # Both run as background tasks, in order, after the response.
+        def _reload_then_start():
+            manager.reload_scheduler()
+            if new_watch.mode == "continuous" and new_watch.enabled:
+                try:
+                    manager.start_continuous(new_watch.name)
+                    log.info("Auto-started new continuous watch %r", new_watch.name)
+                except Exception as exc:
+                    log.warning("could not auto-start %r: %s", new_watch.name, exc)
+
+        bg.add_task(_reload_then_start)
         # NOTE: exploration of an unknown site happens when the watch is STARTED (see
         # scheduler._execute_continuous_watch), not here — creating a watch shouldn't kick
         # off a browser. `needs_exploring` just lets the UI mention it up front.

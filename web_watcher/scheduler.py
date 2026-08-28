@@ -1436,7 +1436,10 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
         # Card-level judge (no deep-read) — one LLM call for the slice; keeps priming cheap.
         # Runs against the instruction even without an explicit judgment_prompt, so a plain
         # watch doesn't baseline EVERYTHING as a match (the "everything is a match" bug).
-        matched = _filter_listings_by_judgment(kw_kept, watch, cfg)
+        # Pass 1 ONLY — the cheap card-level screen. Pass 2 waits until the survivors have
+        # been read (below), because verifying from a card title is how a transmission watch
+        # rejects seven real candidates as "Transmission not specified".
+        matched = _filter_listings_by_judgment(kw_kept, watch, cfg, verify=False)
     # Now go READ the ones that passed. Priming stays cheap on the JUDGE (one call over
     # card titles) but the handful that survive it are exactly the listings a person would
     # click, so they get opened, read and archived like any other match. Without this a
@@ -1445,6 +1448,12 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
     if matched and page is not None and _wants_deep_read(watch):
         _capture_listing_bodies(page, _judge_order(matched, watch)[:_MAX_BODY_FETCH],
                                 stop_event)
+        # NOW verify, with the ad bodies in hand. This is the pass that asks "does THIS
+        # listing satisfy the criteria" one at a time, and it is the one that most needs the
+        # text — the watch's own prompt says "open the listing and read its transmission".
+        if watch.judgment_prompt or (watch.instruction or "").strip():
+            matched = _verify_kept_listings(matched, watch, cfg,
+                                            getattr(watch, "min_rating", 3))
     matched_keys = {l.key for l in matched}
     if to_judge:
         _persist_listings(watch, to_judge, matched_keys, run_ts, db_path)
@@ -1462,9 +1471,12 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
     # numbers and a way to act on the backlog we just quietly banked.
     try:
         from web_watcher.notify import send_baseline_briefing
+        # Hand it the best few ACTUAL listings (highest-rated first) so the message carries
+        # real cars, not just a number behind a button nobody may ever tap.
+        best = sorted(matched, key=lambda l: -(getattr(l, "rating", 0) or 0))[:3]
         send_baseline_briefing(watch.name, len(batch), len(matched_keys), cfg.notifications,
                                owner_chat_id=getattr(watch, "owner", "") or "",
-                               instruction=watch.instruction or "")
+                               instruction=watch.instruction or "", top=best)
     except Exception as exc:
         log.debug("baseline briefing not sent for %r: %s", watch.name, exc)
 
@@ -1873,7 +1885,7 @@ def _keyword_prefilter(listings: list, watch: Watch) -> tuple[list, list]:
 
 
 def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfig,
-                                 fail_closed: bool = False) -> list:
+                                 fail_closed: bool = False, verify: bool = True) -> list:
     """
     Batch-judge new listings against the watch's criteria in ONE LLM call, RATING each
     1-5 (see _RATING_RUBRIC). A listing is kept (alertable) when its rating >=
@@ -2012,7 +2024,13 @@ def _filter_listings_by_judgment(new_listings: list, watch: Watch, cfg: AppConfi
         # judges by local index over a long numbered list, and small models drift: the C&C 25's
         # verdict arrived carrying the J30's reason. One listing per call cannot misalign, and
         # it runs only on the few that passed, so the cost is bounded.
-        keep = _verify_kept_listings(keep, watch, cfg, threshold)
+        # verify=False lets a caller DEFER pass 2 until the survivors have been deep-read.
+        # A watch whose criteria say "open the listing and read its transmission" cannot be
+        # verified from a card title: on a priming run the verifier rejected seven real
+        # candidates as "Transmission not specified" — the very fact the ad body would have
+        # supplied. See _baseline_batch, which reads first and then verifies.
+        if verify:
+            keep = _verify_kept_listings(keep, watch, cfg, threshold)
         return keep
     except Exception as exc:
         if fail_closed:

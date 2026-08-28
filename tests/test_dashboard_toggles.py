@@ -37,3 +37,36 @@ def test_each_toggle_track_has_an_id_for_the_state_helpers():
     # _apply*Toggle() paint the track/label from the id; a missing id silently stops the
     # switch from ever showing 'On'.
     assert all('id="' in t for t in _tracks())
+
+
+# ---------------------------------------------------------------------------
+# A new continuous watch starts itself
+# ---------------------------------------------------------------------------
+
+def test_create_auto_starts_a_continuous_watch():
+    """Creating a watch IS the act of asking for it to run. Leaving it stopped means a watch
+    that looks set up and quietly does nothing — and it cost more than the click: knowing
+    continuous watches sat idle, one was created in SCHEDULE mode to dodge that, which put a
+    marketplace watch on the generic perception pipeline and extracted zero listings."""
+    src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    i = src.index('@app.post("/api/watches", status_code=201)')
+    block = src[i:i + 3500]
+    assert "_reload_then_start" in block
+    assert "manager.start_continuous(new_watch.name)" in block
+    assert 'new_watch.mode == "continuous"' in block
+
+
+def test_auto_start_happens_after_the_reload():
+    """The reload re-registers every continuous watch as STOPPED, so starting before it is
+    silently undone — measured live when a manual start was reverted a second later."""
+    src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    i = src.index("def _reload_then_start():")
+    block = src[i:i + 600]
+    assert block.index("manager.reload_scheduler()") < block.index("start_continuous")
+
+
+def test_a_schedule_watch_is_not_auto_started():
+    """Only continuous watches have a loop to start; a schedule watch is driven by its job."""
+    src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    i = src.index("def _reload_then_start():")
+    assert 'if new_watch.mode == "continuous" and new_watch.enabled:' in src[i:i + 600]

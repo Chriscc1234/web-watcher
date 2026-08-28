@@ -603,3 +603,59 @@ def test_the_briefing_example_is_watch_specific(monkeypatch, tmp_path):
     notify.send_baseline_briefing("Boats Watch", 189, 10, _tg_cfg(),
                                   instruction="Look for under 30-foot motor boats with outboard motors")
     assert "under 30-foot motor boats with outboard motors" in sent["text"]
+
+
+# ---------------------------------------------------------------------------
+# The baseline briefing must carry real listings, not just a count
+# ---------------------------------------------------------------------------
+
+def test_briefing_shows_real_listings_inline(monkeypatch):
+    """If the button is never tapped, nothing happens — no reminder, no expiry, no follow-up.
+    Alerts only fire for listings posted AFTER the baseline, so the watch's best current
+    inventory was the one thing a new person would never be shown."""
+    import types
+    from web_watcher import notify
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None):
+            sent.update(json or {})
+            return _Resp()
+
+    monkeypatch.setattr(notify.httpx, "Client", lambda *a, **k: _Client())
+    monkeypatch.setattr(notify, "_briefed_recently", lambda *a, **k: False)
+    cfg = types.SimpleNamespace(telegram=types.SimpleNamespace(bot_token="t", chat_id="1"))
+    top = [types.SimpleNamespace(title="2012 Jeep Wrangler 5 speed Manual", price="$14,000",
+                                 url="https://example.com/a", rating=5)]
+    notify.send_baseline_briefing("Cars", 200, 9, cfg, owner_chat_id="1", top=top)
+    text = sent.get("text", "")
+    assert "2012 Jeep Wrangler" in text, "the briefing still hides every listing behind a button"
+    assert "https://example.com/a" in text
+    assert "worth a look right now" in text
+
+
+def test_briefing_without_listings_still_offers_the_buttons(monkeypatch):
+    import types
+    from web_watcher import notify
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None):
+            sent.update(json or {}); return _Resp()
+
+    monkeypatch.setattr(notify.httpx, "Client", lambda *a, **k: _Client())
+    monkeypatch.setattr(notify, "_briefed_recently", lambda *a, **k: False)
+    cfg = types.SimpleNamespace(telegram=types.SimpleNamespace(bot_token="t", chat_id="1"))
+    notify.send_baseline_briefing("Cars", 200, 9, cfg, owner_chat_id="1", top=None)
+    assert "Want them now? Tap below" in sent.get("text", "")
+    assert sent.get("reply_markup")

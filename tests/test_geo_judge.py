@@ -294,3 +294,40 @@ def test_watch_states_price_detection():
     assert scheduler._watch_states_price(_watch(instruction="cheap project boats"))
     assert not scheduler._watch_states_price(
         _watch(instruction="Look for MacGregor sailboats near Seattle WA"))
+
+
+# --------------------------------------------------------------------------
+# Priming must READ before it VERIFIES
+# --------------------------------------------------------------------------
+
+def test_baseline_verifies_after_the_deep_read():
+    """A watch whose criteria say "open the listing and read its transmission" cannot be
+    verified from a card title. On a live priming run the verifier rejected SEVEN real
+    candidates as "Transmission not specified" — the exact fact the ad body would have
+    supplied — because pass 2 ran before anything was read."""
+    import inspect
+    from web_watcher import scheduler
+    src = inspect.getsource(scheduler._baseline_batch)
+    assert "verify=False" in src, "the baseline still runs pass 2 on card titles"
+    assert src.index("verify=False") < src.index("_capture_listing_bodies")
+    assert src.index("_capture_listing_bodies") < src.index("_verify_kept_listings")
+
+
+def test_filter_can_defer_verification(monkeypatch):
+    """The toggle exists and pass 2 is genuinely skipped when asked."""
+    import types
+    from web_watcher import scheduler
+    from web_watcher.monitor import Listing
+    called = {"verify": 0}
+    monkeypatch.setattr(scheduler, "_verify_kept_listings",
+                        lambda *a, **k: called.__setitem__("verify", called["verify"] + 1) or a[0])
+    monkeypatch.setattr(scheduler.llm, "chat", lambda *a, **k:
+                        '{"ratings":[{"i":0,"r":5,"why":"manual, in budget"}]}')
+    w = types.SimpleNamespace(instruction="manual cars", judgment_prompt=None, id="w",
+                              name="W", urls=[], min_rating=3, keywords=[], antikeywords=[])
+    cfg = types.SimpleNamespace(models=types.SimpleNamespace(effective_council_model="stub"))
+    ls = [Listing(key="k", url="https://x/1", title="1999 Miata 5-speed", price="$4,000")]
+    scheduler._filter_listings_by_judgment(ls, w, cfg, verify=False)
+    assert called["verify"] == 0
+    scheduler._filter_listings_by_judgment(ls, w, cfg, verify=True)
+    assert called["verify"] == 1

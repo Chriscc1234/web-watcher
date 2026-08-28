@@ -849,12 +849,30 @@ def _run_agent_continuous_sweep(
                 drove = _human_first_navigate(page, plan["start_url"], watch)
             except Exception as exc:
                 log.debug("agent sweep: human-first navigation errored, falling back: %s", exc)
+        typed = False
         if drove:
             log.info("Continuous agent sweep %d for %r: drove the site's own search controls "
                      "(human-first) → %s", sweep_index, watch.name, page.url[:100])
         else:
-            maybe_warm_homepage(page, plan["start_url"])
-            page.goto(plan["start_url"], timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+            # Second rung: TYPE the search like a person even when we can't fully drive the
+            # site's location/price controls. can_fully_drive gates the first rung to sites
+            # whose every control is mapped (Craigslist today) — which meant Facebook fell all
+            # the way to a bare goto and the sweep announced itself by materialising on a deep
+            # parametric results URL. The user watched it happen: "it jumped straight to the
+            # search". humanized_search lands on the page WITHOUT the query and types it into
+            # the site's own box with real key events; the URL fallback below remains for
+            # sites where even that fails.
+            if cfg.browser.stealth:
+                try:
+                    typed = humanized_search(page, plan["start_url"])
+                except Exception as exc:
+                    log.debug("agent sweep: humanized search errored, falling back: %s", exc)
+            if typed:
+                log.info("Continuous agent sweep %d for %r: typed the search like a person "
+                         "→ %s", sweep_index, watch.name, page.url[:100])
+            else:
+                maybe_warm_homepage(page, plan["start_url"])
+                page.goto(plan["start_url"], timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
     except Exception as exc:
         log.warning("Continuous agent sweep %d: navigation failed for %s: %s",
                     sweep_index, plan["start_url"], exc)

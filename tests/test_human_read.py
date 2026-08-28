@@ -299,3 +299,115 @@ def test_explore_matches_never_raises(monkeypatch):
     monkeypatch.setattr("web_watcher.storage.query_listings",
                         lambda **kw: (_ for _ in ()).throw(RuntimeError("db gone")))
     assert scheduler._explore_matches(_watch(instruction="x"), None, None, page=object()) == 0
+
+
+# --------------------------------------------------------------------------
+# Reading an ad, NOT the infinite feed below it
+# --------------------------------------------------------------------------
+
+class DepthPage(FakePage):
+    """A page that reports a viewport, so the scroll cap can be measured."""
+    def __init__(self, chars=1200, viewport=800):
+        super().__init__(chars=chars)
+        self._viewport = viewport
+
+    def evaluate(self, js):
+        return self._viewport if "innerHeight" in js else self._chars
+
+
+def _max_depth(page):
+    """The DEEPEST point reached — that, not the net at the end, decides whether we left the
+    ad behind and fell into the feed underneath it."""
+    depth = peak = 0
+    for _dx, dy in page.mouse.wheels:
+        depth = max(0, depth + dy)      # you cannot scroll above the top of a page
+        peak = max(peak, depth)
+    return peak
+
+
+def _scrolled_down(page):
+    return sum(dy for _dx, dy in page.mouse.wheels if dy > 0)
+
+
+def test_read_stays_within_the_ad(fast_clock):
+    """The live failure on Facebook: the ad ends and an infinite 'Today's picks' feed begins,
+    so scrolling on found elephants, apartments and a Macintosh 512K on a SAILBOAT watch."""
+    from web_watcher import monitor
+    page = DepthPage(chars=4000, viewport=800)
+    human_read(page)
+    cap = 800 * monitor._READ_MAX_SCREENS
+    assert _max_depth(page) <= cap + 500, (
+        f"reached {_max_depth(page)}px — past the ad (cap ~{cap:.0f}px) into the feed")
+
+
+def test_a_long_read_does_not_mean_a_deep_scroll(fast_clock):
+    """Dwell and depth are independent: a long ad earns more TIME, never more descent."""
+    from web_watcher import monitor
+    page = DepthPage(chars=100_000, viewport=800)
+    spent = human_read(page)
+    assert spent > 8.0
+    assert _max_depth(page) <= 800 * monitor._READ_MAX_SCREENS + 500
+
+
+def test_the_budget_ignores_an_infinite_feeds_text(fast_clock):
+    """Whole-page text on a page with an endless feed says 'enormous' and would buy the
+    maximum dwell for a three-line ad."""
+    from web_watcher import monitor
+    huge = monitor._read_budget(DepthPage(chars=5_000_000), "www.facebook.com")
+    capped = monitor._read_budget(DepthPage(chars=monitor._READ_TEXT_CAP), "www.facebook.com")
+    assert huge <= capped + 6.0, "an infinite feed still bought extra reading time"
+
+
+def test_still_scrolls_something(fast_clock):
+    """The cap must not turn reading into staring at the top of the page."""
+    page = DepthPage(chars=2000, viewport=800)
+    human_read(page)
+    assert _scrolled_down(page) > 200
+
+
+def test_reading_continues_after_the_cap(fast_clock):
+    """Reaching the bottom of the ad ends the DESCENT, not the visit — a person who finished
+    the description lingers and re-reads rather than diving into the recommendations."""
+    page = DepthPage(chars=4000, viewport=800)
+    spent = human_read(page)
+    assert spent >= 8.0
+
+
+# --------------------------------------------------------------------------
+# Where a typed search STARTS from
+# --------------------------------------------------------------------------
+
+def _landing_for(url):
+    """Mirror of humanized_search's landing computation, which is what the site sees first."""
+    import re as _re
+    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+    parts = urlparse(url)
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    from web_watcher.monitor import _SEARCH_TERM_PARAMS
+    for k in _SEARCH_TERM_PARAMS:
+        if params.get(k):
+            params.pop(k)
+            break
+    lp = parts
+    if _re.search(r"/(search|s|sch)/?$", parts.path or "") and not params:
+        lp = parts._replace(path=_re.sub(r"/(search|s|sch)/?$", "/", parts.path or ""))
+    return urlunparse(lp._replace(query=urlencode(params)))
+
+
+def test_landing_drops_a_bare_search_segment():
+    """Nobody navigates to /marketplace/seattle/search with no query — you go to Marketplace
+    and type. Landing on the bare search URL is its own small tell."""
+    assert _landing_for(
+        "https://www.facebook.com/marketplace/seattle/search?query=macgregor%20sailboat"
+    ) == "https://www.facebook.com/marketplace/seattle/"
+    assert _landing_for("https://offerup.com/search?q=macgregor") == "https://offerup.com/"
+
+
+def test_landing_keeps_category_and_location():
+    """Only the TYPED term is removed — a category or postal is a filter, not a search term,
+    and dropping it would silently widen the watch."""
+    assert _landing_for(
+        "https://skagit.craigslist.org/search/boo?query=MacGregor&postal=98221"
+    ) == "https://skagit.craigslist.org/search/boo?postal=98221"
+    assert "_stpos=98221" in _landing_for(
+        "https://www.ebay.com/sch/i.html?_stpos=98221&_nkw=macgregor+sailboat")

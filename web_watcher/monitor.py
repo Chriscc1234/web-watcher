@@ -960,7 +960,15 @@ def humanized_search(page: Page, url: str) -> bool:
     if not term:
         return False  # no free-text term to type — let the caller goto directly
 
-    landing = urlunparse(parts._replace(query=urlencode(params)))
+    # Where a person would START before typing. Stripping the term from
+    # /marketplace/seattle/search?query=… leaves a bare /search with no query — a URL nobody
+    # navigates to on purpose. Drop that trailing segment so we land on the section's own front
+    # page (/marketplace/seattle/) and type from there, which is what a person actually does.
+    landing_parts = parts
+    if re.search(r"/(search|s|sch)/?$", parts.path or "") and not params:
+        landing_parts = parts._replace(
+            path=re.sub(r"/(search|s|sch)/?$", "/", parts.path or ""))
+    landing = urlunparse(landing_parts._replace(query=urlencode(params)))
     try:
         page.goto(landing, timeout=_HUMAN_NAV_TIMEOUT, wait_until="domcontentloaded")
     except Exception as exc:
@@ -1102,6 +1110,18 @@ _READ_MAX_S       = 46.0
 # Sites where a listing view is watched closely enough to warrant the unhurried end.
 _SLOW_READ_HOSTS  = ("facebook.com", "fb.com", "marketplace.facebook.com")
 
+# HOW FAR DOWN AN AD ACTUALLY GOES, in viewport heights. A marketplace listing page is the ad
+# on top — photos, title, price, description, seller — and then, on Facebook above all, an
+# INFINITE "you may also like" feed. Reading is the first part; the rest is doomscrolling.
+# Observed live on FB: human_read scrolled straight past the ad into the recommendation feed,
+# which lazy-loads forever, so the "person reading a listing" looked like someone falling into
+# a rabbit hole — the opposite of the impression this function exists to make. Two and a half
+# screens covers photos + description + seller block on every marketplace we handle.
+_READ_MAX_SCREENS = 2.5
+# Text beyond this is not ad body — it's the feed below it. Used only to size the dwell, so an
+# infinite page can't claim the maximum reading time.
+_READ_TEXT_CAP    = 4_000
+
 
 def nap(seconds: float, stop_event=None) -> bool:
     """Sleep in short slices so a Stop is honoured within ~0.2s instead of after the full
@@ -1126,6 +1146,9 @@ def _read_budget(page, host: str) -> float:
         ) or 0)
     except Exception:
         chars = 0
+    # Clamp: on a page whose ad is followed by an infinite recommendation feed, whole-page text
+    # length says "enormous" and would buy the maximum dwell for a three-line ad.
+    chars = min(chars, _READ_TEXT_CAP)
     # ~1,100 chars is a typical marketplace ad; give roughly 5s of reading per screenful of it.
     base += min(22.0, (chars / 1100.0) * random.uniform(3.5, 6.5))
     return max(_READ_MIN_S, min(_READ_MAX_S, base))
@@ -1163,19 +1186,39 @@ def human_read(page, stop_event=None) -> float:
         if not nap(random.uniform(1.5, 3.5), stop_event):
             return time.monotonic() - started
 
+        # How far down this ad we're willing to go. Past this we are no longer reading the
+        # listing, we're browsing the feed underneath it — see _READ_MAX_SCREENS.
+        try:
+            viewport = int(page.evaluate("() => window.innerHeight || 800") or 800)
+        except Exception:
+            viewport = 800
+        max_depth = int(viewport * _READ_MAX_SCREENS)
+        depth = 0                      # net pixels scrolled down from the top of the ad
+
         # 2. Work down through the ad in reading passes, pausing where the text is.
         while (time.monotonic() - started) < budget:
-            for _ in range(random.randint(2, 4)):
-                page.mouse.wheel(0, random.randint(220, 460))
-                if not nap(max(0.05, random.gauss(0.18, 0.06)), stop_event):
-                    return time.monotonic() - started
-            # The pause AFTER a scroll is the reading — this is where the time goes.
+            if depth < max_depth:
+                for _ in range(random.randint(2, 4)):
+                    dy = random.randint(220, 460)
+                    page.mouse.wheel(0, dy)
+                    depth += dy
+                    if not nap(max(0.05, random.gauss(0.18, 0.06)), stop_event):
+                        return time.monotonic() - started
+                    if depth >= max_depth:
+                        break
+            # The pause AFTER a scroll is the reading — this is where the time goes. Once we've
+            # reached the bottom of the ad we keep dwelling here rather than scrolling on: a
+            # person who has finished the description stops, they don't keep going into the
+            # recommendations forever.
             if not nap(max(0.6, random.gauss(2.3, 0.9)), stop_event):
                 return time.monotonic() - started
-            # Drift back up now and then, the way you do to re-check a price or a year.
-            if random.random() < 0.35:
+            # Drift back up now and then, the way you do to re-check a price or a year. At the
+            # bottom of the ad this becomes the main motion — re-reading, not descending.
+            if random.random() < (0.7 if depth >= max_depth else 0.35):
                 for _ in range(random.randint(1, 3)):
-                    page.mouse.wheel(0, -random.randint(140, 320))
+                    up = random.randint(140, 320)
+                    page.mouse.wheel(0, -up)
+                    depth = max(0, depth - up)
                     if not nap(max(0.05, random.gauss(0.2, 0.07)), stop_event):
                         return time.monotonic() - started
                 if not nap(max(0.4, random.gauss(1.6, 0.6)), stop_event):

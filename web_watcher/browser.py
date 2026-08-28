@@ -48,10 +48,21 @@ NAV_TIMEOUT = 30_000
 # Chrome launch args that reduce automation fingerprinting
 _STEALTH_ARGS = [
     "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process",
+    # NOT --disable-features=IsolateOrigins,site-per-process. Three strikes:
+    #   1. Chrome shows a yellow "You are using an unsupported command-line flag" banner for it,
+    #      because it switches off a SECURITY feature — a banner no ordinary browser displays,
+    #      which makes it a bot tell in its own right (the user spotted it on screen twice).
+    #   2. It breaks cross-origin iframes, which is why the Connect-Facebook window already
+    #      dropped it: Facebook's two-factor step rendered as a blank page with a lone Meta logo.
+    #      The sweep path kept it — and the sweep path is now the one browsing Facebook.
+    #   3. Nothing needs it any more: the one thing that wanted cross-origin reach (eBay's
+    #      description iframe) is read through Playwright's frame API, which is unaffected by
+    #      site isolation.
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-infobars",
+    # NOT --disable-infobars: it has been a no-op since Chrome 76 (the switch was removed).
+    # It cannot suppress the flag banner it was there to suppress, and an unknown switch is
+    # one more thing to explain.
     # NOT --disable-notifications: that does not merely suppress prompts, it REMOVES the
     # Notification API entirely (measured: `Notification is not defined`). Every real browser
     # has it, so its absence is a glaring anomaly — and a site that calls it throws instead of
@@ -476,6 +487,11 @@ class BrowserSession:
         # agent did — Facebook above all, where "what did it actually click?" is the question
         # that matters and a log line is a poor substitute for seeing it.
         self._record_video_dir = Path(record_video_dir) if record_video_dir else None
+        # Every page's video, captured AS THE PAGE IS CREATED. Collecting them at close time
+        # from context.pages misses any tab that was already closed — which is every deep-read
+        # tab, since reading an ad opens a tab and closes it. Those recordings survived on disk
+        # under Playwright's opaque page@<hash>.webm name, unrenamed and unpruned.
+        self._tracked_videos: list = []
         # NOTE: `stealth` is deliberately unused. The fingerprint patches (webdriver/UA/cores/
         # memory/screen) are applied to EVERY session — turning them off has no user benefit and
         # a bare Playwright fingerprint gets instantly flagged. What the Settings "stealth" flag
@@ -669,6 +685,7 @@ class BrowserSession:
                 # A persistent context IS the context — prove it by touching its pages.
                 _ = ctx.pages
                 self._context = ctx
+                self._watch_videos()
                 log.info(
                     "Persistent browser launched (profile=%s) via channel=%r, sandbox=%s",
                     self._profile_dir.name, channel or "bundled", sandbox,
@@ -763,6 +780,27 @@ class BrowserSession:
             log.warning("Could not load saved browser state (%s) — starting fresh", exc)
             ctx_kwargs.pop("storage_state", None)
             self._context = self._browser.new_context(**ctx_kwargs)
+        self._watch_videos()
+
+
+    def _watch_videos(self) -> None:
+        """Track every page's video from the moment it opens, so a tab that is closed before
+        the session ends still gets a human-readable name (and still counts for pruning)."""
+        if not self._record_video_dir or not self._context:
+            return
+        def _track(pg):
+            try:
+                v = getattr(pg, "video", None)
+                if v is not None:
+                    self._tracked_videos.append(v)
+            except Exception:
+                pass
+        try:
+            self._context.on("page", _track)
+            for pg in self._context.pages:      # the context's own initial page
+                _track(pg)
+        except Exception as exc:
+            log.debug("could not subscribe to page videos: %s", exc)
 
     _MAX_RECORDINGS = 20   # keep the newest N .webm per watch; prune the rest so disk can't run away
 
@@ -826,12 +864,12 @@ class BrowserSession:
             # Playwright finalises the .webm on context close, so grab each page's video path
             # BEFORE closing, then rename the opaque hashes to a timestamped, watch-legible name
             # once the files exist. This is what makes "the 09:05 Facebook run" findable later.
-            _video_paths = []
+            _video_paths = list(self._tracked_videos)
             if self._record_video_dir:
                 try:
-                    for pg in self._context.pages:
+                    for pg in self._context.pages:      # belt and braces
                         v = getattr(pg, "video", None)
-                        if v is not None:
+                        if v is not None and v not in _video_paths:
                             _video_paths.append(v)
                 except Exception as exc:
                     log.debug("could not enumerate videos: %s", exc)

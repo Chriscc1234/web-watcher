@@ -105,10 +105,32 @@ def test_hands_off_mode_uses_vanilla_launch_flags():
     assert not any("IsolateOrigins" in a for a in hands_off)
     assert not any("AutomationControlled" in a for a in hands_off)
     assert "--no-first-run" in hands_off            # harmless first-run nags still suppressed
-    # Normal sweeps are UNCHANGED — this is a carve-out, not a policy change.
+    # The sweep path keeps its automation-hiding flag; site isolation now stays ON for BOTH
+    # (see below — the carve-out became the policy).
     normal = BrowserSession(headless=False, persistent=True)._launch_args()
-    assert any("IsolateOrigins" in a for a in normal)
     assert any("AutomationControlled" in a for a in normal)
+
+
+def test_site_isolation_is_never_disabled():
+    """--disable-features=IsolateOrigins,site-per-process is gone from EVERY launch path.
+
+    It made Chrome show a yellow "You are using an unsupported command-line flag" banner (a
+    tell no ordinary browser displays — the user spotted it on screen), and it breaks the
+    cross-origin iframes Facebook's two-factor step renders in. It was already dropped from
+    the human-driven Connect window for reason two; a supervised sweep found the sweep path
+    still carrying it while browsing Facebook."""
+    from web_watcher.browser import BrowserSession
+    for kwargs in ({}, {"inject_patches": False}, {"clean_launch": True}):
+        args = BrowserSession(headless=False, persistent=True, **kwargs)._launch_args()
+        assert not any("IsolateOrigins" in a or "site-per-process" in a for a in args), kwargs
+
+
+def test_no_dead_infobars_flag():
+    """--disable-infobars has been a no-op since Chrome 76 — it cannot suppress the very
+    banner it was there for, and an unknown switch is one more thing to explain."""
+    from web_watcher.browser import BrowserSession
+    args = BrowserSession(headless=False, persistent=True)._launch_args()
+    assert not any("disable-infobars" in a for a in args)
 
 
 # ── the User-Agent must not lie about the engine ──────────────────────────────────

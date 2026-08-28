@@ -378,29 +378,16 @@ def test_reading_continues_after_the_cap(fast_clock):
 # --------------------------------------------------------------------------
 
 def _landing_for(url):
-    """Mirror of humanized_search's landing computation, which is what the site sees first."""
-    import re as _re
-    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
-    parts = urlparse(url)
-    params = dict(parse_qsl(parts.query, keep_blank_values=True))
-    from web_watcher.monitor import _SEARCH_TERM_PARAMS
-    for k in _SEARCH_TERM_PARAMS:
-        if params.get(k):
-            params.pop(k)
-            break
-    lp = parts
-    if _re.search(r"/(search|s|sch)/?$", parts.path or "") and not params:
-        lp = parts._replace(path=_re.sub(r"/(search|s|sch)/?$", "/", parts.path or ""))
-    return urlunparse(lp._replace(query=urlencode(params)))
+    """The REAL landing computation — no mirror to drift out of sync with the source."""
+    from web_watcher.monitor import search_landing_url
+    return search_landing_url(url)
 
 
 def test_landing_drops_a_bare_search_segment():
     """Nobody navigates to /marketplace/seattle/search with no query — you go to Marketplace
     and type. Landing on the bare search URL is its own small tell."""
-    assert _landing_for(
-        "https://www.facebook.com/marketplace/seattle/search?query=macgregor%20sailboat"
-    ) == "https://www.facebook.com/marketplace/seattle/"
     assert _landing_for("https://offerup.com/search?q=macgregor") == "https://offerup.com/"
+    # (Facebook drops the city segment too — see test_facebook_lands_on_marketplace_not_a_city_path.)
 
 
 def test_landing_keeps_category_and_location():
@@ -411,3 +398,23 @@ def test_landing_keeps_category_and_location():
     ) == "https://skagit.craigslist.org/search/boo?postal=98221"
     assert "_stpos=98221" in _landing_for(
         "https://www.ebay.com/sch/i.html?_stpos=98221&_nkw=macgregor+sailboat")
+
+
+def test_facebook_lands_on_marketplace_not_a_city_path():
+    """The city segment overrides the ACCOUNT'S OWN saved Marketplace location. The recording
+    caught exactly that: our /seattle/ path on an account whose own location is Anacortes —
+    the area the watch is actually about. /marketplace/ is what a person types, and it lets
+    the site's own memory stand."""
+    assert _landing_for(
+        "https://www.facebook.com/marketplace/seattle/search?query=boats"
+    ) == "https://www.facebook.com/marketplace/"
+    assert _landing_for(
+        "https://www.facebook.com/marketplace/search?query=boats"
+    ) == "https://www.facebook.com/marketplace/"
+
+
+def test_other_sites_keep_their_path():
+    """The Marketplace rule is Facebook-specific — it must not eat another site's category."""
+    assert _landing_for(
+        "https://skagit.craigslist.org/search/boo?query=x&postal=98221"
+    ).endswith("/search/boo?postal=98221")

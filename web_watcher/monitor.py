@@ -934,6 +934,38 @@ def detect_no_results(page) -> bool:
     return text_says_no_results(body)
 
 
+def search_landing_url(url: str, params: dict | None = None) -> str:
+    """Where to LAND before typing a search — the page a person would actually start from.
+
+    Two rules, both learned from a supervised Facebook run:
+
+      • Drop a trailing /search segment. Removing the term from
+        /marketplace/seattle/search?query=… leaves a bare /search with no query, a URL nobody
+        navigates to on purpose. Land on the section's front page and type from there.
+      • On Facebook, also drop the CITY segment. /marketplace/seattle/ overrides the ACCOUNT'S
+        OWN saved Marketplace location — the recording showed our /seattle/ path imposed on an
+        account whose own location is Anacortes, which is the area the watch is really about.
+        /marketplace/ is what a person types, and it lets the site's own memory stand.
+
+    Everything else — category, postal, distance — is preserved: those are filters, not search
+    terms, and dropping one would silently widen the watch. `params` is the remaining query
+    after the term was removed (defaults to the URL's own, minus any known term param).
+    """
+    parts = urlparse(url)
+    if params is None:
+        params = dict(parse_qsl(parts.query, keep_blank_values=True))
+        for key in _SEARCH_TERM_PARAMS:
+            if params.pop(key, None):
+                break
+    landing = parts
+    if re.search(r"/(search|s|sch)/?$", parts.path or "") and not params:
+        landing = parts._replace(path=re.sub(r"/(search|s|sch)/?$", "/", parts.path or ""))
+    if "facebook." in (parts.netloc or "").lower():
+        landing = landing._replace(
+            path=re.sub(r"^(/marketplace)(/[^/]+)?/?$", "/marketplace/", landing.path or ""))
+    return urlunparse(landing._replace(query=urlencode(params)))
+
+
 def humanized_search(page: Page, url: str) -> bool:
     """
     Navigate like a person instead of jumping straight to a query URL: land on the
@@ -960,15 +992,7 @@ def humanized_search(page: Page, url: str) -> bool:
     if not term:
         return False  # no free-text term to type — let the caller goto directly
 
-    # Where a person would START before typing. Stripping the term from
-    # /marketplace/seattle/search?query=… leaves a bare /search with no query — a URL nobody
-    # navigates to on purpose. Drop that trailing segment so we land on the section's own front
-    # page (/marketplace/seattle/) and type from there, which is what a person actually does.
-    landing_parts = parts
-    if re.search(r"/(search|s|sch)/?$", parts.path or "") and not params:
-        landing_parts = parts._replace(
-            path=re.sub(r"/(search|s|sch)/?$", "/", parts.path or ""))
-    landing = urlunparse(landing_parts._replace(query=urlencode(params)))
+    landing = search_landing_url(url, params)
     try:
         page.goto(landing, timeout=_HUMAN_NAV_TIMEOUT, wait_until="domcontentloaded")
     except Exception as exc:

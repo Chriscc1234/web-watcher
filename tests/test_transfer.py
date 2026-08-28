@@ -171,3 +171,15 @@ def test_send_endpoint_exists_and_gates_unknown_people():
         open("web_watcher/dashboard/server.py", encoding="utf-8").read()
     assert "/api/telegram/send" in src
     assert "isn't a known person" in src
+
+
+def test_send_endpoint_records_the_message_in_their_thread():
+    """A message that reaches someone's phone and exists nowhere else makes the Chats tab
+    look frozen: it kept showing the conversation as it was BEFORE you wrote, because nothing
+    was ever written. The sibling composer endpoint always recorded; this one didn't."""
+    src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    i = src.index('@app.post("/api/telegram/send")')
+    block = src[i:i + 2600]
+    assert "_load_watcher_history(chat_id)" in block
+    assert '"admin": True' in block
+    assert "_save_watcher_history" in block

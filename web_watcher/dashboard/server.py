@@ -1714,6 +1714,20 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         ok = send_plain_telegram(text, cfg.notifications, chat_id_override=chat_id)
         if ok and str(body.get("name") or "").strip():
             set_owner_label(chat_id, str(body["name"]).strip())
+        # RECORD IT IN THEIR THREAD. Without this the message reaches their phone and exists
+        # nowhere else: the Chats tab kept showing the conversation as it was before you wrote,
+        # which reads as "the tab isn't updating" when in fact nothing was ever written. The
+        # sibling composer endpoint has always done this; this one simply didn't.
+        if ok:
+            try:
+                import time as _t
+                hist = _load_watcher_history(chat_id)
+                hist.append({"role": "assistant", "content": text, "ts": _t.time(),
+                             "admin": True})
+                _save_watcher_history(hist[-200:], chat_id)
+            except Exception as exc:
+                log.warning("sent to %s but could not record it in their thread: %s",
+                            chat_id, exc)
         return {"ok": bool(ok)}
 
     @app.post("/api/telegram/detect-chat-id")

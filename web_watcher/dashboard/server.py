@@ -1678,6 +1678,32 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         except Exception as exc:
             return {"ok": False, "error": f"Could not reach Telegram: {exc}"}
 
+    @app.post("/api/telegram/send")
+    def telegram_send(body: dict):
+        """Send a one-off message to a known person — the admin writing to a user ("here's a
+        status update", "sorry about the test pings") without leaving the app. body:
+        {"chat_id": "...", "text": "...", "name": "..."(optional — recorded as the person's
+        display name so future "give the watch to <name>" resolves)}.
+
+        Only KNOWN people (the main chat or an allowed Telegram user) can be written to —
+        this is a messaging convenience for people already in the circle, not a relay."""
+        cfg = _load_cfg()
+        chat_id = str(body.get("chat_id") or "").strip()
+        text    = str(body.get("text") or "").strip()
+        if not chat_id or not text:
+            raise HTTPException(400, detail="chat_id and text are required")
+        allowed = {str(cfg.notifications.telegram.chat_id or "")} | {
+            str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or [])}
+        if chat_id not in allowed:
+            raise HTTPException(400, detail=f"{chat_id!r} isn't a known person")
+        if len(text) > 3500:
+            raise HTTPException(400, detail="message too long")
+        from web_watcher.notify import send_plain_telegram
+        ok = send_plain_telegram(text, cfg.notifications, chat_id_override=chat_id)
+        if ok and str(body.get("name") or "").strip():
+            _record_owner_name(chat_id, str(body["name"]).strip())
+        return {"ok": bool(ok)}
+
     @app.post("/api/telegram/detect-chat-id")
     def telegram_detect(body: dict):
         """Find the chat ID(s) that have messaged this bot (via getUpdates), so the user doesn't

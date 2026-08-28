@@ -158,3 +158,16 @@ def test_transfer_to_current_owner_is_a_noop(monkeypatch):
     _wire_config(monkeypatch, [w])
     ok, _ = S._perform_transfer("Boats", "222", actor=None)
     assert ok and w.owner == "222"
+
+
+# --------------------------------------------------------------------------
+# One-off admin message to a known person (/api/telegram/send)
+# --------------------------------------------------------------------------
+
+def test_send_endpoint_exists_and_gates_unknown_people():
+    """The endpoint is a convenience for people already in the circle, not a relay."""
+    import inspect
+    src = inspect.getsource(S.create_app) if hasattr(S, "create_app") else \
+        open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    assert "/api/telegram/send" in src
+    assert "isn't a known person" in src

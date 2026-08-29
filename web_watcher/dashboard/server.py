@@ -601,6 +601,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
 
         cfg      = load()
         job_map  = {j["watch_name"]: j for j in manager.get_job_info()}
+        rt_map   = manager.runtime_map()       # the MERGED is-it-actually-running truth
         owner_names = _load_owner_names()      # chat_id -> the person's Telegram name
         result   = []
         for w in cfg.watches:
@@ -638,7 +639,13 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "continuous_search_variation": w.continuous_search_variation,
                 "continuous_max_alerts":       w.continuous_max_alerts,
                 "use_login_profile":           w.use_login_profile,
-                "continuous_running": bool(job.get("continuous_running", False)),
+                # From the MERGED runtime (scheduler thread OR orchestrator service) — the
+                # scheduler-only flag said False while the orchestrator was mid-sweep on the
+                # same watch, and the wrong answer propagated to the UI and the assistant.
+                "continuous_running": bool(rt_map.get(w.name, {}).get("running",
+                                           job.get("continuous_running", False))),
+                "runtime_engine":     rt_map.get(w.name, {}).get("engine"),
+                "sweeping_now":       bool(rt_map.get(w.name, {}).get("sweeping_now", False)),
                 "last_run":         last,
                 "next_run_utc":     job.get("next_run_utc"),
                 "stats":            stats,
@@ -3062,6 +3069,8 @@ def _render_watch_status(cfg, manager, owner: str | None) -> str:
         pass
     try:
         job_map = {j["watch_name"]: j for j in manager.get_job_info()}
+        job_map = {n: {**job_map.get(n, {}), "continuous_running": rt.get("running", False)}
+                   for n, rt in (manager.runtime_map() or {}).items()} or job_map
     except Exception:
         job_map = {}
 
@@ -3495,6 +3504,8 @@ def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
     from web_watcher.storage import get_last_run, watch_stats
     try:
         job_map = {j["watch_name"]: j for j in manager.get_job_info()}
+        job_map = {n: {**job_map.get(n, {}), "continuous_running": rt.get("running", False)}
+                   for n, rt in (manager.runtime_map() or {}).items()} or job_map
     except Exception:
         job_map = {}
 

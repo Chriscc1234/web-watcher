@@ -276,7 +276,11 @@ class WatchScheduler:
         except Exception as exc:
             log.debug("could not persist continuous-running state: %s", exc)
 
-    def _remembered_running(self) -> set:
+    def _remembered_running(self):
+        """The recorded should-be-running set, or None when NOTHING was ever recorded.
+        The distinction matters: an EMPTY set means "the user stopped everything" and must be
+        honoured; a missing file means "this install predates desired-state" and callers fall
+        back to legacy behaviour instead of silently stopping every watch."""
         try:
             import json as _json
             p = self._running_state_path()
@@ -284,7 +288,7 @@ class WatchScheduler:
                 return set(_json.loads(p.read_text(encoding="utf-8")) or [])
         except Exception:
             pass
-        return set()
+        return None
 
     def start_continuous(self, watch_name: str) -> bool:
         """Start (or restart) a continuous watch's sweep loop. Returns True if started."""
@@ -390,7 +394,7 @@ class WatchScheduler:
                 # not silently kill a watch someone started); everything else waits for its
                 # Start button. The remembered set changes only on explicit start/stop, so a
                 # deliberately-stopped watch stays stopped through any number of restarts.
-                if watch.name in self._remembered_running():
+                if watch.name in (self._remembered_running() or set()):
                     log.info("Continuous watch %r was running before the restart — resuming",
                              watch.name)
                     self.start_continuous(watch.name)

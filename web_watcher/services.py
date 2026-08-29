@@ -504,6 +504,38 @@ class ServiceManager:
     def get_job_info(self) -> list[dict]:
         return self._scheduler.get_job_info() if self._scheduler else []
 
+    # ── THE one answer to "is this watch actually running?" ─────────────────────────
+    # Two engines can drive a continuous watch — a per-watch scheduler thread, or the
+    # orchestrator servicing every enabled watch in rotation — and each only reported its
+    # own. The API said running=False while the orchestrator was mid-sweep on that very
+    # watch; the assistant then repeated the wrong answer to a person. Asking "did I start
+    # it?" is assumption; this queries what is true right now, whichever engine owns it.
+    def watch_runtime(self, watch_name: str) -> dict:
+        """{'running': bool, 'engine': 'orchestrator'|'scheduler'|None, 'sweeping_now': bool}"""
+        try:
+            if self.orchestrator_running():
+                from web_watcher.config import load as _load
+                cfg = _load(self._config_path)
+                w = next((x for x in cfg.watches if x.name == watch_name), None)
+                if w is not None and w.enabled and w.mode == "continuous" and not self._paused:
+                    cur = (self.orchestrator_status() or {}).get("current")
+                    return {"running": True, "engine": "orchestrator",
+                            "sweeping_now": bool(cur and cur == watch_name)}
+            if self._scheduler and self._scheduler.is_continuous_running(watch_name):
+                return {"running": True, "engine": "scheduler", "sweeping_now": True}
+        except Exception as exc:
+            log.debug("watch_runtime(%r) failed: %s", watch_name, exc)
+        return {"running": False, "engine": None, "sweeping_now": False}
+
+    def runtime_map(self) -> dict:
+        """watch_name -> watch_runtime(...) for every watch, cheap enough for a list call."""
+        try:
+            from web_watcher.config import load as _load
+            cfg = _load(self._config_path)
+            return {w.name: self.watch_runtime(w.name) for w in cfg.watches}
+        except Exception:
+            return {}
+
     def reload_scheduler(self) -> None:
         if self._scheduler:
             self._scheduler.reload()
@@ -531,10 +563,16 @@ class ServiceManager:
             log.info("The Watcher is paused — not starting %r; resume watching first", watch_name)
             return
         # While the orchestrator is driving, it owns the continuous watches — starting a
-        # per-watch thread too would double-sweep the same site. Ignore (The Watcher is
-        # already on it).
+        # per-watch thread too would double-sweep the same site. But the INTENT still counts:
+        # record that this watch should be running, so the orchestrator includes it in its
+        # rotation and a restart resumes it. Before this, a start under the orchestrator
+        # recorded nothing — the desired-state file stayed empty and the resume-on-launch
+        # feature was a no-op for exactly the people using The Watcher.
         if self.orchestrator_running():
-            log.info("Orchestrator is running — %r is serviced by it; ignoring per-watch start", watch_name)
+            self._scheduler._remember_running(watch_name, True)
+            log.info("Orchestrator is running — %r joins its rotation (no per-watch thread)",
+                     watch_name)
+            self._nudge_oversight()
             return
         self._scheduler.start_continuous(watch_name)
         self._nudge_oversight()
@@ -542,7 +580,13 @@ class ServiceManager:
     def stop_continuous(self, watch_name: str) -> None:
         if self._scheduler is None:
             raise RuntimeError("Scheduler is not running")
+        # Always record the intent — under the orchestrator there is no per-watch thread to
+        # stop, and before this a "stop" was a polite no-op: the rotation kept sweeping the
+        # watch the user had just been told was stopped.
+        self._scheduler._remember_running(watch_name, False)
         self._scheduler.stop_continuous(watch_name)
+        if self.orchestrator_running():
+            log.info("%r leaves The Watcher's rotation (stopped by request)", watch_name)
         self._nudge_oversight()
 
     # ------------------------------------------------------------------

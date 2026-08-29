@@ -316,9 +316,52 @@ def test_remember_running_roundtrip(tmp_path):
         def __init__(self): pass          # no scheduler machinery — just the state file
         def _running_state_path(self): return tmp_path / "continuous_running.json"
     t = T()
-    assert t._remembered_running() == set()
+    assert t._remembered_running() is None      # tri-state: nothing ever recorded
     t._remember_running("Fiat X19 Cars Watch", True)
     t._remember_running("Boats", True)
     assert t._remembered_running() == {"Fiat X19 Cars Watch", "Boats"}
     t._remember_running("Boats", False)
     assert t._remembered_running() == {"Fiat X19 Cars Watch"}
+
+
+# --------------------------------------------------------------------------
+# One authority for "is it actually running?", and desired state that is real
+# --------------------------------------------------------------------------
+
+def test_api_list_uses_the_merged_runtime():
+    """The scheduler-only flag said running=False while the orchestrator was mid-sweep on the
+    same watch — and the wrong answer propagated to the UI and the assistant."""
+    src = open("web_watcher/dashboard/server.py", encoding="utf-8").read()
+    assert "rt_map   = manager.runtime_map()" in src
+    assert 'rt_map.get(w.name, {}).get("running"' in src
+
+
+def test_start_under_orchestrator_records_intent():
+    src = open("web_watcher/services.py", encoding="utf-8").read()
+    assert "_remember_running(watch_name, True)" in src
+    assert "joins its rotation" in src
+
+
+def test_stop_under_orchestrator_is_a_real_stop():
+    """Before: stop was a polite no-op while The Watcher drove — the rotation kept sweeping
+    the watch the user had just been told was stopped."""
+    src = open("web_watcher/services.py", encoding="utf-8").read()
+    assert "_remember_running(watch_name, False)" in src
+    o = open("web_watcher/orchestrator.py", encoding="utf-8").read()
+    assert "_remembered_running" in o, "the rotation ignores desired state"
+
+
+def test_missing_desired_state_falls_back_to_legacy():
+    """A missing file means 'this install predates desired-state' — every enabled watch keeps
+    running. An EMPTY set means 'the user stopped everything' and must be honoured."""
+    import tempfile, pathlib
+    from web_watcher.scheduler import WatchScheduler
+    class T(WatchScheduler):
+        def __init__(self, d): self._d = pathlib.Path(d)
+        def _running_state_path(self): return self._d / "continuous_running.json"
+    with tempfile.TemporaryDirectory() as d:
+        t = T(d)
+        assert t._remembered_running() is None          # never recorded → legacy
+        t._remember_running("A", True)
+        t._remember_running("A", False)
+        assert t._remembered_running() == set()         # recorded-empty → honour the stop

@@ -210,9 +210,23 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _active_topics(self, cfg) -> list:
-        """The active topics = enabled continuous-mode watches. Schedule-mode watches are
-        left to APScheduler and never touched here."""
-        return [w for w in cfg.watches if w.enabled and w.mode == "continuous"]
+        """The active topics: enabled continuous watches the user WANTS running.
+
+        This used to be every enabled continuous watch, which made per-watch stop a polite
+        no-op while The Watcher drove — the rotation kept sweeping a watch the user had just
+        been told was stopped. The desired-state set (recorded on every explicit start/stop,
+        surviving restarts) is the authority; when nothing was ever recorded (an install
+        predating it), fall back to the legacy all-enabled behaviour rather than silently
+        stopping everything. Schedule-mode watches are left to APScheduler, as ever."""
+        topics = [w for w in cfg.watches if w.enabled and w.mode == "continuous"]
+        desired = None
+        try:
+            desired = self._scheduler._remembered_running() if self._scheduler else None
+        except Exception:
+            desired = None
+        if desired is None:
+            return topics
+        return [w for w in topics if w.name in desired]
 
     def _pick_next(self, topics: list):
         """Staleness + productivity + jitter. Never-serviced topics score highest (each

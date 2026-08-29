@@ -311,8 +311,17 @@ class WatchScheduler:
         log.info("Continuous watch %r started", watch_name)
         return True
 
-    def stop_continuous(self, watch_name: str) -> bool:
-        """Signal a continuous watch to stop and wait briefly for it. Returns True if it was running."""
+    def stop_continuous(self, watch_name: str, record: bool = True) -> bool:
+        """Signal a continuous watch to stop and wait briefly for it. Returns True if it was running.
+
+        `record=False` for INTERNAL teardown (handing over to the orchestrator, a master-switch
+        pause, freeing the browser profile for an FB connect or a drill) — those stops are the
+        program rearranging itself, not the user changing their mind, and writing them into the
+        desired-state file erases what the user actually asked for. That exact bug cost a full
+        night's watching: at launch both watches resumed, the orchestrator took the wheel and
+        called stop_all_continuous() to stand the per-watch threads down, and THAT wrote an empty
+        desired set — so the rotation it then filtered by that set was empty, and The Watcher sat
+        idle for 13 hours while the API cheerfully reported both watches as running."""
         with self._lock:
             stop_event = self._stop_events.get(watch_name)
             thread = self._continuous_threads.get(watch_name)
@@ -326,7 +335,8 @@ class WatchScheduler:
         # restart during the join window would have installed a new event/thread —
         # don't clobber it (that would orphan an unstoppable loop).
         self._deregister_continuous(watch_name, stop_event)
-        self._remember_running(watch_name, False)
+        if record:
+            self._remember_running(watch_name, False)
         log.info("Continuous watch %r stopped", watch_name)
         return True
 
@@ -347,13 +357,15 @@ class WatchScheduler:
             return [n for n, t in self._continuous_threads.items() if t.is_alive()]
 
     def stop_all_continuous(self) -> None:
-        """Stop every running continuous loop (public; used by the FB connect flow)."""
+        """Stop every running continuous loop (public; used by the orchestrator handover, the
+        master-switch pause, the FB connect flow and drills). Every caller restores afterwards,
+        so this NEVER touches the desired-state record — see stop_continuous(record=...)."""
         self._stop_all_continuous()
 
     def _stop_all_continuous(self) -> None:
         names = list(self._continuous_threads.keys())
         for name in names:
-            self.stop_continuous(name)
+            self.stop_continuous(name, record=False)
 
     # ------------------------------------------------------------------
     # Job management

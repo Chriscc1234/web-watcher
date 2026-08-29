@@ -510,14 +510,16 @@ class ServiceManager:
     # own. The API said running=False while the orchestrator was mid-sweep on that very
     # watch; the assistant then repeated the wrong answer to a person. Asking "did I start
     # it?" is assumption; this queries what is true right now, whichever engine owns it.
-    def watch_runtime(self, watch_name: str) -> dict:
-        """{'running': bool, 'engine': 'orchestrator'|'scheduler'|None, 'sweeping_now': bool}"""
+    def watch_runtime(self, watch_name: str, cfg=None) -> dict:
+        """{'running': bool, 'engine': 'orchestrator'|'scheduler'|None, 'sweeping_now': bool}
+
+        Ask the engine, never infer. This used to reason its own way to an answer — orchestrator
+        up + watch enabled + continuous ⇒ running — which is a guess dressed as a fact, and it
+        was wrong for 13 straight hours while the rotation held nothing. The orchestrator now
+        answers for itself."""
         try:
-            if self.orchestrator_running():
-                from web_watcher.config import load as _load
-                cfg = _load()
-                w = next((x for x in cfg.watches if x.name == watch_name), None)
-                if w is not None and w.enabled and w.mode == "continuous" and not self._paused:
+            if self.orchestrator_running() and not self._paused:
+                if self._orchestrator.is_servicing(watch_name, cfg):
                     cur = (self.orchestrator_status() or {}).get("current")
                     return {"running": True, "engine": "orchestrator",
                             "sweeping_now": bool(cur and cur == watch_name)}
@@ -532,7 +534,7 @@ class ServiceManager:
         try:
             from web_watcher.config import load as _load
             cfg = _load()
-            return {w.name: self.watch_runtime(w.name) for w in cfg.watches}
+            return {w.name: self.watch_runtime(w.name, cfg) for w in cfg.watches}
         except Exception:
             return {}
 

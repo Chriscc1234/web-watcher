@@ -73,6 +73,7 @@ class Orchestrator:
         self._cycles = 0
         self._current: Optional[str] = None     # name of the topic being serviced now
         self._started_at: Optional[float] = None
+        self._held_back: list[str] = []         # enabled watches the user has stopped (logged on change)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -112,6 +113,24 @@ class Orchestrator:
                 for st in self._state.values()
             ],
         }
+
+    def is_servicing(self, watch_name: str, cfg=None) -> bool:
+        """Is this watch actually in the rotation right now?
+
+        The ONE answer to "is it running?" while The Watcher drives — it runs the same filter
+        the loop runs, so a status line can't disagree with what's really being swept. Deriving
+        the answer separately (enabled + continuous + orchestrator up) is what let the dashboard
+        report two healthy watches all night while the rotation was empty."""
+        if not self.is_running():
+            return False
+        try:
+            if cfg is None:
+                from web_watcher.config import load
+                cfg = load(self._config_path)
+            return any(w.name == watch_name for w in self._active_topics(cfg))
+        except Exception as exc:
+            log.debug("is_servicing(%r) failed: %s", watch_name, exc)
+            return False
 
     # ------------------------------------------------------------------
     # The loop
@@ -226,7 +245,16 @@ class Orchestrator:
             desired = None
         if desired is None:
             return topics
-        return [w for w in topics if w.name in desired]
+        active = [w for w in topics if w.name in desired]
+        # An empty rotation with enabled watches sitting right there is legitimate (the user
+        # stopped them) but it is ALSO what a desired-state bug looks like from the inside —
+        # and silence is how the last one hid for 13 hours. Say it out loud, once per change.
+        held = [w.name for w in topics if w.name not in desired]
+        if held and held != self._held_back:
+            log.info("Rotation holds %d watch(es) stopped by request: %s",
+                     len(held), ", ".join(sorted(held)))
+        self._held_back = held
+        return active
 
     def _pick_next(self, topics: list):
         """Staleness + productivity + jitter. Never-serviced topics score highest (each

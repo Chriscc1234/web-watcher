@@ -370,7 +370,11 @@ def test_missing_desired_state_falls_back_to_legacy():
 def test_watch_runtime_actually_works(monkeypatch):
     """The first wiring referenced self._config_path — an attribute ServiceManager never had —
     so every call raised into the fallback and the 'merged truth' answered False for a watch
-    the orchestrator was sweeping at that moment. A functional test, not a source grep."""
+    the orchestrator was sweeping at that moment. A functional test, not a source grep.
+
+    It now also pins WHERE the answer comes from: the orchestrator is asked whether the watch
+    is in its rotation. Re-deriving it here (enabled + continuous + orchestrator up) is what
+    reported two healthy watches through a night when the rotation was empty."""
     import types
     from web_watcher.services import ServiceManager
     import web_watcher.config as C
@@ -379,7 +383,12 @@ def test_watch_runtime_actually_works(monkeypatch):
     monkeypatch.setattr(C, "load", lambda path=None: types.SimpleNamespace(watches=[w]))
     monkeypatch.setattr(m, "orchestrator_running", lambda: True)
     monkeypatch.setattr(m, "orchestrator_status", lambda: {"current": "Fiat"})
+    m._orchestrator = types.SimpleNamespace(is_servicing=lambda name, cfg=None: name == "Fiat")
     rt = m.watch_runtime("Fiat")
     assert rt == {"running": True, "engine": "orchestrator", "sweeping_now": True}
     rt2 = m.watch_runtime("Nope")
     assert rt2["running"] is False
+
+    # An enabled, continuous watch the rotation is NOT holding must read as stopped.
+    m._orchestrator = types.SimpleNamespace(is_servicing=lambda name, cfg=None: False)
+    assert m.watch_runtime("Fiat") == {"running": False, "engine": None, "sweeping_now": False}

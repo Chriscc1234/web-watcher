@@ -1062,7 +1062,7 @@ function showTab(name, btn) {
   document.getElementById('tab-' + name).classList.add('active');
   btn.classList.add('active');
   activeTab = name;
-  if (name === 'watches')  { loadWatches(); loadOversight(); }
+  if (name === 'watches')  { loadWatches(); loadOversight(); startWatchesPoll(); }
   if (name === 'results')  loadResults();
   if (name === 'chats')    { loadChatThreads(); startChatsPoll(); }
   if (name === 'live')     startLive();
@@ -1071,6 +1071,7 @@ function showTab(name, btn) {
   if (name === 'services') loadOrchestrator();
   if (name !== 'live')     stopLive();       // stop the activity poll when off-tab
   if (name !== 'chats')    stopChatsPoll();
+  if (name !== 'watches')  stopWatchesPoll();
 }
 
 // ============================================================ LIVE ACTIVITY
@@ -2053,7 +2054,11 @@ async function openChatThread(key) {
       // Render the alert the way the PERSON received it: their phone got a photo card with a
       // thumbnail and an Open button, so a bare text line here under-reports what was sent.
       div.classList.add('alert-note');
-      if (m.image && /^https?:/.test(m.image)) {
+      // Two shapes of image reach here: a remote seller URL (older, backfilled cards — they
+      // rot when the listing sells) and "/api/thumb/<name>", our own permanent copy of the
+      // exact bytes that were sent. The relative form is the one every NEW alert uses, and an
+      // https-only test silently dropped every one of them — the cards looked text-only.
+      if (m.image && (/^https?:/.test(m.image) || /^\/api\/thumb\//.test(m.image))) {
         const img = document.createElement('img');
         img.src = m.image;
         img.className = 'alert-thumb';
@@ -2166,13 +2171,45 @@ function timeUntil(iso) {
   return `in ${Math.floor(secs/3600)}h`;
 }
 
-async function loadWatches() {
+// The Watches tab was a SNAPSHOT: it painted on tab-switch and then froze. Anything that
+// changed a watch from outside this window — a person texting "please stop watching", the
+// assistant acting on a request, a sweep starting — left the panel showing yesterday's truth
+// until you happened to click away and back. Poll it while it's open, but repaint only when
+// the state actually changed, so the view doesn't flicker under a reader.
+let _watchesTimer = null;
+let _watchesSig = '';
+let _watchNamesSig = '';
+
+function startWatchesPoll() {
+  stopWatchesPoll();
+  _watchesTimer = setInterval(() => {
+    if (activeTab === 'watches' && !document.hidden) loadWatches({ quiet: true });
+  }, 5000);
+}
+
+function stopWatchesPoll() {
+  if (_watchesTimer) { clearInterval(_watchesTimer); _watchesTimer = null; }
+}
+
+async function loadWatches(opts) {
+  const quiet = !!(opts && opts.quiet);      // a background refresh must not stomp the view
   const body = document.getElementById('watches-body');
   try {
     const watches = await api('/api/watches');
+    // Everything the panel actually draws. If none of it moved, leave the DOM alone.
+    const sig = JSON.stringify(watches.map(w => [w.name, w.enabled, w.continuous_running,
+      w.runtime_engine, w.sweeping_now, w.owner, w.owner_name, w.match_count, w.last_run]));
+    if (quiet && sig === _watchesSig) return;
+    _watchesSig = sig;
     watchNames = watches.map(w => w.name);
-    populateHistoryFilter();
-    populateNotifFilter();
+    // The filter dropdowns only care about the NAME list — rebuilding them on every state
+    // tick would clear a selection the user made on another tab.
+    const namesSig = JSON.stringify(watchNames);
+    if (namesSig !== _watchNamesSig) {
+      _watchNamesSig = namesSig;
+      populateHistoryFilter();
+      populateNotifFilter();
+    }
 
     if (!watches.length) {
       body.innerHTML = '<div class="empty-state">No watches configured. Click "+ Add Watch" to create one.</div>';
@@ -3503,6 +3540,7 @@ loadAccessibilitySettings();
 loadSystemSpecs();      // Settings → System panel (hardware + model tier)
 loadModelSets();        // Settings → System panel (model set selector + disk usage)
 loadWatches();          // Watches is home — load it + The Watcher's ambient feed on boot
+startWatchesPoll();     // ...and keep it live: state changes from Telegram/the assistant land here
 loadOversight();        // (the dock's conversation loads lazily the first time it's opened)
 loadOrchestrator();     // reflect whether The Watcher is currently driving
 loadCredentials();      // Settings → Notifications & Keys (Telegram / Claude / email)

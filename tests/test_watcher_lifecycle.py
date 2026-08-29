@@ -131,12 +131,32 @@ def test_buddy_cannot_pause_the_whole_watcher(monkeypatch):
     assert "owner" in out["message"].lower()              # told only the owner can
 
 
-def test_buddy_bare_stop_scopes_to_their_own_watches(monkeypatch):
+def test_buddy_bare_stop_with_one_watch_just_does_it(monkeypatch):
+    """The live case: a buddy with a single watch said "Please stop watching". Nothing to be
+    confused about — stop it, and stop only theirs (the other owner's watch is untouched)."""
+    cfg = _cfg_with("555", "999")                         # one each
+    out = _turn(monkeypatch, "Please stop watching", "555", cfg)
+    assert out["program_action"] is None
+    assert [a["name"] for a in out["watch_actions"]] == ["W0"]
+    assert out["watch_actions"][0]["action"] == "stop"
+
+
+def test_buddy_bare_stop_with_several_watches_asks_which(monkeypatch):
+    """With more than one, a bare "stop watching" is exactly as ambiguous as the admin's — it
+    used to silently switch off every watch they owned, including ones never mentioned."""
     cfg = _cfg_with("555", "999", "555")                  # two owned by 555, one by 999
     out = _turn(monkeypatch, "stop", "555", cfg)
     assert out["program_action"] is None
-    names = {a["name"] for a in out["watch_actions"]}
-    assert names == {"W0", "W2"} and all(a["action"] == "stop" for a in out["watch_actions"])
+    assert not out["watch_actions"]                       # nothing acted on yet
+    assert "?" in out["message"]
+    assert "W0" in out["message"] and "W2" in out["message"]
+    assert "W1" not in out["message"]                     # never leak another owner's watch
+
+
+def test_buddy_can_still_stop_them_all_by_saying_so(monkeypatch):
+    cfg = _cfg_with("555", "999", "555")
+    out = _turn(monkeypatch, "stop all my watches", "555", cfg)
+    assert {a["name"] for a in out["watch_actions"]} == {"W0", "W2"}
 
 
 def test_admin_bare_stop_asks_which(monkeypatch):

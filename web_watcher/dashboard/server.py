@@ -4840,10 +4840,28 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                                f"or just your own watches?")     # ask when it's not obvious
                 else:
                     mine = _watches_for_owner(cfg, owner)
-                    watch_actions = [{"action": act, "name": w.name} for w in mine] or None
-                    message = (f"{ {'stop': 'Stopping', 'start': 'Starting'}.get(act, act.title() + 'ing') } "
-                               f"your {len(watch_actions)} watch(es)."
-                               if watch_actions else "You don't have any watches yet.")
+                    gerund = {"stop": "Stopping", "start": "Starting"}.get(act, act.title() + "ing")
+                    if len(mine) > 1:
+                        # A bare "please stop watching" from someone with SEVERAL watches is as
+                        # ambiguous as the admin's — it just used to read as "all of them" and
+                        # silently switch off work they never mentioned. Ask, the same courtesy
+                        # the admin gets, and lead with the one they were just talking about.
+                        watch_actions = None
+                        _f = focus if (focus and focus != PENDING_CREATE) else None
+                        opts = [w.name for w in mine]
+                        if _f in opts:
+                            opts.remove(_f)
+                            opts.insert(0, _f)
+                        listed = ", ".join(f"“{n}”" for n in opts[:8])
+                        lead = (f"Just “{_f}”, or all {len(mine)}?" if _f
+                                else f"Which one — or all {len(mine)}?")
+                        message = (f"You've got {len(mine)} watches running. {lead} "
+                                   f"Your watches: {listed}. Say “{act} all my watches” "
+                                   f"and I'll {act} the lot.")
+                    else:
+                        watch_actions = [{"action": act, "name": w.name} for w in mine] or None
+                        message = (f"{gerund} your {len(watch_actions)} watch(es)."
+                                   if watch_actions else "You don't have any watches yet.")
 
         # WE HOLD THE REAL ROWS, SO THE MODEL DOES NOT GET TO NARRATE THEM. Asked for the
         # matches, the small model either writes a blank template ("**Title:** [Boat Title] …

@@ -267,3 +267,58 @@ def test_telegram_name_is_used_when_no_label_set(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_OWNER_LABELS_PATH", tmp_path / "labels.json")
     S._record_owner_name("999", "Real Person")
     assert S._load_owner_names()["999"] == "Real Person"
+
+
+# --------------------------------------------------------------------------
+# The empty-promise rewrite fires on PROMISES, not descriptions
+# --------------------------------------------------------------------------
+
+def test_describing_an_existing_watch_is_not_a_promise():
+    """The live failure: "Is the fiat watch continuous?" was answered correctly by the model,
+    but the reply contained "watching for", the broad commit regex flagged it, and the canned
+    "I haven't set anything up yet" replaced a true answer — twice in a row, about a watch
+    that existed and had already briefed its owner."""
+    for reply in (
+        "Yes — the Fiat X19 Cars Watch is continuous. It's watching for new listings all day.",
+        "The Fiat watch is running and watching the sites you asked for.",
+        "It checks OfferUp, eBay and Craigslist continuously.",
+        "That watch hasn't found anything new yet — should I widen it?",
+    ):
+        assert not S._CLAIMS_SETUP_NOW_RE.search(reply), reply
+
+
+def test_actual_setup_claims_still_trip_the_rewrite():
+    for reply in (
+        "Sure thing! I'm setting up that watch on Craigslist now.",
+        "I'll set it up right away.",
+        "I've set it up — you're all set.",
+        "Creating the watch now.",
+    ):
+        assert S._CLAIMS_SETUP_NOW_RE.search(reply), reply
+
+
+# --------------------------------------------------------------------------
+# Enabled continuous watches survive an app restart
+# --------------------------------------------------------------------------
+
+def test_running_set_is_remembered_and_resumed():
+    """Every self-update re-registered continuous watches as stopped: a user's brand-new
+    Fiat watch briefed him once, then silently sat dead through three updates."""
+    src = open("web_watcher/scheduler.py", encoding="utf-8").read()
+    assert "_remember_running(watch_name, True)" in src
+    assert "_remember_running(watch_name, False)" in src
+    assert "was running before the restart — resuming" in src
+
+
+def test_remember_running_roundtrip(tmp_path):
+    from web_watcher.scheduler import WatchScheduler
+    class T(WatchScheduler):
+        def __init__(self): pass          # no scheduler machinery — just the state file
+        def _running_state_path(self): return tmp_path / "continuous_running.json"
+    t = T()
+    assert t._remembered_running() == set()
+    t._remember_running("Fiat X19 Cars Watch", True)
+    t._remember_running("Boats", True)
+    assert t._remembered_running() == {"Fiat X19 Cars Watch", "Boats"}
+    t._remember_running("Boats", False)
+    assert t._remembered_running() == {"Fiat X19 Cars Watch"}

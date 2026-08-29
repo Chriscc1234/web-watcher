@@ -253,6 +253,39 @@ class WatchScheduler:
     # Continuous-mode control
     # ------------------------------------------------------------------
 
+    # ── Which continuous watches SHOULD be running, across restarts ────────────────
+    # Updated only on EXPLICIT start/stop (a person's or the assistant's decision), never on
+    # shutdown or reload teardown — so an app-update restart knows exactly what to resume.
+    # Before this, every self-update re-registered continuous watches as stopped: a user's
+    # brand-new Fiat watch briefed him once and then silently sat dead through three updates
+    # ("is the fiat watch continuous?" — it was, and it wasn't running).
+    def _running_state_path(self):
+        from web_watcher import paths
+        return paths.data_dir() / "continuous_running.json"
+
+    def _remember_running(self, watch_name: str, running: bool) -> None:
+        try:
+            import json as _json
+            p = self._running_state_path()
+            names = set()
+            if p.exists():
+                names = set(_json.loads(p.read_text(encoding="utf-8")) or [])
+            (names.add if running else names.discard)(watch_name)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_json.dumps(sorted(names)), encoding="utf-8")
+        except Exception as exc:
+            log.debug("could not persist continuous-running state: %s", exc)
+
+    def _remembered_running(self) -> set:
+        try:
+            import json as _json
+            p = self._running_state_path()
+            if p.exists():
+                return set(_json.loads(p.read_text(encoding="utf-8")) or [])
+        except Exception:
+            pass
+        return set()
+
     def start_continuous(self, watch_name: str) -> bool:
         """Start (or restart) a continuous watch's sweep loop. Returns True if started."""
         with self._lock:
@@ -270,6 +303,7 @@ class WatchScheduler:
             self._stop_events[watch_name] = stop_event
             self._continuous_threads[watch_name] = thread
             thread.start()
+        self._remember_running(watch_name, True)
         log.info("Continuous watch %r started", watch_name)
         return True
 
@@ -288,6 +322,7 @@ class WatchScheduler:
         # restart during the join window would have installed a new event/thread —
         # don't clobber it (that would orphan an unstoppable loop).
         self._deregister_continuous(watch_name, stop_event)
+        self._remember_running(watch_name, False)
         log.info("Continuous watch %r stopped", watch_name)
         return True
 
@@ -351,11 +386,17 @@ class WatchScheduler:
                 log.debug("Watch %r disabled — skipping", watch.name)
                 continue
             if watch.mode == "continuous":
-                # Continuous watches do NOT auto-start on launch — they open a browser
-                # and run all day, so the user opts in via the dashboard Start button.
-                # (reload() separately restores any that were already running.)
-                log.info("Continuous watch %r registered (stopped) — start it from the dashboard",
-                         watch.name)
+                # Resume what was RUNNING when the app last shut down (an update restart must
+                # not silently kill a watch someone started); everything else waits for its
+                # Start button. The remembered set changes only on explicit start/stop, so a
+                # deliberately-stopped watch stays stopped through any number of restarts.
+                if watch.name in self._remembered_running():
+                    log.info("Continuous watch %r was running before the restart — resuming",
+                             watch.name)
+                    self.start_continuous(watch.name)
+                else:
+                    log.info("Continuous watch %r registered (stopped) — start it from the "
+                             "dashboard", watch.name)
                 continue
             self._add_job(watch)
 

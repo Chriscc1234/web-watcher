@@ -3883,6 +3883,21 @@ For intent "create" or "update" the config goes in "watches" — a create/update
 # Phrases that mean the assistant is COMMITTING to set up / change a watch (a statement of
 # action), as opposed to merely asking the user a question. Used to let a committed 'create'
 # card through even when the reply also ends with an optional question.
+# IMMINENT-ACTION claims only — "I'm setting up that watch now", "I'll create it". This is the
+# gate for the empty-promise rewrite, and it is deliberately much narrower than _COMMIT_RE
+# below: the broad pattern matches "watching for", which is how DESCRIBING an existing watch
+# ("yes, the Fiat watch is continuous — it's watching for new listings") got detected as an
+# unfulfilled promise and replaced with "I haven't set anything up yet" — about a watch that
+# existed, had run, and had already briefed its owner. Two question turns in a row got that
+# canned nonsense (the user's report: "it's confused about what I'm saying").
+_CLAIMS_SETUP_NOW_RE = re.compile(
+    r"\b(i['’]?m sett?ing (?:that |the |a |your )?(?:watch |it )?up|"
+    r"sett?ing up (?:that|the|a|your) watch|"
+    r"i['’]?ll (?:set (?:it|that|this|one) up|creat|add (?:a|the|that) watch|get (?:that|it) going)|"
+    r"i['’]?ve (?:set (?:it|that) up|created (?:the|a|your) watch)|"
+    r"creating (?:the|a|that|your) watch)\b",
+    re.IGNORECASE)
+
 _COMMIT_RE = re.compile(
     r"\b(sett?ing up|set up|i['’]?ll set|i['’]?ll creat|creat(?:e|ing)|i['’]?ll add|adding a watch|"
     r"i['’]?ll (?:watch|start|widen|update|expand)|start(?:ing)? (?:a )?watch|"
@@ -4832,12 +4847,12 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # the sentence and the system disagreed and the person was simply misled. If the words
         # claim an action and no action survived, say the true thing instead: ask for what is
         # actually needed to do it.
-        if (_reply_commits_to_action(message) and not suggestions and not watch_actions
+        if (_CLAIMS_SETUP_NOW_RE.search(message or "") and not suggestions and not watch_actions
                 and not listings and not program_action):
             log.info("chat: reply promised an action with none to perform — asking instead")
-            message = ("I got ahead of myself there — I haven't set anything up yet. Tell me "
-                       "what you'd like watched and I'll get it going: what are you looking "
-                       "for, roughly where, and any price ceiling?")
+            message = ("Hmm — I meant to do that just now, but nothing actually went through "
+                       "on my side. Tell me once more exactly what you'd like and I'll do it "
+                       "properly this time.")
 
         if listings and _should_replace_prose(message):
             what = (lq or {}).get("watch") or "your watches"

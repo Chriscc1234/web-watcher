@@ -164,6 +164,11 @@ class WatchScheduler:
         # interleave and double-launch a watch. Separate from _lock because reload
         # joins threads and _lock must never be held across a join.
         self._reload_lock = threading.Lock()
+        # Does the orchestrator own the continuous watches right now? While it drives, this
+        # scheduler must never start a per-watch loop — two engines on one watch means two
+        # browsers sweeping the same site at once, which is both wasted work and a bot tell.
+        # Set by ServiceManager.start_orchestrator / _stop_orchestrator.
+        self._orchestrator_owns = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -406,7 +411,13 @@ class WatchScheduler:
                 # not silently kill a watch someone started); everything else waits for its
                 # Start button. The remembered set changes only on explicit start/stop, so a
                 # deliberately-stopped watch stays stopped through any number of restarts.
-                if watch.name in (self._remembered_running() or set()):
+                if getattr(self, "_orchestrator_owns", False):
+                    # A RELOAD while The Watcher drives (any watch edit triggers one). Resuming
+                    # here would hand the same watch a second engine: seen live the moment the
+                    # desired-state record started working again — one config edit, and a second
+                    # visible Chrome opened and swept OfferUp alongside the orchestrator's.
+                    log.debug("Continuous watch %r left to The Watcher (it drives them)", watch.name)
+                elif watch.name in (self._remembered_running() or set()):
                     log.info("Continuous watch %r was running before the restart — resuming",
                              watch.name)
                     self.start_continuous(watch.name)

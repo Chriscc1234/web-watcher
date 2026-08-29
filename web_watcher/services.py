@@ -545,6 +545,13 @@ class ServiceManager:
         # 0 by design — that reload line ("0 continuous watch(es) running") looks alarming
         # but isn't. Clarify that The Watcher still owns the watches and picks up the edit.
         if self.orchestrator_running():
+            # Belt and braces: whatever route a per-watch loop took to exist, it must not
+            # coexist with the driver. Standing it down is recorded as NOT the user's choice.
+            stray = list(getattr(self._scheduler, "_continuous_threads", {}) or {})
+            if stray:
+                log.warning("Reload left %d per-watch loop(s) running under the orchestrator "
+                            "(%s) — standing them down", len(stray), ", ".join(stray))
+                self._scheduler.stop_all_continuous()
             n = len(self.orchestrator_status().get("topics", []))
             log.info("Config reloaded — The Watcher (orchestrator) is driving %d continuous "
                      "watch(es) and will apply the change on its next cycle", n)
@@ -608,6 +615,9 @@ class ServiceManager:
         if self._orchestrator is None:
             self._orchestrator = Orchestrator(self._scheduler, self._oversight)
         started = self._orchestrator.start()
+        # From here the orchestrator owns the continuous watches — the scheduler must not
+        # start per-watch loops behind its back on the next config reload.
+        self._scheduler._orchestrator_owns = True
         self._nudge_oversight()
         return started
 
@@ -621,6 +631,8 @@ class ServiceManager:
                 self._orchestrator.stop()
             except Exception:
                 pass
+        if self._scheduler is not None:
+            self._scheduler._orchestrator_owns = False   # per-watch loops are allowed again
 
     def orchestrator_running(self) -> bool:
         return bool(self._orchestrator and self._orchestrator.is_running())

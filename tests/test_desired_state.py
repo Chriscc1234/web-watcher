@@ -133,3 +133,33 @@ def test_no_record_at_all_falls_back_to_every_enabled_watch(tmp_path):
     o._thread = SimpleNamespace(is_alive=lambda: True)
     o._stop = threading.Event()
     assert [w.name for w in o._active_topics(_cfg("A", "B"))] == ["A", "B"]
+
+
+# ── one watch, one engine ────────────────────────────────────────────────────────
+
+def test_reload_under_the_orchestrator_starts_no_per_watch_loop(tmp_path, monkeypatch):
+    """Found live, minutes after the desired-state record started working again: a single
+    watch edit triggers a config reload, _load_jobs saw the watch in the desired set and
+    started a per-watch loop — while the orchestrator was already sweeping it. A second
+    visible Chrome opened and hit the same site alongside the first."""
+    from web_watcher.scheduler import WatchScheduler
+    from web_watcher.config import AppConfig, Watch
+
+    s = _sched(tmp_path)
+    s._remember_running("A", True)
+    s._explored_domains = set()
+    s._config_path = None
+    started = []
+    monkeypatch.setattr(WatchScheduler, "start_continuous",
+                        lambda self, name: started.append(name))
+    cfg = AppConfig(watches=[Watch(name="A", urls=["https://x"], instruction="x",
+                                   interval_minutes=30, mode="continuous")])
+    monkeypatch.setattr("web_watcher.scheduler.load_config", lambda p=None: cfg)
+
+    s._orchestrator_owns = True
+    s._load_jobs()
+    assert started == []                    # the driver keeps it
+
+    s._orchestrator_owns = False
+    s._load_jobs()
+    assert started == ["A"]                 # ...and without a driver, it resumes as before

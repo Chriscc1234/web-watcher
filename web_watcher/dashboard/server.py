@@ -737,15 +737,40 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             if idx is None:
                 raise HTTPException(404, detail=f"Watch {watch_name!r} not found")
 
+            # RENAME, done safely. The editor always had a name field — and it was silently
+            # IGNORED (_merge_watch_update pinned the old name), because a bare rename would
+            # orphan the name-keyed run history and, far worse, the seen-listings dedup:
+            # every listing ever seen would re-alert as "new". Now the name field works, and
+            # the whole recorded life travels with it (DB rows, desired-run state).
+            new_name = str(body.get("name") or "").strip()
+            renaming = bool(new_name) and new_name != watch_name
+            if renaming and any(w.name == new_name for i2, w in enumerate(cfg.watches)
+                                if i2 != idx):
+                raise HTTPException(400, detail=f"A watch named {new_name!r} already exists")
+
             try:
-                updated = _merge_watch_update(cfg.watches[idx], body, watch_name)
+                updated = _merge_watch_update(cfg.watches[idx], body,
+                                              new_name if renaming else watch_name)
             except ValidationError as exc:
                 raise HTTPException(400, detail=_validation_detail(exc))
 
             cfg.watches[idx] = updated
             save(cfg)
+        if renaming:
+            try:
+                from web_watcher import storage
+                counts = storage.rename_watch(watch_name, new_name, watch_id=updated.id)
+                log.info("Renamed watch %r → %r (migrated: %s)", watch_name, new_name,
+                         ", ".join(f"{k}={v}" for k, v in counts.items() if v) or "nothing to move")
+            except Exception as exc:
+                log.warning("rename %r→%r: DB migration failed: %s", watch_name, new_name, exc)
+            try:
+                manager.rename_continuous(watch_name, new_name)
+            except Exception:
+                pass
         bg.add_task(manager.reload_scheduler)
-        return {"ok": True, "name": watch_name}
+        return {"ok": True, "name": new_name if renaming else watch_name,
+                "renamed_from": watch_name if renaming else None}
 
     @app.post("/api/watches/{watch_name}/transfer")
     def transfer_watch(watch_name: str, body: dict):
@@ -1046,6 +1071,13 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         from web_watcher import issues
         return {"summary": issues.issue_summary(),
                 "recent": issues.issues(max(1, min(limit, 200)))}
+
+    @app.delete("/api/sweep/issues")
+    def clear_sweep_issues():
+        """The admin's "seen it, dealt with it" button — wipes the issue log so what
+        accumulates next is signal, not history."""
+        from web_watcher import issues
+        return {"ok": True, "cleared": issues.clear_issues()}
 
     # ------------------------------------------------------------------
     # Site drill — can we actually use this site?
@@ -1815,6 +1847,38 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         else:
             clear_owner_label(cid)
         return {"ok": True, "display": _load_owner_names().get(cid, "")}
+
+    @app.delete("/api/people/{chat_id}")
+    def remove_person(chat_id: str, bg: BackgroundTasks):
+        """Revoke a person's access to the bot. Their watches are turned OFF (not deleted —
+        ownership is kept, so re-approving them later restores everything exactly as it was),
+        and their chat history stays as a record. The admin's own chat can't be removed."""
+        from web_watcher.config import load, save, lock as _cfg_lock
+        cid = str(chat_id or "").strip()
+        with _cfg_lock():
+            cfg = load()
+            main = str(cfg.notifications.telegram.chat_id or "")
+            if cid == main:
+                raise HTTPException(400, detail="That's the owner's own chat — it can't be removed")
+            allowed = [str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or [])]
+            if cid not in allowed:
+                raise HTTPException(404, detail=f"{cid!r} isn't in the allowed list")
+            cfg.notifications.telegram.allowed_chat_ids = [c for c in allowed if c != cid]
+            disabled = []
+            for w in cfg.watches:
+                if str(w.owner or "") == cid and w.enabled:
+                    w.enabled = False
+                    disabled.append(w.name)
+            save(cfg)
+        _remove_access_request(cid)          # a re-knock starts from scratch
+        try:
+            manager.restart_telegram()       # allow-list change takes effect now
+        except Exception as exc:
+            log.debug("could not restart the Telegram bridge after removal: %s", exc)
+        bg.add_task(manager.reload_scheduler)
+        log.info("Removed person %s from the bot (%d watch(es) turned off: %s)",
+                 cid, len(disabled), ", ".join(disabled) or "none")
+        return {"ok": True, "chat_id": cid, "watches_disabled": disabled}
 
     @app.post("/api/telegram/detect-chat-id")
     def telegram_detect(body: dict):

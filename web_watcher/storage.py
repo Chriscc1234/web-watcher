@@ -1119,6 +1119,39 @@ def get_last_run(watch_name: str, db_path: Path | None = None) -> dict | None:
     return dict(row) if row else None
 
 
+def rename_watch(old_name: str, new_name: str, watch_id: str | None = None,
+                 db_path: Path | None = None) -> dict:
+    """Carry a watch's whole recorded life over to its new name.
+
+    Renaming was a landmine: run_history and seen_listings key on the NAME, so an editor
+    rename would orphan every run record and — much worse — the dedup history: every listing
+    the watch had ever seen would come back as "new" and re-alert in a flood. (This is exactly
+    why the Facebook watch stayed misnamed "(logged out)" for weeks — renaming it safely
+    required a developer.) observations/goal_state key on the stable watch_id, but watches
+    created before ids existed used the name THERE too, so when `watch_id` is empty those
+    rows are migrated by name as well. Returns per-table row counts for the log."""
+    counts = {}
+    conn = _connect(_resolve(db_path))
+    try:
+        with conn:
+            for table, col in (("run_history", "watch_name"),
+                               ("seen_listings", "watch_name"),
+                               ("observations", "watch_name")):
+                cur = conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?",
+                                   (new_name, old_name))
+                counts[table] = cur.rowcount
+            if not watch_id:      # pre-id watch: the "stable" id columns hold the old name
+                counts["observations_id"] = conn.execute(
+                    "UPDATE observations SET watch_id=? WHERE watch_id=?",
+                    (new_name, old_name)).rowcount
+                counts["goal_state"] = conn.execute(
+                    "UPDATE goal_state SET watch_id=? WHERE watch_id=?",
+                    (new_name, old_name)).rowcount
+    finally:
+        conn.close()
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------

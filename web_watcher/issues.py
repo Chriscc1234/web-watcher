@@ -99,6 +99,22 @@ def issues(limit: int = 100, data_dir=None) -> list[dict]:
         return []
 
 
+def clear_issues(data_dir=None) -> int:
+    """Wipe the issue log (the admin's 'seen it, fixed it' button). Returns how many were
+    cleared. Best-effort, like everything here."""
+    try:
+        p = _path(data_dir)
+        if not p.exists():
+            return 0
+        with _lock:
+            n = len(p.read_text(encoding="utf-8").splitlines())
+            p.write_text("", encoding="utf-8")
+        return n
+    except Exception as exc:
+        log.debug("could not clear sweep issues: %s", exc)
+        return 0
+
+
 def issue_summary(data_dir=None) -> dict:
     """Aggregated: what is failing, and which watches are struggling most.
 

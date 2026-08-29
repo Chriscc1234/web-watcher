@@ -735,6 +735,16 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   <section>
     <h2>Live activity</h2>
     <div style="font-size:12px;color:var(--dim);margin-bottom:10px">A real-time feed of what The Watcher is doing right now — searches, AI ratings, alerts, and anything that went wrong.</div>
+    <!-- The sweep-issue log lived only in a .jsonl file — a recurring problem (a watch that
+         keeps getting stuck, a site that keeps challenging us) was invisible unless the
+         developer went reading. Now it's a panel where the trouble actually shows. -->
+    <details id="issues-panel" style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600">⚠ Sweep issues <span id="issues-count" style="color:var(--dim);font-weight:400">(none)</span></summary>
+      <div style="display:flex;justify-content:flex-end;margin:6px 0">
+        <button onclick="clearIssues()" style="font-size:11px" title="Wipe the issue log — what accumulates next is fresh signal">Clear log</button>
+      </div>
+      <div id="issues-body" style="font-size:12.5px;max-height:32vh;overflow:auto"></div>
+    </details>
     <div id="live-chips" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px"></div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
       <input id="live-filter" type="text" placeholder="Filter text…" oninput="renderLive()"
@@ -1108,8 +1118,52 @@ function startLive() {
   document.getElementById('live-feed').innerHTML =
     '<div style="color:var(--dim);padding:12px">Listening for activity…</div>';
   pollLive();
+  loadIssues();
   if (_liveTimer) clearInterval(_liveTimer);
   _liveTimer = setInterval(pollLive, 2000);
+}
+
+// The sweep-issue panel: aggregated (a kind that keeps recurring, a watch that keeps
+// struggling) above the raw tail, newest first.
+async function loadIssues() {
+  const body = document.getElementById('issues-body');
+  const count = document.getElementById('issues-count');
+  try {
+    const d = await api('/api/sweep/issues?limit=60');
+    const s = d.summary || {}, recent = d.recent || [];
+    count.textContent = s.total ? `(${s.total} in the log)` : '(none)';
+    if (!recent.length) {
+      body.innerHTML = '<div style="color:var(--dim);padding:6px">Nothing recorded — sweeps have been clean.</div>';
+      return;
+    }
+    const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const kinds = Object.entries(s.by_kind || {}).map(([k, n]) =>
+      `<span class="badge" style="background:#2a1f1f;color:#f0a0a0">${esc(k)} ×${n}</span>`).join(' ');
+    const watches = Object.entries(s.by_watch || {}).slice(0, 5).map(([w, n]) =>
+      `<span class="badge" style="background:#1e2a3a;color:#8fb8e8">${esc(w)} ×${n}</span>`).join(' ');
+    const rows = recent.map(r => {
+      const age = r.ts ? _agoFromTs(r.ts) : '';
+      return `<div style="padding:3px 0;border-bottom:1px solid var(--border)">
+        <span style="color:#f0a0a0">${esc(r.kind)}</span>
+        ${r.watch ? ` · <span style="color:#8fb8e8">${esc(r.watch)}</span>` : ''}
+        <span style="color:var(--dim);float:right">${esc(age)}</span>
+        <br><span style="color:var(--dim)">${esc(r.detail)}</span></div>`;
+    }).join('');
+    body.innerHTML = `<div style="margin-bottom:6px">${kinds}</div>` +
+                     (watches ? `<div style="margin-bottom:6px">${watches}</div>` : '') + rows;
+  } catch (e) {
+    count.textContent = '(unavailable)';
+    body.innerHTML = `<div style="color:var(--red);padding:6px">Could not load: ${e.message}</div>`;
+  }
+}
+
+async function clearIssues() {
+  if (!confirm('Clear the sweep-issue log? (The problems themselves are unaffected — this just empties the record.)')) return;
+  try {
+    await api('/api/sweep/issues', { method: 'DELETE' });
+    loadIssues();
+  } catch (e) { alert('Could not clear it: ' + e.message); }
 }
 function stopLive() { if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; } }
 
@@ -2025,8 +2079,8 @@ async function openChatThread(key) {
   const t = _chatThreads.find(x => (x.owner === null ? 'null' : String(x.owner)) === key);
   const head = document.getElementById('chats-thread-head');
   head.textContent = t ? t.label : 'Conversation';
-  // A Telegram person can be given a nickname right here — this was an API-only ability
-  // (the developer set "Nameless (Jordan)" by hand); a server runner gets a button.
+  // A Telegram person can be managed right here — nickname and removal were API-only
+  // abilities (the developer set "Nameless (Jordan)" by hand); a server runner gets buttons.
   if (owner && t) {
     const btn = document.createElement('button');
     btn.textContent = '✏️ Nickname';
@@ -2034,6 +2088,18 @@ async function openChatThread(key) {
     btn.style.cssText = 'margin-left:10px;font-size:11px;padding:2px 8px';
     btn.onclick = () => renamePerson(owner);
     head.appendChild(btn);
+    // Remove: only for people actually on the allow list, and never the admin's own chat.
+    api('/api/people').then(people => {
+      const p = (people || []).find(x => String(x.chat_id) === String(owner));
+      if (!p || p.is_main) return;
+      const rm = document.createElement('button');
+      rm.textContent = '🚫 Remove';
+      rm.className = 'danger';
+      rm.title = 'Revoke this person\'s access — their watches are turned off (kept, not deleted)';
+      rm.style.cssText = 'margin-left:6px;font-size:11px;padding:2px 8px';
+      rm.onclick = () => removePerson(owner, t.label);
+      head.appendChild(rm);
+    }).catch(() => {});
   }
   // Admin can message a Telegram person (to help them); the desktop thread is your own dock.
   const composer = document.getElementById('chats-composer');
@@ -2411,6 +2477,27 @@ async function renamePerson(chatId) {
   } catch (e) { alert('Could not set the nickname: ' + e.message); }
 }
 
+// Revoke a person's access. Deliberately reversible: their watches are turned OFF but keep
+// their owner, so re-approving the person later restores everything as it was. Their chat
+// history stays as a record.
+async function removePerson(chatId, label) {
+  const sure = confirm(
+    `Remove ${label || chatId} from the bot?\n\n` +
+    `• They can no longer talk to it or get alerts\n` +
+    `• Their watches are turned OFF (kept, not deleted)\n` +
+    `• Their chat history stays here as a record\n\n` +
+    `Re-approving them later restores everything.`);
+  if (!sure) return;
+  try {
+    const r = await api(`/api/people/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+    const n = (r.watches_disabled || []).length;
+    alert(`Removed. ${n ? n + ' watch(es) turned off.' : 'They had no active watches.'}`);
+    _chatThreadsSig = ''; _watchesSig = '';
+    if (activeTab === 'chats') loadChatThreads();
+    if (activeTab === 'watches') loadWatches();
+  } catch (e) { alert('Could not remove them: ' + e.message); }
+}
+
 // Hand a watch to another person. The watch keeps its whole identity (stats, seen-history,
 // matches) and the recipient gets a Telegram note — same behavior as asking in chat.
 async function giveWatch(name) {
@@ -2569,7 +2656,12 @@ function editWatch(watch) {
   editingWatchName = watch.name;  // so saveWatch() issues a PUT (update), not a POST (create)
   document.getElementById('modal-title').textContent = 'Edit Watch';
   document.getElementById('modal-save-btn').textContent = 'Update Watch';
-  document.getElementById('f-name').disabled = true;
+  // The name field used to be DISABLED here, because a rename would orphan the name-keyed
+  // seen-history and re-alert everything the watch had ever found. The server now migrates
+  // all of that on rename (PUT with a changed name), so the field is editable like any other.
+  const f = document.getElementById('f-name');
+  f.disabled = false;
+  f.title = 'Renaming is safe — the watch keeps its history, stats and running state.';
 }
 
 function closeModal() {

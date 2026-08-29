@@ -586,6 +586,20 @@ class ServiceManager:
         self._scheduler.start_continuous(watch_name)
         self._nudge_oversight()
 
+    def rename_continuous(self, old_name: str, new_name: str) -> None:
+        """Carry the should-be-running intent across a rename. The desired-state file stores
+        NAMES; without this, a renamed running watch would silently drop out of the rotation
+        at the next restart — the same class of quiet death v0.144 was about."""
+        if self._scheduler is None:
+            return
+        try:
+            if old_name in (self._scheduler._remembered_running() or set()):
+                self._scheduler._remember_running(old_name, False)
+                self._scheduler._remember_running(new_name, True)
+        except Exception as exc:
+            log.warning("could not migrate desired-state for rename %r→%r: %s",
+                        old_name, new_name, exc)
+
     def stop_continuous(self, watch_name: str) -> None:
         if self._scheduler is None:
             raise RuntimeError("Scheduler is not running")

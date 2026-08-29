@@ -2299,98 +2299,20 @@ def _require_element(action: AgentAction, elements: list[dict]) -> dict:
 
 
 def _human_mouse_move(page: Page, tx: int, ty: int) -> None:
-    """
-    Move mouse along a multi-segment curved path with:
-    - Log-normal inter-event timing (right-skewed like real humans)
-    - Quadratic bezier per segment with independent control points
-    - Micro-pause between segments
-    - Overshoot + 1-2 correction moves before landing
-    """
-    sx = getattr(_human_mouse_move, "_x", 640)
-    sy = getattr(_human_mouse_move, "_y", 400)
-
-    dist = math.hypot(tx - sx, ty - sy)
-    if dist < 2:
-        return
-
-    # Split into 2-4 sub-segments
-    n_segs = random.randint(2, 4)
-    # Generate intermediate waypoints along a gently curved overall path
-    waypoints = [(float(sx), float(sy))]
-    for i in range(1, n_segs):
-        frac = i / n_segs
-        wx = sx + (tx - sx) * frac + random.gauss(0, dist * 0.06)
-        wy = sy + (ty - sy) * frac + random.gauss(0, dist * 0.06)
-        waypoints.append((wx, wy))
-    waypoints.append((float(tx), float(ty)))
-
-    for seg in range(n_segs):
-        p0x, p0y = waypoints[seg]
-        p1x, p1y = waypoints[seg + 1]
-        seg_dist  = math.hypot(p1x - p0x, p1y - p0y)
-
-        steps = max(6, min(int(seg_dist / 10), 30))
-
-        # Bezier control point for this segment
-        mid_x = (p0x + p1x) / 2
-        mid_y = (p0y + p1y) / 2
-        perp_x = -(p1y - p0y)
-        perp_y  =  (p1x - p0x)
-        plen    = math.hypot(perp_x, perp_y) or 1
-        arc     = random.gauss(0, 0.15)
-        cp_x    = mid_x + (perp_x / plen) * seg_dist * arc
-        cp_y    = mid_y + (perp_y / plen) * seg_dist * arc
-
-        for i in range(1, steps + 1):
-            t  = i / steps
-            te = t * t * (3 - 2 * t)   # smooth-step ease-in/out
-            bx = (1-te)**2 * p0x + 2*(1-te)*te * cp_x + te**2 * p1x
-            by = (1-te)**2 * p0y + 2*(1-te)*te * cp_y + te**2 * p1y
-            noise = max(0.15, 1 - t) * 1.5
-            page.mouse.move(bx + random.gauss(0, noise), by + random.gauss(0, noise))
-            # Log-normal timing: median ~12 ms, right-skewed long tail
-            gap_ms = math.exp(random.gauss(math.log(12), 0.4))
-            time.sleep(max(4, min(gap_ms, 80)) / 1000)
-
-        # Micro-pause between segments
-        if seg < n_segs - 1:
-            time.sleep(max(0.01, random.gauss(0.018, 0.006)))
-
-    # Overshoot target and correct back (Fitts-Law approach dynamics)
-    overshoot = random.gauss(5, 2)
-    dx = tx - sx
-    dy = ty - sy
-    dl = math.hypot(dx, dy) or 1
-    ox = tx + (dx / dl) * overshoot
-    oy = ty + (dy / dl) * overshoot
-    page.mouse.move(ox, oy)
-    time.sleep(max(0.01, random.gauss(0.055, 0.015)))
-
-    # 1-2 correction micro-moves back to the exact target
-    for _ in range(random.randint(1, 2)):
-        fx = tx + random.gauss(0, 0.8)
-        fy = ty + random.gauss(0, 0.8)
-        page.mouse.move(fx, fy)
-        time.sleep(max(0.01, random.gauss(0.025, 0.008)))
-
-    page.mouse.move(tx, ty)
-    _human_mouse_move._x = tx   # type: ignore[attr-defined]
-    _human_mouse_move._y = ty   # type: ignore[attr-defined]
+    """Curved multi-segment approach with overshoot-and-correct. This model started life here
+    and now lives in humanize.py, shared with the human-first nav layer — one motor cortex,
+    one personality. The shared version also moved cursor memory from a module-global (which
+    leaked position across tabs — the cursor "resumed" where a DIFFERENT page left it) to the
+    Page object itself."""
+    from web_watcher import humanize
+    humanize.move(page, float(tx), float(ty))
 
 
 def _human_type(page: Page, text: str) -> None:
-    """
-    Type one key at a time with human-like, slightly irregular timing — fast enough
-    not to stall a run, varied enough not to look like an instant paste (a bot tell).
-    Roughly 100 ms/key with jitter, plus the occasional brief 'think' pause. A short
-    search term lands in about a second; this is bounded so it never stalls.
-    """
-    for ch in text:
-        page.keyboard.type(ch)
-        delay = min(max(abs(random.gauss(0.10, 0.04)), 0.03), 0.28)  # ~30–280 ms
-        if random.random() < 0.06:                 # ~6% of keys: a brief pause
-            delay += random.uniform(0.15, 0.40)
-        time.sleep(delay)
+    """Per-keystroke human typing — shared model in humanize.py (irregular log-normal delays,
+    think-pauses, the occasional backspaced typo; final text always exact)."""
+    from web_watcher import humanize
+    humanize.type_text(page, text)
 
 
 def _inertia_scroll(page: Page, dist: int) -> None:

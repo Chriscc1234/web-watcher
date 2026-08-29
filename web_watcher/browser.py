@@ -802,7 +802,11 @@ class BrowserSession:
         except Exception as exc:
             log.debug("could not subscribe to page videos: %s", exc)
 
-    _MAX_RECORDINGS = 20   # keep the newest N .webm per watch; prune the rest so disk can't run away
+    _MAX_RECORDINGS = 20                       # newest N .webm per watch folder
+    _MAX_RECORD_BYTES = 400 * 1024 * 1024      # ...AND at most ~400MB per folder. A count cap
+    # alone is no cap at all when each file's size is unbounded — one long supervised FB session
+    # produced a 47MB video; twenty of those in each of a few watch folders is gigabytes. Same
+    # dual-bound philosophy as thumbs.py (1000 files / 200MB): count for tidiness, bytes for disk.
 
     def _finalize_recordings(self, videos) -> None:
         """Rename this session's videos to a sortable, human name and prune old ones.
@@ -829,11 +833,22 @@ class BrowserSession:
                     log.info("Saved session recording: %s (%d KB)", dst.name, dst.stat().st_size // 1024)
                 except Exception as exc:
                     log.debug("could not rename recording %s: %s", src.name, exc)
-            # Prune: newest _MAX_RECORDINGS survive.
+            # Prune: newest _MAX_RECORDINGS survive, and the survivors must fit the byte
+            # budget — oldest evicted first until they do.
             webms = sorted(d.glob("*.webm"), key=lambda f: f.stat().st_mtime, reverse=True)
             for old in webms[self._MAX_RECORDINGS:]:
                 try:
                     old.unlink()
+                except OSError:
+                    pass
+            kept = webms[:self._MAX_RECORDINGS]
+            total = sum(f.stat().st_size for f in kept if f.exists())
+            while total > self._MAX_RECORD_BYTES and kept:
+                victim = kept.pop()            # list is newest-first; pop() takes the oldest
+                try:
+                    total -= victim.stat().st_size
+                    victim.unlink()
+                    log.info("Pruned old recording %s (byte budget)", victim.name)
                 except OSError:
                     pass
         except Exception as exc:

@@ -1056,13 +1056,19 @@ def humanized_search(page: Page, url: str) -> bool:
             return False
 
     try:
-        box.click(timeout=3_000)          # moves the mouse to the box and focuses it
+        # Approach and click the box like a hand would (shared motor model in humanize.py) —
+        # this was a plain box.click(): an instant cursor teleport right before the "human"
+        # typing, and the typing itself was .type(delay=N): one sampled delay repeated for
+        # every key. Both were visible-to-the-eye tells on a watched sweep.
+        from web_watcher import humanize
+        if not humanize.click(page, box, 3_000):
+            box.click(timeout=3_000)
         try:
             box.fill("")                   # clear any prefilled text
         except Exception:
             pass
-        # Type at a human, slightly-random pace so the site sees real key events.
-        box.type(term, delay=random.randint(70, 130))
+        # Per-keystroke human timing so the site sees real, irregular key events.
+        humanize.type_text(page, term)
         # Some sites (Craigslist) swallow the first keystroke — verify the box value
         # and correct it before submitting so the query is always exactly right.
         try:
@@ -1079,6 +1085,7 @@ def humanized_search(page: Page, url: str) -> bool:
                             "marketplace.", urlparse(url).netloc, term)
         except Exception:
             pass
+        time.sleep(random.uniform(0.25, 0.9))   # glance at what was typed before committing
         page.keyboard.press("Enter")
         page.wait_for_timeout(1_500)
         log.info("Humanized search: typed %r into the search box", term)

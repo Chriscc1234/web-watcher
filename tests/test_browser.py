@@ -200,3 +200,24 @@ def test_live_nws_weather_extracts_text():
     text = results[0].text
     assert len(text) > 200, f"Expected substantial text, got {len(text)} chars"
     print(f"\nExtracted {len(text)} chars. First 300:\n{text[:300]}")
+
+
+# ── recordings: the byte budget (a count cap alone is no cap) ────────────────────
+
+def test_recording_prune_enforces_count_and_bytes(tmp_path, monkeypatch):
+    from web_watcher.browser import BrowserSession
+    s = BrowserSession.__new__(BrowserSession)
+    s._record_video_dir = tmp_path
+    monkeypatch.setattr(BrowserSession, "_MAX_RECORDINGS", 5)
+    monkeypatch.setattr(BrowserSession, "_MAX_RECORD_BYTES", 3 * 1024)
+
+    import os, time as _t
+    for i in range(8):                       # 8 files, 1KB each, distinct mtimes
+        p = tmp_path / f"2026010{i}-000000.webm"
+        p.write_bytes(b"x" * 1024)
+        os.utime(p, (1000 + i, 1000 + i))
+
+    s._finalize_recordings([])               # no new videos — prune only
+    kept = sorted(f.name for f in tmp_path.glob("*.webm"))
+    assert len(kept) == 3                    # count cap → 5, then bytes (3KB) → 3
+    assert kept == ["20260105-000000.webm", "20260106-000000.webm", "20260107-000000.webm"]

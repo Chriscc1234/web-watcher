@@ -51,6 +51,16 @@ class _FakePage:
         self.keyboard = _FakeKeyboard()
 
 
+@pytest.fixture(autouse=True)
+def _restore_global_rng():
+    """These tests seed the GLOBAL random module for reproducibility — without restoring it,
+    every later test in the run inherits a deterministic RNG state, and a statistical test
+    elsewhere (test_human_read's budget expectations) failed only in the full suite."""
+    state = random.getstate()
+    yield
+    random.setstate(state)
+
+
 @pytest.fixture
 def fast_clock(monkeypatch):
     """time.sleep records instead of sleeping — tests read the delays, and run instantly."""

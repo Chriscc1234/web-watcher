@@ -1770,6 +1770,52 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                             chat_id, exc)
         return {"ok": bool(ok)}
 
+    # ── People management — the admin console's person controls ────────────────
+    # These existed only as things the developer could do by hand (set_owner_label was
+    # reachable solely as a side effect of the send endpoint; transfer only by API call or
+    # chat phrasing). Another server runner gets buttons, not a debugging session.
+
+    @app.get("/api/people")
+    def list_people():
+        """Everyone the bot talks to: the main (admin) chat plus each allowed person —
+        with their display name, any admin-set nickname, and how many watches they own."""
+        cfg = _load_cfg()
+        names, labels = _load_owner_names(), _load_owner_labels()
+        main = str(cfg.notifications.telegram.chat_id or "")
+        out, seen = [], set()
+        for cid in ([main] if main else []) + [
+                str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or [])]:
+            cid = cid.strip()
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            out.append({"chat_id": cid,
+                        "name": names.get(cid, ""),
+                        "label": labels.get(cid, ""),
+                        "is_main": cid == main,
+                        "watches": len(_watches_for_owner(cfg, cid))})
+        return out
+
+    @app.post("/api/people/{chat_id}/label")
+    def set_person_label(chat_id: str, body: dict):
+        """Give a person a nickname. Shown as “TelegramName (Nickname)” everywhere their name
+        appears (Chats tab, watch owner groups) and matched by chat transfers (“give it to
+        Jordan”). An empty label clears the nickname. Known people only."""
+        cfg = _load_cfg()
+        cid = str(chat_id or "").strip()
+        allowed = {str(cfg.notifications.telegram.chat_id or "")} | {
+            str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or [])}
+        if cid not in allowed:
+            raise HTTPException(404, detail=f"{cid!r} isn't a known person")
+        label = str(body.get("label") or "").strip()
+        if len(label) > 60:
+            raise HTTPException(400, detail="nickname too long (60 chars max)")
+        if label:
+            set_owner_label(cid, label)
+        else:
+            clear_owner_label(cid)
+        return {"ok": True, "display": _load_owner_names().get(cid, "")}
+
     @app.post("/api/telegram/detect-chat-id")
     def telegram_detect(body: dict):
         """Find the chat ID(s) that have messaged this bot (via getUpdates), so the user doesn't
@@ -2673,6 +2719,21 @@ def set_owner_label(owner: str, label: str) -> None:
                                       encoding="utf-8")
     except Exception as exc:
         log.warning("could not set owner label: %s", exc)
+
+
+def clear_owner_label(owner: str) -> None:
+    """Remove a person's nickname — their plain Telegram name shows again."""
+    owner = str(owner or "").strip()
+    if not owner:
+        return
+    try:
+        d = _load_owner_labels()
+        if owner in d:
+            d.pop(owner)
+            _OWNER_LABELS_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2),
+                                          encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not clear owner label: %s", exc)
 
 
 def _record_owner_name(owner: str | None, name: str) -> None:

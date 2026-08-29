@@ -2023,7 +2023,18 @@ async function openChatThread(key) {
   document.querySelectorAll('#chats-list .thread-row').forEach(r =>
     r.classList.toggle('active', r.dataset.key === key));
   const t = _chatThreads.find(x => (x.owner === null ? 'null' : String(x.owner)) === key);
-  document.getElementById('chats-thread-head').textContent = t ? t.label : 'Conversation';
+  const head = document.getElementById('chats-thread-head');
+  head.textContent = t ? t.label : 'Conversation';
+  // A Telegram person can be given a nickname right here — this was an API-only ability
+  // (the developer set "Nameless (Jordan)" by hand); a server runner gets a button.
+  if (owner && t) {
+    const btn = document.createElement('button');
+    btn.textContent = '✏️ Nickname';
+    btn.title = 'Give this person a nickname — shown as “TelegramName (Nickname)”';
+    btn.style.cssText = 'margin-left:10px;font-size:11px;padding:2px 8px';
+    btn.onclick = () => renamePerson(owner);
+    head.appendChild(btn);
+  }
   // Admin can message a Telegram person (to help them); the desktop thread is your own dock.
   const composer = document.getElementById('chats-composer');
   composer.style.display = owner ? 'flex' : 'none';
@@ -2244,9 +2255,12 @@ async function loadWatches(opts) {
         const groupBtn = on
           ? `<button onclick="ownerAction('${o}', 'stop', ${list.length})" title="Turn off every watch for this person">⏸ Stop all</button>`
           : `<button class="primary" onclick="ownerAction('${o}', 'start', ${list.length})" title="Turn their watches back on">▶ Start all</button>`;
+        const renameBtn = o
+          ? `<button onclick="renamePerson('${o}')" title="Give this person a nickname" style="font-size:11px;padding:2px 8px">✏️</button>`
+          : '';
         return `<div class="owner-group">
             <div class="owner-head">
-              <span class="owner-name">${escapeHtml(label)}</span>
+              <span class="owner-name">${escapeHtml(label)} ${renameBtn}</span>
               <span class="owner-meta">${list.length} watch${list.length === 1 ? '' : 'es'} · ${on} on · ${list.length - on} off</span>
               <span class="owner-actions">${groupBtn}</span>
             </div>
@@ -2344,6 +2358,7 @@ function watchRowHtml(w, isActive) {
       <td>${foundBadge}</td>
       <td style="color:var(--dim)">${nextCell}</td>
       <td><div class="actions-cell">${toggleBtn}${runBtn}
+        <button onclick="giveWatch('${nm}')" title="Hand this watch to another person">👤 Give</button>
         <button class="danger" onclick="deleteWatch('${nm}')">Delete</button>
       </div></td>
     </tr>`;
@@ -2366,9 +2381,58 @@ function watchRowHtml(w, isActive) {
       ${toggleBtn}
       ${runBtn}
       <button onclick="editWatch(${JSON.stringify(w).replace(/"/g,'&quot;')})">Edit</button>
+      <button onclick="giveWatch('${nm}')" title="Hand this watch to another person — they get a Telegram note">👤 Give</button>
       <button class="danger" onclick="deleteWatch('${nm}')">Delete</button>
     </div></td>
   </tr>`;
+}
+
+// ── Person controls: things the developer used to do by hand, now buttons ────────
+// Nickname a person. Their Telegram profile name stays (it's who the account IS); the
+// nickname is who they are to you — shown together as “TelegramName (Nickname)”, and it's
+// what “give the watch to Jordan” matches on in chat.
+async function renamePerson(chatId) {
+  let current = '';
+  try {
+    const people = await api('/api/people');
+    const p = people.find(x => String(x.chat_id) === String(chatId));
+    current = (p && p.label) || '';
+  } catch (_) {}
+  const nick = prompt('Nickname for this person (empty clears it):', current);
+  if (nick === null) return;                       // cancelled
+  try {
+    await api(`/api/people/${encodeURIComponent(chatId)}/label`, {
+      method: 'POST', body: JSON.stringify({ label: nick.trim() }),
+    });
+    _chatThreadsSig = '';                          // force both views to repaint with the new name
+    _watchesSig = '';
+    if (activeTab === 'chats') loadChatThreads();
+    if (activeTab === 'watches') loadWatches();
+  } catch (e) { alert('Could not set the nickname: ' + e.message); }
+}
+
+// Hand a watch to another person. The watch keeps its whole identity (stats, seen-history,
+// matches) and the recipient gets a Telegram note — same behavior as asking in chat.
+async function giveWatch(name) {
+  let people = [];
+  try { people = await api('/api/people'); } catch (_) {}
+  const lines = people.map((p, i) =>
+    `${i + 1} — ${p.name || 'Telegram ' + p.chat_id}${p.is_main ? ' (you)' : ''}` +
+    (p.watches ? `  ·  ${p.watches} watch${p.watches === 1 ? '' : 'es'}` : ''));
+  lines.push('0 — Unassigned (desktop only, no Telegram alerts)');
+  const pick = prompt(`Give “${name}” to whom?\n\n${lines.join('\n')}\n\nEnter a number:`);
+  if (pick === null) return;
+  const n = parseInt(pick, 10);
+  if (isNaN(n) || n < 0 || n > people.length) { alert('Not one of the numbers listed.'); return; }
+  const owner = n === 0 ? '' : String(people[n - 1].chat_id);
+  try {
+    await api(`/api/watches/${encodeURIComponent(name)}/transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ owner, owner_name: n === 0 ? '' : (people[n - 1].name || '') }),
+    });
+    _watchesSig = '';
+    loadWatches();
+  } catch (e) { alert('Could not transfer it: ' + e.message); }
 }
 
 // Flip a watch's enabled flag (active ⇄ paused) via the existing endpoint, then reload so

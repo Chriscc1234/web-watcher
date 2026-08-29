@@ -515,7 +515,7 @@ class ServiceManager:
         try:
             if self.orchestrator_running():
                 from web_watcher.config import load as _load
-                cfg = _load(self._config_path)
+                cfg = _load()
                 w = next((x for x in cfg.watches if x.name == watch_name), None)
                 if w is not None and w.enabled and w.mode == "continuous" and not self._paused:
                     cur = (self.orchestrator_status() or {}).get("current")
@@ -531,7 +531,7 @@ class ServiceManager:
         """watch_name -> watch_runtime(...) for every watch, cheap enough for a list call."""
         try:
             from web_watcher.config import load as _load
-            cfg = _load(self._config_path)
+            cfg = _load()
             return {w.name: self.watch_runtime(w.name) for w in cfg.watches}
         except Exception:
             return {}

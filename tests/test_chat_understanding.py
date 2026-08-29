@@ -365,3 +365,21 @@ def test_missing_desired_state_falls_back_to_legacy():
         t._remember_running("A", True)
         t._remember_running("A", False)
         assert t._remembered_running() == set()         # recorded-empty → honour the stop
+
+
+def test_watch_runtime_actually_works(monkeypatch):
+    """The first wiring referenced self._config_path — an attribute ServiceManager never had —
+    so every call raised into the fallback and the 'merged truth' answered False for a watch
+    the orchestrator was sweeping at that moment. A functional test, not a source grep."""
+    import types
+    from web_watcher.services import ServiceManager
+    import web_watcher.config as C
+    m = ServiceManager()
+    w = types.SimpleNamespace(name="Fiat", enabled=True, mode="continuous")
+    monkeypatch.setattr(C, "load", lambda path=None: types.SimpleNamespace(watches=[w]))
+    monkeypatch.setattr(m, "orchestrator_running", lambda: True)
+    monkeypatch.setattr(m, "orchestrator_status", lambda: {"current": "Fiat"})
+    rt = m.watch_runtime("Fiat")
+    assert rt == {"running": True, "engine": "orchestrator", "sweeping_now": True}
+    rt2 = m.watch_runtime("Nope")
+    assert rt2["running"] is False

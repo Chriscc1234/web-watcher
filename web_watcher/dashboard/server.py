@@ -1865,7 +1865,9 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "and message you when something matches — for example:\n\n"
                 "  • “Watch craigslist for a manual pickup under $10k near Anacortes”\n"
                 "  • “Let me know about aluminum boats under 20 feet”\n\n"
-                "You can ask me “what am I watching?” anytime, or “show me the latest match”.",
+                "No commands to learn — just talk. “Any luck?” shows what I've found, "
+                "“what am I watching?” shows your watches, “stop” pauses them, and "
+                "“help” explains everything.",
                 cfg.notifications, chat_id_override=cid)
         except Exception as exc:
             log.debug("could not send the welcome message to %s: %s", cid, exc)
@@ -2781,9 +2783,15 @@ _LOOKUP_RE = re.compile(
     r"list\s+(them|it|the|out|all)|let'?s\s+see|lemme\s+see|"
     r"what\s+(did|have)\s+(you|it|we)\s+(find|found|got)|"
     r"what'?s\s+(it|the\s+watch)?\s*found|"
-    r"any(thing)?\s+(new|on|from|for|good|yet)|got\s+anything|"
+    # "anything from craigslist?" is a lookup; "do you need anything from me?" is not —
+    # the pronoun guard keeps offers of help from being answered with a page of listings.
+    r"any(thing)?\s+(new|on|from(?!\s+(?:me|you|us)\b)|for(?!\s+(?:you|us)\b)|good|yet)|got\s+anything|"
     r"the\s+(match|matches|listing|listings|find|finds|hits?|results?)\b|"
-    r"top\s+\d+|best\s+(ones?|matches|listings|finds)"
+    r"top\s+\d+|best\s+(ones?|matches|listings|finds)|"
+    # The way a person checks in with a friend who's keeping an eye out for something:
+    r"any\s+(luck|news|updates?)|what'?s\s+new|"
+    r"(see|seen|catch|caught|spot|spotted|find|found)\s+anything|"
+    r"^\s*anything\s*\??\s*$"
     r")", re.I)
 
 # Words that mean "make/change a watch", never "show me what you found". A message with these is
@@ -2914,7 +2922,17 @@ _WATCH_STATUS_RE = re.compile(
     r"watch\s*list|watchlist|"
     r"(running|active)\s+watches|"
     r"list\s+(my\s+|the\s+)?watches|my\s+watches\b|"
-    r"how\s+many\s+watches|status\s+of\s+(my\s+)?watches"
+    r"how\s+many\s+watches|status\s+of\s+(my\s+)?watches|"
+    # How a NOVICE asks the same question — no "watch" vocabulary required. The welcome
+    # message even teaches "what am I watching?", and that exact phrase used to fall through
+    # to the 14b. We invented the lingo; people who were handed the bot didn't.
+    r"what\s+am\s+i\s+(watching|searching|looking)|"
+    r"what\s+are\s+you\s+(watching|searching|looking|hunting)|"
+    r"what\s+am\s+i\s+signed\s+up\s+for|"
+    r"is\s+(it|this)\s+(still\s+)?(working|running|going|on)|"
+    r"are\s+you\s+(still\s+)?(looking|watching|searching|working|running)|"
+    r"(you|u)\s+still\s+there|still\s+watching|"
+    r"what'?s\s+the\s+status"
     r")\b", re.I)
 
 
@@ -2937,7 +2955,8 @@ _WATCH_ACTION_WORDS_RE = re.compile(
 # question deserves the model, which has the same real state in its context.
 _ASKS_ABOUT_FINDS_RE = re.compile(
     r"\b(?:f(?:i|ou)nds?|found|match(?:es|ed)?|anything (?:new|good)|new listings?|"
-    r"turn(?:ed)? (?:anything )?up|come (?:up|in)|seen anything)\b", re.I)
+    r"turn(?:ed)? (?:anything )?up|come (?:up|in)|seen anything|"
+    r"any (?:luck|news|updates?)|what'?s new|(?:catch|caught|spot|spotted|see) anything)\b", re.I)
 
 
 def _pure_status_request(text: str) -> bool:
@@ -2957,8 +2976,14 @@ _HELP_RE = re.compile(
     r"|how do (?:you|i) work"
     r"|how (?:do i|to) use\b"
     r"|what (?:can|do) you do\b|what can i (?:ask|say|do)\b"
-    r"|\bwhat are you\b|\bwhat is this\b|\bwho are you\b"
+    # "what are you?" is an identity question ONLY as the whole message — unanchored it
+    # swallowed "what are you searching for?" (a STATUS question) into the generic explainer.
+    r"|\bwhat are you\s*\??\s*$|\bwhat is this\b|\bwho are you\b"
     r"|getting started\b|how (?:do i|to) get start"
+    # A lost novice, verbatim. Whole-message only: mid-conversation "I don't understand the
+    # price part" is specific confusion and belongs with the model, not the explainer.
+    r"|^\s*(?:huh|what|what do i do|what should i say|what now|now what|instructions|"
+    r"i'?m (?:so |a bit )?(?:confused|lost)|i don'?t (?:understand|get it))\s*[?.!]*\s*$"
     r"|^\s*/?help\s*$",
     re.I)
 
@@ -2981,7 +3006,8 @@ def _render_help(owner: str | None) -> str:
         "<b>On each match</b> you get a card with two buttons:\n"
         "  • 🔗 <b>Open</b> — jump straight to the listing\n"
         "  • 🔍 <b>Vet</b> — I read the whole posting and rate the deal + flag scam risk\n\n"
-        "<b>Handy things to say</b>:\n"
+        "<b>Handy things to say</b> (no commands to learn — plain English works):\n"
+        "  • “Any luck?” / “got anything?” — what I've found lately\n"
         "  • “What am I watching?” — your watches and what they've found\n"
         "  • “Show me the latest match” — your newest find\n"
         "  • “That's not a match” — I drop the last one I showed you, and can learn to skip "
@@ -4088,9 +4114,25 @@ def _watch_referenced_in(text: str, name: str) -> bool:
 # watches. We classify this deterministically rather than trust the 14b — start/stop of everything
 # is too consequential to leave to a model that emits blank thoughts. See _classify_lifecycle.
 _STOP_VERB_RE  = re.compile(r"\b(stop|pause|halt|shut\s*(it|them|down|off)|turn\s*(it|them)?\s*off|"
-                            r"shut\s*down|standby|stand\s*down)\b", re.I)
+                            r"shut\s*down|standby|stand\s*down|"
+                            # Novice phrasings, learned from a real first user: nobody who was
+                            # HANDED the bot says "pause my watch" — they say what people say
+                            # to a chatty texter. Guarded forms only: "cancel"/"no more" alone
+                            # appear inside innocent sentences ("no more than $5k"), so both
+                            # require an alerts/messages-ish object; the standalone idioms
+                            # ("knock it off") are unambiguous as phrases.
+                            r"quit|unsubscribe|mute|knock\s+it\s+off|leave\s+me\s+alone|"
+                            r"enough\s+already|give\s+it\s+a\s+rest|quiet\s+down|"
+                            r"don'?t\s+(message|text|send)\s+me|"
+                            r"(cancel|no\s+more)\s+(my\s+|the\s+)?(alerts?|messages?|"
+                            r"notifications?|updates?|texts?|watch(es)?|everything)"
+                            r")\b", re.I)
 _START_VERB_RE = re.compile(r"\b(start|resume|unpause|un-?pause|turn\s*(it|them)?\s*(on|back\s*on)|"
-                            r"fire\s*up|kick\s*off|get\s*going|begin\s*watching|start\s*watching)\b", re.I)
+                            r"fire\s*up|kick\s*off|get\s*going|begin\s*watching|start\s*watching|"
+                            # Novice re-engage phrasings. Idempotent-safe: "starting" an
+                            # already-running watch is a no-op, so a loose match costs nothing.
+                            r"keep\s+(looking|going|searching|watching)|"
+                            r"go\s+again|look\s+again|back\s+on)\b", re.I)
 # "the whole thing" — the global program, not a single watch.
 _WHOLE_PROGRAM_RE = re.compile(
     r"\b(everything|all\s+watching|all\s+the\s+watches|the\s+(whole|entire)\s+(watcher|thing|program|"
@@ -4841,11 +4883,13 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 else:
                     mine = _watches_for_owner(cfg, owner)
                     gerund = {"stop": "Stopping", "start": "Starting"}.get(act, act.title() + "ing")
-                    if len(mine) > 1:
+                    if len(mine) > 1 and act == "stop":
                         # A bare "please stop watching" from someone with SEVERAL watches is as
                         # ambiguous as the admin's — it just used to read as "all of them" and
                         # silently switch off work they never mentioned. Ask, the same courtesy
                         # the admin gets, and lead with the one they were just talking about.
+                        # START is the asymmetric twin: starting everything they own is harmless
+                        # and idempotent, so a bare "keep going" just does it — no quiz.
                         watch_actions = None
                         _f = focus if (focus and focus != PENDING_CREATE) else None
                         opts = [w.name for w in mine]
@@ -4860,8 +4904,11 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                                    f"and I'll {act} the lot.")
                     else:
                         watch_actions = [{"action": act, "name": w.name} for w in mine] or None
-                        message = (f"{gerund} your {len(watch_actions)} watch(es)."
-                                   if watch_actions else "You don't have any watches yet.")
+                        n = len(watch_actions or [])
+                        message = (f"{gerund} your {n} watch{'' if n == 1 else 'es'}."
+                                   if watch_actions else
+                                   "You don't have any watches yet — tell me what you're "
+                                   "hunting for and I'll set one up.")
 
         # WE HOLD THE REAL ROWS, SO THE MODEL DOES NOT GET TO NARRATE THEM. Asked for the
         # matches, the small model either writes a blank template ("**Title:** [Boat Title] …

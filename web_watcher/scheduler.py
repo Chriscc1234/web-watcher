@@ -1363,6 +1363,12 @@ def _explore_matches(watch, cfg, db_path, page, stop_event=None) -> int:
         from web_watcher.storage import query_listings
         wid  = watch.id or watch.name
         rows = query_listings(watch_id=wid, matched=True, limit=200, db_path=db_path)
+        # Push anything already read that nobody was ever shown — FIRST, and unconditionally.
+        # Placing this after the read loop meant it stopped running the moment the backlog was
+        # fully read (the early return below), which is precisely the state a watch settles
+        # into: matches sitting read, archived, and still never sent.
+        _drip_unalerted(watch, cfg, db_path, run_ts=datetime.now(timezone.utc).isoformat())
+
         pending = [r for r in rows
                    if not (r.get("details") or "").strip() and (r.get("url") or "")]
         if not pending:
@@ -1404,7 +1410,6 @@ def _explore_matches(watch, cfg, db_path, page, stop_event=None) -> int:
         if read:
             log.info("Continuous watch %r: filled in the ad details for %d earlier match(es)",
                      watch.name, read)
-        _drip_unalerted(watch, cfg, db_path, run_ts=datetime.now(timezone.utc).isoformat())
         return read
     except Exception as exc:
         log.debug("explore-matches pass failed for %r: %s", watch.name, exc)

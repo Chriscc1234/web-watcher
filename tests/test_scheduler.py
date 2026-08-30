@@ -1239,3 +1239,22 @@ def test_sometimes_takes_the_long_way_for_variety(monkeypatch):
         page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor+sailboat",
         watch)
     assert page.goto.call_args[0][0] == "https://www.facebook.com/marketplace/"
+
+
+def test_drip_runs_even_when_the_read_backlog_is_empty(monkeypatch, tmp_path):
+    """Placed after the read loop, the drip stopped firing the moment every match had been
+    read — which is exactly the settled state of a watch: matches read, archived, and still
+    never sent. It must run on every backlog pass, not only ones with reading to do."""
+    import web_watcher.scheduler as sch
+
+    dripped = []
+    monkeypatch.setattr(sch, "_drip_unalerted",
+                        lambda w, c, db, run_ts: dripped.append(w.name) or 0)
+    # Every match already has its body → `pending` is empty → the early return fires.
+    monkeypatch.setattr("web_watcher.storage.query_listings",
+                        lambda **kw: [{"listing_key": "k1", "url": "https://x/1",
+                                       "title": "t", "details": "already read"}])
+    watch = _cont_watch()
+    watch.instruction = "MacGregor sailboats"
+    assert sch._explore_matches(watch, MagicMock(), tmp_path / "db", MagicMock()) == 0
+    assert dripped == [watch.name], "the drip was skipped by the early return"

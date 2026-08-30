@@ -1362,7 +1362,10 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                       # Explicit list for the bridge's tappable buttons — matching names
                       # against reply TEXT attached buttons to anything that mentioned a
                       # watch (a nudge sentence produced a Cars button under a boat list).
-                      "watch_buttons": [w.name for w in _watches_for_owner(cfg, owner)][:6]}
+                      "watch_buttons": [w.name for w in _watches_for_owner(cfg, owner)][:6],
+                      # A button-capable surface shows THIS instead of the full list — the
+                      # buttons carry the per-watch info, the text just summarises.
+                      "tg_message": _render_watch_status_compact(cfg, manager, owner)}
             result["raw"] = result["message"]
             _persist_chat_turn(messages, result, owner)
             result.pop("raw", None)
@@ -3236,6 +3239,47 @@ def _fmt_hours(h: float) -> str:
     if abs(h - 12.0) < 0.01:
         return "twice a day"
     return f"every {h:g}h"
+
+
+def _render_watch_status_compact(cfg, manager, owner: str | None) -> str:
+    """The SHORT status header for surfaces with tappable watch buttons (Telegram). The full
+    list next to a column of buttons repeating every name read as a dupe — the user's words:
+    "the chat and buttons feel like a dupe in info. Can we put the info from the message into
+    the buttons?" So: one summary line, per-owner counts when the admin's view is mixed, and
+    the buttons themselves carry each watch's state dot, name, and match count."""
+    import html as _h
+    mine = _watches_for_owner(cfg, owner)
+    if not mine:
+        return ""
+    try:
+        paused = manager.is_paused()
+    except Exception:
+        paused = False
+    rt = {}
+    try:
+        rt = manager.runtime_map() or {}
+    except Exception:
+        pass
+    running = 0 if paused else sum(
+        1 for w in mine if (rt.get(w.name) or {}).get("running"))
+    if paused:
+        head = f"\u23f8 <b>Watching is paused.</b> {len(mine)} watch(es) \u2014 tap one:"
+    elif running == 0:
+        head = (f"\u26aa <b>Nothing is running.</b> {len(mine)} watch(es) \u2014 "
+                f"tap one to see it or start it:")
+    else:
+        head = f"\U0001f7e2 <b>{running} of {len(mine)} running</b> \u2014 tap a watch:"
+    lines = [head]
+    groups: dict = {}
+    for w in mine:
+        groups.setdefault(_owner_label_for(w, owner, cfg), []).append(w)
+    if _is_admin_owner(owner, cfg) and len(groups) > 1:
+        for glabel, gw in sorted(groups.items(), key=lambda kv: (kv[0] != "yours", kv[0])):
+            on = sum(1 for w in gw if (rt.get(w.name) or {}).get("running")) if not paused else 0
+            title = ("Yours" if glabel == "yours"
+                     else "Unassigned" if glabel.startswith("unassigned") else glabel)
+            lines.append(f"\U0001f464 {_h.escape(title)}: {on} of {len(gw)} on")
+    return "\n".join(lines)
 
 
 def _render_watch_status(cfg, manager, owner: str | None) -> str:

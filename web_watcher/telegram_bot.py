@@ -497,6 +497,10 @@ class TelegramBridge:
             # put an irrelevant Cars button under a list of MacGregor matches, because the
             # nudge sentence happened to mention that watch's name.
             wbtns = self._watch_buttons_for(result.get("watch_buttons"), to)
+            # With buttons on screen, the full per-watch list in the TEXT is a dupe — the
+            # compact header + info-carrying buttons ARE the list.
+            if wbtns and result.get("tg_message"):
+                reply, as_html = result["tg_message"], True
             self._send(reply or "(no reply)", to, html=as_html, buttons=wbtns)
 
     def _apply_pending(self, pending: list[dict], chat_id: str = "") -> str:
@@ -1000,7 +1004,11 @@ class TelegramBridge:
         rows = []
         for i, w in enumerate(hit):
             dot = "\U0001f7e2" if w.get("continuous_running") else "\u26aa"
-            rows.append([{"text": f"{dot} {w['name'][:40]}", "callback_data": f"wdet:{i}"}])
+            st = w.get("stats") or {}
+            found = st.get("matches") or 0
+            # The button IS the list row now: state dot, name, and the match count.
+            label = f"{dot} {w['name'][:34]} \u00b7 {found}\u2713"
+            rows.append([{"text": label, "callback_data": f"wdet:{i}"}])
         return rows
 
     def _watch_for_callback(self, chat: str, idx_text: str):

@@ -1020,9 +1020,12 @@ def _run_agent_continuous_sweep(
             on_step       = _harvest,
             should_stop   = _should_stop,
             exploration_mode = True,
-            # Lock the search ONLY when we actually drove the site's controls to it. If we fell
-            # back to a plain goto, the agent may still need to fix the query itself.
-            search_locked = drove,
+            # Lock the search when the query was established through the site's OWN controls —
+            # fully driven (search + location) OR typed into its box. The typed rung was left
+            # unlocked, and on Facebook the agent then clicked the sidebar's "Vehicles"
+            # category item, swapping the MacGregor query for a feed of sedans. Only a plain
+            # goto fallback leaves the agent free to fix the query itself.
+            search_locked = drove or typed,
             # Let the agent see whether its scrolling is actually producing anything.
             harvest_size  = lambda: len(harvested),
         )

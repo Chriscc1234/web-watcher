@@ -218,3 +218,31 @@ def test_setup_budget_limits_are_sane():
     # or it would fire mid-dropdown; the hard limit must be above the soft one.
     assert _SETUP_SOFT_LIMIT >= 3
     assert _SETUP_HARD_LIMIT > _SETUP_SOFT_LIMIT
+
+
+# ── the Vehicles-sidebar click: a feed swap gets detected ───────────────────────
+
+def test_abandoned_search_feed_detects_the_category_swap():
+    """The live case, verbatim URLs: el=26 ("Vehicles") turned the MacGregor search into a
+    feed of sedans — 70 banked, 60 judged, all junk."""
+    from web_watcher.agent import _abandoned_search_feed
+    pre = "https://www.facebook.com/marketplace/seattle/search?query=macgregor%20sailboat&exact=false"
+    post = ("https://www.facebook.com/marketplace/seattle/search/"
+            "?category_id=546583916084032&query=Vehicles&referral_ui_component=category_menu_item")
+    assert _abandoned_search_feed(pre, post) is True
+
+
+def test_abandoned_search_feed_allows_legitimate_moves():
+    from web_watcher.agent import _abandoned_search_feed
+    pre = "https://www.facebook.com/marketplace/seattle/search?query=macgregor%20sailboat"
+    for post in (
+        pre,                                                          # unchanged
+        "https://www.facebook.com/marketplace/item/123456/",          # opening a listing
+        pre + "&sortBy=creation_time_descend",                        # re-sorting same query
+        "https://www.facebook.com/marketplace/seattle/search?query=macgregor%2026",  # refined, term kept
+    ):
+        assert _abandoned_search_feed(pre, post) is False, post
+    # A category-only sweep has no terms to abandon.
+    assert _abandoned_search_feed(
+        "https://tacoma.craigslist.org/search/cta",
+        "https://tacoma.craigslist.org/search/boa") is False

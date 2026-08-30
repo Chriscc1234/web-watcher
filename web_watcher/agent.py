@@ -914,6 +914,29 @@ def run_agent(
             _post_ttl = page.title() or ""
             action.outcome = _action_outcome(_pre_url, _post_url, _pre_ttl, _post_ttl)
 
+        # ── Stay on task: a CLICK that swapped the feed gets undone ──────────
+        # The navigate guard above can't see this: the agent CLICKED element 26 — Facebook's
+        # sidebar "Vehicles" category item — and the page swapped to query=Vehicles, abandoning
+        # the MacGregor search entirely. Seven listings-shaped scrolls later the sweep had
+        # banked 70 sedans for a sailboat watch (the judge rejected every one, but the harvest
+        # and the judging were pure waste). Opening a LISTING is still fine — this only fires
+        # when the click landed on a DIFFERENT results/category feed that dropped our query.
+        if (search_locked and action.action == "click"
+                and _abandoned_search_feed(_pre_url, page.url)):
+            log.info("Agent click landed on a different feed (%s) — going back to the "
+                     "locked search results", page.url[:90])
+            try:
+                page.go_back(timeout=15_000, wait_until="domcontentloaded")
+                _human_pause(*ACTION_PAUSE)
+            except Exception as exc:
+                log.debug("could not go back after off-task click: %s", exc)
+            action.outcome = (
+                "UNDONE: that click switched to a different results feed (a category/menu "
+                "link), abandoning the search these results were set up for. We went back. "
+                "Stay with THIS search: scroll it, page it, or click a LISTING to read it — "
+                "never the category sidebar."
+            )
+
         # A click that opens a custom dropdown/panel changes no URL or title, so it
         # reads as "page unchanged" — which tells the model its click DID NOTHING and
         # steers it away from the menu it just opened (real failure: craigslist's
@@ -2522,6 +2545,44 @@ def is_listing_url(url: str) -> bool:
     # Listing shapes: craigslist /view/d/<slug>/<id>, ebay /itm/<id>, offerup /item/<id>,
     # facebook /marketplace/item/<id>, and the classic <digits>.html detail page.
     return bool(re.search(r"/(view|itm|item|d|p)/|/\d{6,}(?:\.html)?$", path))
+
+
+def _abandoned_search_feed(pre_url: str, post_url: str) -> bool:
+    """Did a click move us from OUR results onto a DIFFERENT results/category feed?
+
+    True only when: the URL actually changed, the landing page is feed-shaped (a search or
+    category page, not a listing), and the query terms that defined the ORIGINAL results are
+    gone from it. Facebook's category sidebar is the live case: el=26 ("Vehicles") turned
+    ?query=macgregor%20sailboat into ?query=Vehicles&referral_ui_component=category_menu_item.
+    Opening a listing, paging, or re-sorting the same query all keep this False."""
+    from urllib.parse import urlparse, parse_qsl, unquote_plus
+    if not pre_url or not post_url:
+        return False
+    if urldefrag_url(pre_url) == urldefrag_url(post_url):
+        return False
+    if is_listing_url(post_url):
+        return False                                # reading an ad is the point
+    post = urlparse(post_url)
+    feedish = bool(re.search(r"/(search|category|categories|browse)\b", post.path or "")
+                   or any(k in dict(parse_qsl(post.query)) for k in ("category_id", "cid")))
+    if not feedish:
+        return False
+    # The terms that defined the ORIGINAL results, from its query string.
+    pre_q = dict(parse_qsl(urlparse(pre_url).query))
+    terms = ""
+    for k in ("query", "q", "keywords", "_nkw"):
+        if pre_q.get(k):
+            terms = unquote_plus(pre_q[k])
+            break
+    if not terms:
+        return False                                # nothing to abandon (category-only sweep)
+    hay = unquote_plus(f"{post.path}?{post.query}").lower()
+    return not any(t for t in terms.lower().split() if t and t in hay)
+
+
+def urldefrag_url(u: str) -> str:
+    from urllib.parse import urldefrag
+    return urldefrag(u or "")[0].rstrip("/")
 
 
 def _search_lock_violation(current_url: str, target_url: str) -> bool:

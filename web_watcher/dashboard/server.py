@@ -876,14 +876,28 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 bg.add_task(manager.start_continuous, watch_name)
             return {"ok": True, "name": watch_name, "action": "reset",
                     "removed": removed, "paused": manager.is_paused()}
-        if action in ("disable", "stop"):
-            # "Stop" has to actually stop it. Stopping a per-watch loop is a no-op whenever the
-            # orchestrator is driving — it owns every ENABLED continuous watch and simply sweeps
-            # it again on the next pass — so the bot could report "stopped all 2 of your watches"
-            # while both kept running. `enabled` is the lever that works in BOTH execution modes,
-            # and it's the state the Active/Inactive lists already show.
+        if action == "stop":
+            # STOP MEANS STOP RUNNING — NOT DISABLE. This used to set enabled=False as a
+            # workaround for the pre-v0.142 orchestrator ignoring per-watch stops; the
+            # desired-run set fixed that properly, and the workaround became the bug: a chat
+            # "Stop all watches" quietly DISABLED all seven, so every later boot resumed
+            # nothing, the orchestrator never started ("0 continuous watches"), and the app
+            # ran the day on ad-hoc per-watch threads. stop_continuous records the intent
+            # the rotation and resume-on-boot both honour; enabled stays the user's
+            # active/inactive shelf, changed only by explicit disable/deactivate.
             if continuous:
-                bg.add_task(manager.stop_continuous, watch_name)     # drop any per-watch loop now
+                bg.add_task(manager.stop_continuous, watch_name)
+            else:
+                # A scheduled watch has no loop to stop — pausing its job means disabling.
+                if w.enabled:
+                    w.enabled = False
+                    save(cfg)
+                    bg.add_task(manager.reload_scheduler)
+            return {"ok": True, "name": watch_name, "action": action,
+                    "enabled": bool(w.enabled)}
+        if action == "disable":
+            if continuous:
+                bg.add_task(manager.stop_continuous, watch_name)     # a shelved watch stops too
             if w.enabled:
                 w.enabled = False
                 save(cfg)
@@ -4639,6 +4653,39 @@ def _primary_search_term(watch) -> str:
     return " ".join(_watch_focus_tokens(getattr(watch, "name", "") or ""))
 
 
+def _ensure_named_site_urls(card: dict, latest: str) -> dict:
+    """A CREATE card must cover every marketplace the request names. Live: "Watch Craigslist
+    and marketplace for a sailrite sewing machine..." + "Add Facebook marketplace" produced a
+    card whose instruction listed Craigslist, OfferUp AND Facebook Marketplace — and whose
+    urls were four craigslist searches. Same cure as v0.165's update guard: any named site
+    still missing gets a canonical search url from the card's own primary term."""
+    try:
+        urls = [u for u in (card.get("urls") or []) if isinstance(u, str)]
+        if not urls:
+            return card
+        from types import SimpleNamespace
+        term = _primary_search_term(SimpleNamespace(urls=urls, name=card.get("name", "")))
+        if not term:
+            return card
+        naming = f"{latest or ''} {card.get('instruction') or ''}".lower()
+        hay = " ".join(urls).lower()
+        added = []
+        for site, build in _SITE_URL_BUILDERS.items():
+            if site in naming and site not in hay:
+                urls.append(build(term))
+                added.append(site)
+        if added:
+            card = dict(card)
+            card["urls"] = urls
+            if "facebook" in added:
+                card["use_login_profile"] = True
+            log.info("chat: create card for %r named %s but had no url for them — added "
+                     "canonical searches for %r", card.get("name"), ", ".join(added), term)
+    except Exception as exc:
+        log.debug("named-site guarantee failed on create: %s", exc)
+    return card
+
+
 def _protect_additive_update(card: dict, latest: str, cfg) -> dict:
     """Deterministic guard: an ADDITIVE request must never shrink a watch's coverage.
 
@@ -4693,6 +4740,8 @@ def _ground_update_suggestions(suggestions: list, messages: list, focus: str | N
     kept = []
     for s in suggestions:
         if not isinstance(s, dict) or (s.get("action") or "create") != "update":
+            if isinstance(s, dict) and (s.get("action") or "create") == "create":
+                s = _ensure_named_site_urls(s, latest)
             kept.append(s)
             continue
         name = s.get("name", "")

@@ -353,11 +353,15 @@ def _w(cfg, name):
     return next(x for x in cfg.watches if x.name == name)
 
 
-def test_stopping_a_continuous_watch_disables_it(stop_app):
+def test_stopping_a_continuous_watch_keeps_it_enabled(stop_app):
+    """REVERSED from the pre-v0.142 workaround (stop used to disable, because per-watch
+    stops were no-ops under the orchestrator). The desired-run set now makes stop real,
+    and the workaround became a landmine: a chat "Stop all watches" disabled all seven,
+    so boots resumed nothing and the orchestrator never started."""
     client, cfg = stop_app
     r = client.post("/api/watches/Boats/action", json={"action": "stop"}).json()
-    assert r["ok"] is True and r["enabled"] is False
-    assert _w(cfg, "Boats").enabled is False          # the driver will not pick it up again
+    assert r["ok"] is True and r["enabled"] is True
+    assert _w(cfg, "Boats").enabled is True           # stopped, not shelved
 
 
 def test_stopping_a_scheduled_watch_still_disables_it(stop_app):
@@ -377,4 +381,41 @@ def test_stop_is_idempotent(stop_app):
     client, cfg = stop_app
     client.post("/api/watches/Boats/action", json={"action": "stop"})
     assert client.post("/api/watches/Boats/action", json={"action": "stop"}).json()["ok"] is True
-    assert _w(cfg, "Boats").enabled is False
+    assert _w(cfg, "Boats").enabled is True           # still just stopped, still not shelved
+
+
+# ── stop means stop-running, never disable ──────────────────────────────────────
+
+def test_chat_stop_does_not_disable_the_watch(monkeypatch):
+    """"Stop all watches" quietly set enabled=False on all seven — so every later boot
+    resumed nothing and the orchestrator never started ("0 continuous watches"). Stop is
+    the running lever; enabled is the active/inactive shelf."""
+    manager = MagicMock()
+    cfg = _cfg_one_macgregor()
+    cfg.watches[0].mode = "continuous"
+    cfg.watches[0].enabled = True
+    import web_watcher.config as C
+    monkeypatch.setattr(C, "load", lambda: cfg)
+    monkeypatch.setattr(C, "save", lambda c: (_ for _ in ()).throw(
+        AssertionError("stop must not rewrite config")))
+    client = TestClient(create_app(manager))
+    r = client.post("/api/watches/Anacortes MacGregor Sailboats Watch/action",
+                    json={"action": "stop"})
+    assert r.status_code == 200
+    assert cfg.watches[0].enabled is True                 # still on the active shelf
+    manager.stop_continuous.assert_called_once()          # ...but really stopped
+
+
+def test_disable_still_disables(monkeypatch):
+    manager = MagicMock()
+    cfg = _cfg_one_macgregor()
+    cfg.watches[0].mode = "continuous"
+    cfg.watches[0].enabled = True
+    import web_watcher.config as C
+    monkeypatch.setattr(C, "load", lambda: cfg)
+    monkeypatch.setattr(C, "save", lambda c: None)
+    client = TestClient(create_app(manager))
+    r = client.post("/api/watches/Anacortes MacGregor Sailboats Watch/action",
+                    json={"action": "disable"})
+    assert r.status_code == 200
+    assert cfg.watches[0].enabled is False

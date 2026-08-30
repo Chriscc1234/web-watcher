@@ -543,3 +543,29 @@ def test_show_me_the_watches_is_status_not_lookup():
     for t in ("show me the matches", "show me the latest match",
               "show me matches for the boats watch"):
         assert S._is_lookup_request(t), t
+
+
+# ── a create names three sites, its urls must cover three sites ─────────────────
+
+def test_create_card_gets_urls_for_every_named_site():
+    """Live (Charlie's first watch): instruction listed Craigslist, OfferUp AND Facebook
+    Marketplace — every url was craigslist. Named sites get canonical urls from the card's
+    own primary term; facebook flips the login profile on."""
+    card = {"action": "create", "name": "Sailrite Sewing Machine Watch",
+            "instruction": "Look for Sailrite sewing machines under $1000 on Craigslist, "
+                           "OfferUp, and Facebook Marketplace.",
+            "urls": ["https://seattle.craigslist.org/search/sss?query=Sailrite+sewing+machine"
+                     "&max_price=1000&postal=98101&search_distance=150"]}
+    out = S._ensure_named_site_urls(card, "Yes. Add Facebook marketplace to the watch list")
+    hay = " ".join(out["urls"]).lower()
+    assert "facebook.com/marketplace" in hay
+    assert "offerup.com/search" in hay
+    assert "sailrite+sewing+machine" in hay.replace("%20", "+")
+    assert out["use_login_profile"] is True
+    assert card["urls"][0] in out["urls"]                 # original coverage kept
+
+
+def test_create_card_with_no_named_sites_is_untouched():
+    card = {"action": "create", "name": "X", "instruction": "look for lamps",
+            "urls": ["https://seattle.craigslist.org/search/sss?query=lamp"]}
+    assert S._ensure_named_site_urls(card, "watch for lamps")["urls"] == card["urls"]

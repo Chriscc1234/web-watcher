@@ -930,11 +930,19 @@ def _run_agent_continuous_sweep(
             # search". humanized_search lands on the page WITHOUT the query and types it into
             # the site's own box with real key events; the URL fallback below remains for
             # sites where even that fails.
-            if cfg.browser.stealth:
+            # ...unless the query ALREADY went into the site's own box upstairs. Human-first
+            # nav returns False when it couldn't apply the location, but by then it has often
+            # typed the search — retyping it is the double-search tell (seen live on Facebook).
+            already = bool(getattr(page, "_ww_searched", False))
+            if cfg.browser.stealth and not already:
                 try:
                     typed = humanized_search(page, plan["start_url"])
                 except Exception as exc:
                     log.debug("agent sweep: humanized search errored, falling back: %s", exc)
+            elif already:
+                log.info("Continuous agent sweep %d for %r: search already typed into the "
+                         "site's own box — not typing it twice", sweep_index, watch.name)
+                typed = True
             if typed:
                 log.info("Continuous agent sweep %d for %r: typed the search like a person "
                          "→ %s", sweep_index, watch.name, page.url[:100])
@@ -1099,6 +1107,12 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     from urllib.parse import urlparse
     from web_watcher import navigate as N
 
+    # Fresh per navigation. The flag rides on the long-lived sweep page, so a stale True from
+    # a previous sweep would suppress typing forever after.
+    try:
+        setattr(page, "_ww_searched", False)
+    except Exception:
+        pass
     hint = N.hints_for(url)
     if not hint:
         return False
@@ -1125,6 +1139,14 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     dismiss_popups(page, settle_ms=0)
 
     applied = N.apply_search_request(page, req, hint)
+    # Remember what actually went into the page, even when we end up returning False. The
+    # caller's next rung TYPES THE SEARCH AGAIN, and on Facebook the user watched exactly
+    # that: the query typed once here, then a second time 9 seconds later in the Marketplace
+    # box. Nobody searches twice — it's a worse tell than the deep URL this was avoiding.
+    try:
+        setattr(page, "_ww_searched", bool(applied.get("searched")))
+    except Exception:
+        pass
     if not (applied.get("searched") or applied.get("categorized")):
         return False
     # Landing on the right page but DROPPING the zip/price would quietly widen the watch to the
@@ -1192,8 +1214,8 @@ def _run_continuous_sweep(
     # Fallback 1: TYPE the search term into the box but land via the (still parametric) URL —
     # humanizes the keyword only. Fallback 2: a direct goto. Both keep working for sites/cases
     # human-first can't fully drive yet (no hints, generic-category, non-search filters).
-    typed = False
-    if not drove and cfg.browser.stealth:
+    typed = bool(getattr(page, "_ww_searched", False))   # never type the same query twice
+    if not drove and not typed and cfg.browser.stealth:
         try:
             typed = humanized_search(page, url)
         except Exception as exc:

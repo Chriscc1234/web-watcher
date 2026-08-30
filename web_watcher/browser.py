@@ -47,7 +47,16 @@ NAV_TIMEOUT = 30_000
 
 # Chrome launch args that reduce automation fingerprinting
 _STEALTH_ARGS = [
-    "--disable-blink-features=AutomationControlled",
+    # NOT --disable-blink-features=AutomationControlled. It was here to hide automation, and
+    # in current Chrome it does the OPPOSITE: --disable-blink-features is on Chrome's
+    # bad-flags list, so the browser hangs a yellow "You are using an unsupported
+    # command-line flag" banner across the top — a banner no ordinary browser shows, seen on
+    # screen during a live Facebook run. The flag was also redundant: navigator.webdriver is
+    # already forced to false by an init script (_EXTRA_STEALTH_JS), which is the property
+    # the flag existed to influence, and that patch runs before any page script. Removing it
+    # loses nothing and removes the most visible tell on the page.
+    # The automation infobar the flag was often paired against is handled properly instead —
+    # see ignore_default_args=["--enable-automation"] on both launch paths.
     # NOT --disable-features=IsolateOrigins,site-per-process. Three strikes:
     #   1. Chrome shows a yellow "You are using an unsupported command-line flag" banner for it,
     #      because it switches off a SECURITY feature — a banner no ordinary browser displays,
@@ -678,6 +687,11 @@ class BrowserSession:
                     user_data_dir=str(self._profile_dir),
                     headless=self._headless,
                     args=self._launch_args(),
+                    # Playwright adds --enable-automation, which paints Chrome's "controlled by
+                    # automated test software" infobar. Dropping the DEFAULT arg is the clean
+                    # way to be rid of it — unlike a bad-flags switch, this leaves no banner of
+                    # its own behind.
+                    ignore_default_args=["--enable-automation"],
                     chromium_sandbox=sandbox,
                     **({"channel": channel} if channel else {}),
                     **ctx_kwargs,
@@ -735,6 +749,7 @@ class BrowserSession:
                 browser = self._pw.chromium.launch(
                     headless=self._headless,
                     args=self._launch_args(),
+                    ignore_default_args=["--enable-automation"],   # see the persistent path
                     chromium_sandbox=sandbox,
                     **({"channel": channel} if channel else {}),
                 )

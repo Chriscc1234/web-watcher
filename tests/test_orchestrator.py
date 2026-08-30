@@ -56,3 +56,31 @@ def test_status_shape_when_idle():
     o = _orch()
     s = o.status()
     assert s["running"] is False and s["cycles"] == 0 and s["topics"] == []
+
+
+# ── the service gap: a person checking back, not a metronome ─────────────────────
+
+def test_service_gap_is_randomised_above_the_floor():
+    """The scheduler always jittered its idle; the orchestrator's floor was EXACT, so a
+    single-watch rotation re-swept on a perfect clock. The gap now spans floor..3×floor."""
+    from web_watcher.orchestrator import _GAP_SPREAD
+    import random as _r
+    floor = 300
+    gaps = []
+    for seed in range(200):
+        _r.seed(seed)
+        gaps.append(floor * _r.uniform(1.0, _GAP_SPREAD))
+    assert min(gaps) >= floor                       # never faster than asked
+    assert max(gaps) <= floor * _GAP_SPREAD         # 5 min configured -> 5..15 min
+    assert len(set(round(g) for g in gaps)) > 50    # genuinely spread, not two values
+
+
+def test_stealth_args_carry_no_bad_flag():
+    """--disable-blink-features is on Chrome's bad-flags list: it paints the yellow
+    "unsupported command-line flag" banner, which is itself a tell. navigator.webdriver is
+    patched in JS instead."""
+    from web_watcher.browser import _STEALTH_ARGS, _CLEAN_ARGS, _EXTRA_STEALTH_JS
+    for args in (_STEALTH_ARGS, _CLEAN_ARGS):
+        assert not any("disable-blink-features" in a for a in args), args
+        assert not any("IsolateOrigins" in a or "site-per-process" in a for a in args), args
+    assert "navigator, 'webdriver'" in _EXTRA_STEALTH_JS      # the patch that replaces it

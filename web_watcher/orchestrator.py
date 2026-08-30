@@ -51,6 +51,9 @@ _PRODUCTIVITY_WEIGHT = 8.0
 _SCORE_JITTER = 12.0
 # Pause between cycles (a different topic each time) — small; sweep duration dominates.
 _CYCLE_IDLE = 8
+# How far above its configured idle a topic's gap may stretch. 3× turns "5 minutes" into a
+# 5–15 minute spread — a person checking back, not a cron job.
+_GAP_SPREAD = 3.0
 
 
 class Orchestrator:
@@ -182,12 +185,22 @@ class Orchestrator:
 
                 # Respect each topic's idle floor: if even the stalest pick was serviced very
                 # recently, everything is fresh — idle a beat rather than hammer a site.
+                # The per-topic gap. The scheduler has always jittered its idle (clockwork
+                # timing is an easy bot tell) but the orchestrator's floor was EXACT: with one
+                # watch in the rotation it re-swept on a perfect metronome — 15:00 after the
+                # last one, every time. The floor is now the LOWER bound of a randomised gap
+                # (1×–3× configured), so a 5-minute setting means "somewhere between 5 and 15
+                # minutes", never below what the watch asked for.
                 last = st.get("last_serviced")
                 floor = max(1, topic.continuous_idle_seconds)
-                if last is not None and (time.monotonic() - last) < floor:
-                    if self._idle(min(floor, 15)):
+                gap = st.get("gap")
+                if gap is None:
+                    gap = st["gap"] = floor * random.uniform(1.0, _GAP_SPREAD)
+                if last is not None and (time.monotonic() - last) < gap:
+                    if self._idle(min(gap, 15)):
                         break
                     continue
+                st.pop("gap", None)          # next visit draws a fresh interval
 
                 self._note("decision", self._decision_line(topic, st), watch=topic.name)
                 self._current = topic.name

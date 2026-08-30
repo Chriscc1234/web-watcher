@@ -24,6 +24,24 @@ from web_watcher.scheduler import WatchScheduler, _execute_watch
 from web_watcher.storage import get_history, get_last_run, init_db
 
 
+@pytest.fixture(autouse=True)
+def _instant_pacing(monkeypatch):
+    """Don't make the SUITE wait out the human pacing.
+
+    The deep-read path deliberately dwells on each ad (human_read: 8-46s) and pauses between
+    them (nap: 4-11s) — that pacing is the product, and it is tested for real in
+    test_human_read.py against a virtual clock. Here it was being SLEPT: one test spent 30.8s
+    and six more ~4.5s each, roughly two thirds of the whole suite's wall clock, proving
+    nothing these tests are about (details extraction, dedup, cross-watch offers).
+    """
+    import web_watcher.scheduler as sch
+    monkeypatch.setattr(sch, "human_read", lambda page, stop_event=None: 0.0)
+    monkeypatch.setattr(sch, "nap", lambda seconds, stop_event=None: True)
+    # ...and the 1.2s spacing between alert sends (so a burst doesn't hit Telegram's rate
+    # limit). Four tests sent 2-4 alerts each and paid for every gap.
+    monkeypatch.setattr(sch, "_ALERT_PACE_SECONDS", 0)
+
+
 # ---------------------------------------------------------------------------
 # Config fixture
 # ---------------------------------------------------------------------------
@@ -1052,3 +1070,47 @@ def test_rejected_examples_survive_a_storage_error(monkeypatch):
         raise RuntimeError("db gone")
     monkeypatch.setattr("web_watcher.storage.rejected_examples", _boom)
     assert sch._rejected_block(_cont_watch(judgment_prompt="x")) == ""   # never breaks a sweep
+
+
+# ── never search twice (the Facebook double-search) ─────────────────────────────
+
+def test_human_first_records_that_it_typed_even_when_it_returns_false(monkeypatch):
+    """Seen live on Facebook: the query was typed into the site's box, human-first then
+    returned False because the LOCATION didn't apply, and the caller's next rung typed the
+    same query again 9 seconds later. Nobody searches twice."""
+    import web_watcher.scheduler as sch
+    from web_watcher import navigate as N
+
+    page = MagicMock()
+    page.url = "https://www.facebook.com/marketplace/"
+    watch = _cont_watch()
+    watch.instruction = "Look for MacGregor sailboats near Seattle WA 98101"
+
+    monkeypatch.setattr(N, "hints_for", lambda url: {"search_box": "input"})
+    monkeypatch.setattr(N, "is_human_first_enabled", lambda url: True)
+    monkeypatch.setattr(N, "can_fully_drive", lambda req, hint: True)
+    # The real shape of the failure: searched OK, location did not take.
+    monkeypatch.setattr(N, "apply_search_request",
+                        lambda p, req, hint: {"searched": True, "categorized": False,
+                                              "located": False, "filtered": False})
+
+    req = N.build_search_request("https://www.facebook.com/marketplace/seattle/search?query=x",
+                                 watch.instruction)
+    assert req.zip, "the fixture must carry a zip for the location branch to fire"
+
+    drove = sch._human_first_navigate(
+        page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor", watch)
+    assert drove is False                       # location dropped → still falls back...
+    assert page._ww_searched is True            # ...but the caller knows not to retype
+
+
+def test_human_first_resets_the_typed_flag_each_navigation(monkeypatch):
+    """The flag rides on the long-lived sweep page — a stale True would suppress typing
+    forever after."""
+    import web_watcher.scheduler as sch
+    from web_watcher import navigate as N
+    page = MagicMock()
+    page._ww_searched = True                    # left over from a previous sweep
+    monkeypatch.setattr(N, "hints_for", lambda url: None)      # bails immediately
+    sch._human_first_navigate(page, "https://example.com/x", _cont_watch())
+    assert page._ww_searched is False

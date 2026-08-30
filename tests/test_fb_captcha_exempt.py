@@ -105,10 +105,14 @@ def test_hands_off_mode_uses_vanilla_launch_flags():
     assert not any("IsolateOrigins" in a for a in hands_off)
     assert not any("AutomationControlled" in a for a in hands_off)
     assert "--no-first-run" in hands_off            # harmless first-run nags still suppressed
-    # The sweep path keeps its automation-hiding flag; site isolation now stays ON for BOTH
-    # (see below — the carve-out became the policy).
+    # The sweep path USED to keep --disable-blink-features=AutomationControlled. It no longer
+    # does, and that carve-out became the policy for the same reason as site isolation: the
+    # switch is on Chrome's bad-flags list, so it paints the yellow "unsupported command-line
+    # flag" banner — seen on screen during a live Facebook run. navigator.webdriver is forced
+    # to false by an init script instead, which is what the flag was for.
     normal = BrowserSession(headless=False, persistent=True)._launch_args()
-    assert any("AutomationControlled" in a for a in normal)
+    assert not any("AutomationControlled" in a for a in normal)
+    assert not any("disable-blink-features" in a for a in normal)
 
 
 def test_site_isolation_is_never_disabled():

@@ -3023,7 +3023,7 @@ def _watch_named_in(text: str, cfg, owner) -> str:
     focus set, the lookup ran unscoped and returned boats mixed with a Nissan Rogue from the
     other one. Returns "" unless EXACTLY ONE watch matches, because acting on an ambiguous
     reference is how the wrong watch gets shown."""
-    words = {w for w in re.findall(r"[a-z0-9']+", (text or "").lower())
+    words = {w for w in _text_token_set(text)
              if len(w) > 2 and w not in _WATCH_NAME_NOISE}
     if not words:
         return ""
@@ -4222,16 +4222,43 @@ def _latest_user_text(messages: list) -> str:
     return ""
 
 
-def _watch_referenced_in(text: str, name: str) -> bool:
-    """True if `text` actually names this watch — enough distinctive tokens overlap (all of them
-    for a one-word name, ≥2 otherwise). Reuses _watch_focus_tokens so the site suffix is ignored."""
+def _text_token_set(text: str) -> set:
+    """Tokens of `text`, PLUS adjacent-token concatenations, so separator spellings still
+    name the thing they name. Live failure, verbatim: "Let's have the x/19 look on facebook"
+    tokenizes to {x, 19} while the watch is "Fiat X19 Cars Watch" ({x19, ...}) — zero overlap,
+    and a perfectly correct edit card was dropped as ungrounded while the user's "Yes" sat
+    waiting to apply it. x/19, x-19, x 19, x1/9 all concatenate back to the stored token."""
+    raw = re.findall(r"[a-z0-9]+", (text or "").lower())
+    out = set(raw)
+    for i in range(len(raw) - 1):
+        out.add(raw[i] + raw[i + 1])
+        if i < len(raw) - 2:
+            out.add(raw[i] + raw[i + 1] + raw[i + 2])
+    return out
+
+
+def _watch_referenced_in(text: str, name: str, cfg=None) -> bool:
+    """True if `text` actually names this watch.
+
+    Two tokens of the name normally have to appear — one shared word ("cars") must not bind a
+    multi-word name. But ONE token suffices when it is UNIQUE to this watch across the config:
+    "the x/19" names the Fiat X19 watch as plainly as its full title does, and requiring a
+    second word is how a correct edit card got dropped while the user's "Yes" sat waiting.
+    Reuses _watch_focus_tokens so the site suffix is ignored."""
     toks = _watch_focus_tokens(name)
     if not toks:
         return False
-    low = set(re.findall(r"[a-z0-9]+", (text or "").lower()))
-    hits = sum(1 for t in toks
-               if t in low or (t.endswith("s") and t[:-1] in low) or (t + "s") in low)
-    return hits >= min(2, len(toks))
+    low = _text_token_set(text)
+    hit_toks = [t for t in toks
+                if t in low or (t.endswith("s") and t[:-1] in low) or (t + "s") in low]
+    if len(hit_toks) >= min(2, len(toks)):
+        return True
+    if len(hit_toks) == 1 and cfg is not None:
+        t = hit_toks[0]
+        holders = sum(1 for w in getattr(cfg, "watches", [])
+                      if t in _watch_focus_tokens(w.name))
+        return holders == 1
+    return False
 
 
 # ── Start/stop intent (the master switch vs a person's own watches) ───────────────
@@ -4451,7 +4478,8 @@ def _is_hard_chat_turn(messages: list, focus: str | None) -> bool:
     return bool(_CHANGE_SIGNAL_RE.search(text) or _HARD_CHAT_RE.search(text))
 
 
-def _ground_update_suggestions(suggestions: list, messages: list, focus: str | None) -> list:
+def _ground_update_suggestions(suggestions: list, messages: list, focus: str | None,
+                               cfg=None) -> list:
     """Deterministic guard against SPURIOUS edit cards. The small extract model sometimes proposes
     'update' actions for existing watches the user never mentioned (the reported "2 cards to edit
     even though I wasn't talking about them"). An update survives ONLY when the user's own latest
@@ -4467,7 +4495,8 @@ def _ground_update_suggestions(suggestions: list, messages: list, focus: str | N
             kept.append(s)
             continue
         name = s.get("name", "")
-        grounded = all_watches or (bool(name) and name == focus) or _watch_referenced_in(latest, name)
+        grounded = (all_watches or (bool(name) and name == focus)
+                    or _watch_referenced_in(latest, name, cfg))
         if asked_change and grounded:
             kept.append(s)
         else:
@@ -4854,7 +4883,7 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # extract model sometimes proposes edits to existing watches that were never mentioned
         # (the "2 edit cards I wasn't talking about" bug); an edit survives only when the user's
         # own latest message asks for a change AND points at that watch. Creates are untouched.
-        suggestions = _ground_update_suggestions(suggestions, messages, focus)
+        suggestions = _ground_update_suggestions(suggestions, messages, focus, cfg)
         # A BARE "yes"/"no"/"ok" answers the assistant's own last question — it can never name a
         # new thing to watch. Without this, "show me the matches" → "want to see them?" → "Yes"
         # came back as "I'll set up that watch", hijacking the conversation with a create card.

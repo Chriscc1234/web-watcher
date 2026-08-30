@@ -392,3 +392,44 @@ def test_watch_runtime_actually_works(monkeypatch):
     # An enabled, continuous watch the rotation is NOT holding must read as stopped.
     m._orchestrator = types.SimpleNamespace(is_servicing=lambda name, cfg=None: False)
     assert m.watch_runtime("Fiat") == {"running": False, "engine": None, "sweeping_now": False}
+
+
+# ── separator spellings + distinctive single tokens must ground an edit ─────────
+
+def _ground_cfg():
+    from types import SimpleNamespace
+    return SimpleNamespace(watches=[
+        SimpleNamespace(name="Fiat X19 Cars Watch"),
+        SimpleNamespace(name="Facebook Marketplace Watch"),
+        SimpleNamespace(name="Facebook Tacoma Trucks Watch"),
+        SimpleNamespace(name="Anacortes Manual Transmission Cars Watch"),
+    ])
+
+
+def test_separator_spellings_name_the_watch():
+    """Live failure, verbatim: "Let's have the x/19 look on facebook as well" — the extractor
+    built a CORRECT edit card for 'Fiat X19 Cars Watch' and the grounding guard dropped it
+    (x/19 tokenized to {x, 19}; the name holds x19). The user's "Yes" sat waiting to apply a
+    card that no longer existed. Adjacent-token concatenation closes the spelling gap."""
+    cfg = _ground_cfg()
+    for t in ("Let's have the x/19 look on facebook as well", "the x 1/9 one",
+              "raise the x-19 budget"):
+        assert S._watch_referenced_in(t, "Fiat X19 Cars Watch", cfg), t
+
+
+def test_one_distinctive_token_grounds_but_a_shared_one_does_not():
+    """"edit the fiat watch" carries ONE name token — but 'fiat' is unique to that watch, so
+    it grounds. 'cars' appears in two watches, so it alone must NOT."""
+    cfg = _ground_cfg()
+    assert S._watch_referenced_in("edit the fiat watch", "Fiat X19 Cars Watch", cfg)
+    assert not S._watch_referenced_in("stop the cars watch", "Fiat X19 Cars Watch", cfg)
+    assert not S._watch_referenced_in("look on facebook", "Fiat X19 Cars Watch", cfg)
+
+
+def test_grounding_guard_keeps_the_x19_edit_card():
+    """End-to-end through _ground_update_suggestions with the live message."""
+    msgs = [{"role": "user", "content": "Let\u2019s have the x/19 look on facebook as well"}]
+    card = {"action": "update", "name": "Fiat X19 Cars Watch",
+            "urls": ["https://www.facebook.com/marketplace/seattle/search?query=fiat+x1%2F9"]}
+    kept = S._ground_update_suggestions([card], msgs, focus=None, cfg=_ground_cfg())
+    assert kept == [card]

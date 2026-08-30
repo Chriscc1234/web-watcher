@@ -1258,3 +1258,40 @@ def test_drip_runs_even_when_the_read_backlog_is_empty(monkeypatch, tmp_path):
     watch.instruction = "MacGregor sailboats"
     assert sch._explore_matches(watch, MagicMock(), tmp_path / "db", MagicMock()) == 0
     assert dripped == [watch.name], "the drip was skipped by the early return"
+
+
+# ── quiet hours: a human sleeps ─────────────────────────────────────────────────
+
+def test_quiet_hours_apply_only_to_quiet_listed_sites():
+    """A "user" who browses Facebook at 3:47am every night is a heartbeat no jitter hides.
+    Craigslist has no such stakes — overnight coverage there stays."""
+    import web_watcher.scheduler as sch
+    from types import SimpleNamespace
+    from datetime import datetime
+    fb = SimpleNamespace(urls=["https://www.facebook.com/marketplace/x/search?query=y"], name="FB")
+    cl = SimpleNamespace(urls=["https://seattle.craigslist.org/search/cta"], name="CL")
+    night, noon = datetime(2026, 8, 30, 3, 30), datetime(2026, 8, 30, 12, 30)
+    assert sch._in_quiet_hours(fb, night) is True
+    assert sch._in_quiet_hours(cl, night) is False
+    assert sch._in_quiet_hours(fb, noon) is False
+
+
+def test_quiet_window_drifts_per_day_but_is_stable_within_one():
+    import web_watcher.scheduler as sch
+    from datetime import datetime
+    a1 = sch._quiet_window_today(datetime(2026, 8, 30, 2))
+    a2 = sch._quiet_window_today(datetime(2026, 8, 30, 23))
+    b = sch._quiet_window_today(datetime(2026, 8, 31, 2))
+    assert a1 == a2                       # one day, one schedule
+    assert a1 != b                        # no two days match
+
+
+def test_quiet_skip_does_not_feed_the_blind_scraper_streak(monkeypatch):
+    """The scraper-path skip must return -1 ("couldn't run") — returning None counted as a
+    clean-empty sweep and streaked toward a false agent escalation."""
+    import web_watcher.scheduler as sch
+    from types import SimpleNamespace
+    fb = SimpleNamespace(urls=["https://www.facebook.com/marketplace/x"], name="FB")
+    monkeypatch.setattr(sch, "_in_quiet_hours", lambda w, now=None: True)
+    assert sch._run_continuous_sweep(fb, None, None, 0, None) == -1
+    assert sch._run_agent_continuous_sweep(fb, None, None, 0, None) is None

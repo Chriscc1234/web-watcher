@@ -1241,6 +1241,30 @@ def human_read(page, stop_event=None) -> float:
         except Exception:
             viewport = 800
         max_depth = int(viewport * _READ_MAX_SCREENS)
+        # THE AD ENDS WHERE THE RECOMMENDATIONS BEGIN. The screen bound alone still let a
+        # third of each dwell drift into Facebook's "Today's picks" grid under the listing
+        # (seen frame-by-frame in the run-#4 videos). A buyer's eyes stay on the ad: when a
+        # recommendations heading is on the page, the scroll stops just above it. Best-effort
+        # and generic — sites without such a heading keep the plain screen bound.
+        try:
+            bound = page.evaluate(
+                """() => {
+                  const marks = ['today\\'s picks', 'more like this', 'similar items',
+                                 'related items', 'sponsored', 'explore more'];
+                  let best = 0;
+                  for (const el of document.querySelectorAll('h2,h3,span,div')) {
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    if (t.length && t.length < 40 && marks.some(m => t === m || t.startsWith(m))) {
+                      const y = el.getBoundingClientRect().top + window.scrollY;
+                      if (y > 200 && (!best || y < best)) best = y;
+                    }
+                  }
+                  return best;
+                }""") or 0
+            if bound:
+                max_depth = max(0, min(max_depth, int(bound) - int(viewport * 0.8)))
+        except Exception:
+            pass
         depth = 0                      # net pixels scrolled down from the top of the ad
 
         # 2. Work down through the ad in reading passes, pausing where the text is.

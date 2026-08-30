@@ -760,6 +760,41 @@ def _exploration_plan(sweep_index: int, watch: Watch) -> dict:
     }
 
 
+# ── Quiet hours: a human sleeps ──────────────────────────────────────────────────
+# Sites that watch for automation notice a "user" who browses at 3:47am every single night
+# more surely than any single-session tell — no rhythm jitter hides a heartbeat that never
+# stops. Facebook sweeps pause overnight; the window's edges drift per day (seeded by the
+# date, so one day's schedule is stable but no two days match). Other sites are untouched:
+# nobody bans a craigslist scroll at 4am, and the user may genuinely want overnight coverage
+# there.
+_QUIET_SITES = ("facebook",)
+_QUIET_START_H, _QUIET_END_H = 0.75, 7.0      # ~00:45 → ~07:00 local, before jitter
+
+
+def _quiet_window_today(now=None):
+    """(start_hour, end_hour) for today, edges jittered ±25 min, deterministic per date."""
+    from datetime import datetime
+    now = now or datetime.now()
+    rnd = random.Random(now.strftime("%Y%m%d") + "quiet")
+    return (_QUIET_START_H + rnd.uniform(-0.42, 0.42),
+            _QUIET_END_H + rnd.uniform(-0.42, 0.42))
+
+
+def _in_quiet_hours(watch, now=None) -> bool:
+    """Should this watch sit out the current hour? Only quiet-listed sites ever do."""
+    try:
+        hosts = " ".join(urlparse(u).netloc.lower() for u in (watch.urls or []))
+        if not any(q in hosts for q in _QUIET_SITES):
+            return False
+        from datetime import datetime
+        now = now or datetime.now()
+        h = now.hour + now.minute / 60.0
+        start, end = _quiet_window_today(now)
+        return start <= h < end
+    except Exception:
+        return False
+
+
 def _run_agent_continuous_sweep(
     watch:   Watch,
     cfg:     AppConfig,
@@ -775,6 +810,11 @@ def _run_agent_continuous_sweep(
     pipeline. This is the "watch all day like a human" path; the scraper sweep is the
     cheaper, non-agent alternative.
     """
+    if _in_quiet_hours(watch):
+        log.info("Quiet hours for %r — a person is asleep; skipping this sweep "
+                 "(resumes after ~%02d:00)", watch.name, int(_quiet_window_today()[1]))
+        return
+
     from web_watcher.agent import run_agent
 
     run_ts = datetime.now(timezone.utc).isoformat()
@@ -1272,6 +1312,11 @@ def _run_continuous_sweep(
     (navigation failure / login wall) — the caller uses a run of 0-harvest sweeps to detect
     a site the scraper is blind to (a JS/SPA site) and auto-escalate it to the agent.
     """
+    if _in_quiet_hours(watch):
+        log.info("Quiet hours for %r — a person is asleep; skipping this sweep "
+                 "(resumes after ~%02d:00)", watch.name, int(_quiet_window_today()[1]))
+        return -1                     # 'couldn't run' — must not feed the blind-scraper streak
+
     run_ts   = datetime.now(timezone.utc).isoformat()
     # Self-heal the URL's location from the watch instruction (fixes an existing watch whose
     # stored craigslist/eBay URL points at the wrong region), then apply the sweep variation.

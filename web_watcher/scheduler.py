@@ -1880,6 +1880,21 @@ def _process_sweep_listings(
     ), db_path)
 
 
+def _remembered_running_set():
+    """The desired-run set, read straight from the file (tri-state, same semantics as
+    WatchScheduler._remembered_running): None = never recorded (legacy: treat every enabled
+    watch as wanted), a set = exactly what the user wants running."""
+    try:
+        import json as _json
+        from web_watcher import paths
+        f = paths.data_dir() / "continuous_running.json"
+        if f.exists():
+            return set(_json.loads(f.read_text(encoding="utf-8")) or [])
+    except Exception:
+        pass
+    return None
+
+
 def _cross_watch_match(
     source_watch: Watch,
     cfg:          AppConfig,
@@ -1906,10 +1921,17 @@ def _cross_watch_match(
       • Every candidate is marked seen for the other watch afterwards (match or not) so the
         same listing isn't re-judged every sweep. The source watch's own state is untouched.
     """
+    # STOPPED MEANS STOPPED. `enabled` alone let a watch the user had explicitly stopped
+    # keep receiving cross-watch inventory — 52 sailboats judged against the stopped Fiat
+    # watch's criteria in one sweep (wasted GPU), and a genuine Fiat would have ALERTED from
+    # a watch the user was told is stopped. Same principle as the v0.144 outage fix: the
+    # desired-run set is the authority, not a derived guess.
+    desired = _remembered_running_set()
     others = [
         w for w in cfg.watches
         if w.name != source_watch.name
         and w.enabled and w.mode == "continuous" and w.judgment_prompt
+        and (desired is None or w.name in desired)
     ]
     if not others:
         return
@@ -1925,6 +1947,12 @@ def _cross_watch_match(
             if not candidates:
                 continue
 
+            # Say WHOSE criteria the next rated-N lines belong to. Without this they print
+            # inside the source sweep's output and read as criteria bleed — a MacGregor
+            # sweep apparently rejecting sailboats with "Not a Fiat X19".
+            log.info("Cross-watch: offering %d fresh listing(s) from %r to %r — the "
+                     "following verdicts are %r judging",
+                     len(candidates), source_watch.name, other.name, other.name)
             # fail_closed: if the judge errors, do NOT inject un-judged listings into another
             # watch — that's exactly how a sports car leaks into the trucks results.
             matched = _filter_listings_by_judgment(candidates, other, cfg, fail_closed=True)

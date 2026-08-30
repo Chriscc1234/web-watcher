@@ -163,3 +163,45 @@ def test_reload_under_the_orchestrator_starts_no_per_watch_loop(tmp_path, monkey
     s._orchestrator_owns = False
     s._load_jobs()
     assert started == ["A"]                 # ...and without a driver, it resumes as before
+
+
+# ── stopped means stopped, for cross-watch too ──────────────────────────────────
+
+def test_cross_watch_skips_watches_the_user_stopped(monkeypatch, tmp_path):
+    """Live: the boat sweep offered 52 sailboats to the STOPPED Fiat watch — wasted GPU, and
+    a genuine hit would have ALERTED from a watch the user was told is stopped. The desired-
+    run set is the authority (the v0.144 principle), enabled alone is not."""
+    import web_watcher.scheduler as sch
+    from web_watcher.config import AppConfig, Watch
+
+    fiat = Watch(name="Fiat", urls=["https://x"], instruction="fiat", interval_minutes=30,
+                 mode="continuous", enabled=True, judgment_prompt="Is it a Fiat X19?")
+    boat = Watch(name="Boat", urls=["https://y"], instruction="macgregor", interval_minutes=30,
+                 mode="continuous", enabled=True, judgment_prompt="Is it a MacGregor?")
+    cfg = AppConfig(watches=[fiat, boat])
+
+    judged = []
+    monkeypatch.setattr(sch, "_filter_listings_by_judgment",
+                        lambda cand, other, cfg, fail_closed=True:
+                        judged.append(other.name) or [])
+    monkeypatch.setattr(sch, "count_seen_listings", lambda name, db: 5)
+    monkeypatch.setattr(sch, "has_seen_listing", lambda name, key, db: False)
+    monkeypatch.setattr(sch, "save_seen_listing", lambda *a, **k: None)
+    fresh = [sch.Listing(key="k1", url="https://l/1", title="t", price="")]
+
+    # Desired set says only Boat should run -> the stopped Fiat gets NOTHING.
+    monkeypatch.setattr(sch, "_remembered_running_set", lambda: {"Boat"})
+    sch._cross_watch_match(boat, cfg, tmp_path / "db", fresh, "2026-08-29T00:00:00")
+    assert judged == []
+
+    # Fiat back in the desired set -> it participates again.
+    monkeypatch.setattr(sch, "_remembered_running_set", lambda: {"Boat", "Fiat"})
+    sch._cross_watch_match(boat, cfg, tmp_path / "db", fresh, "2026-08-29T00:00:00")
+    assert judged == ["Fiat"]
+
+    # Legacy install (no record) -> old behavior: every enabled watch participates.
+    judged.clear()
+    monkeypatch.setattr(sch, "_remembered_running_set", lambda: None)
+    monkeypatch.setattr(sch, "has_seen_listing", lambda name, key, db: False)
+    sch._cross_watch_match(boat, cfg, tmp_path / "db", fresh, "2026-08-29T00:00:00")
+    assert judged == ["Fiat"]

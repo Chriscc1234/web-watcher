@@ -1337,6 +1337,9 @@ def _run_continuous_sweep(
 # How many previously-banked matches to go back and read per sweep. Small on purpose: this
 # runs IN ADDITION to the sweep's own deep-reads, and each one is a real ~10-45s page visit.
 _EXPLORE_BACKLOG_PER_SWEEP = 4
+# Rating floor for pushing a match nobody ever saw. A watch with its own min_rating uses that;
+# otherwise only genuine 4-5 star finds are worth an unprompted card days after the fact.
+_DRIP_MIN_RATING = 4
 
 
 def _explore_matches(watch, cfg, db_path, page, stop_event=None) -> int:
@@ -1401,9 +1404,47 @@ def _explore_matches(watch, cfg, db_path, page, stop_event=None) -> int:
         if read:
             log.info("Continuous watch %r: filled in the ad details for %d earlier match(es)",
                      watch.name, read)
+        _drip_unalerted(watch, cfg, db_path, run_ts=datetime.now(timezone.utc).isoformat())
         return read
     except Exception as exc:
         log.debug("explore-matches pass failed for %r: %s", watch.name, exc)
+        return 0
+
+
+def _drip_unalerted(watch, cfg, db_path, run_ts: str) -> int:
+    """Push matches that were found but never actually shown to anyone.
+
+    THE HOLE THIS CLOSES: a baseline sweep judges and records its matches without alerting —
+    correctly, or a fresh watch fires a wall of cards. But those rows are then marked seen, so
+    they can never be "new" again, and nothing downstream ever offered them. Fifteen real
+    MacGregor matches sat in Results for two days, deep-read, archived, and invisible from the
+    user's phone: "i see results in the results tab but they were never pushed to my telegram".
+
+    Paced by the watch's own continuous_max_alerts, so a backlog drips out over sweeps instead
+    of arriving as the burst the baseline guard existed to prevent. Only reads that have a body
+    (an unread match has nothing to say beyond its title) and only real matches by rating.
+    """
+    try:
+        from web_watcher.storage import unalerted_matches
+        cap = max(1, watch.continuous_max_alerts)
+        floor = watch.min_rating if getattr(watch, "min_rating", None) else _DRIP_MIN_RATING
+        rows = unalerted_matches(watch.id or watch.name, min_rating=floor,
+                                 limit=cap, db_path=db_path)
+        if not rows:
+            return 0
+        batch = []
+        for r in rows:
+            l = Listing(key=r["listing_key"], url=r.get("url") or "",
+                        title=r.get("title") or "", price=r.get("price_text") or "")
+            l.rating = r.get("rating")
+            l.judge_reason = r.get("judge_reason") or ""
+            l.image = r.get("image") or ""
+            batch.append(l)
+        log.info("Continuous watch %r: %d earlier match(es) were never sent — pushing now "
+                 "(paced at %d/sweep)", watch.name, len(batch), cap)
+        return _alert_new_listings(watch, cfg, batch, run_ts, db_path)
+    except Exception as exc:
+        log.debug("drip of unalerted matches failed for %r: %s", watch.name, exc)
         return 0
 
 
@@ -2493,6 +2534,14 @@ def _alert_new_listings(
                 owner_chat_id=getattr(watch, "owner", "") or "",
             )
             _mark_seen(l)   # only after a send attempt that didn't raise
+            # Distinct from 'seen': this one was actually PUSHED. A baseline marks its
+            # matches seen so they don't fire a wall of alerts, so 'seen' alone can never
+            # tell "we told you" from "we deliberately didn't".
+            try:
+                from web_watcher.storage import mark_alerted
+                mark_alerted(watch.id or watch.name, l.key, db_path=db_path)
+            except Exception:
+                pass
             sent += 1
         except Exception as exc:
             log.warning("Alert send failed for %r (%s) — will retry next sweep", watch.name, exc)

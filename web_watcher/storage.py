@@ -228,6 +228,12 @@ def init_db(db_path: Path | None = None) -> None:
         # sweep can't bring it back (see record_observation), and it never shows as matched again.
         if "excluded" not in obs_cols:
             conn.execute("ALTER TABLE observations ADD COLUMN excluded INTEGER DEFAULT 0")
+        # Migration: `alerted` — was this match actually PUSHED to the person?
+        # seen_listings could never answer that: a baseline marks its matches seen precisely
+        # so they don't alert, so "seen" conflates "we told you" with "we deliberately didn't".
+        # Fifteen real MacGregor matches sat in Results, permanently unpushable, because of it.
+        if "alerted" not in obs_cols:
+            conn.execute("ALTER TABLE observations ADD COLUMN alerted INTEGER DEFAULT 0")
         # Migration: add `understanding` (JSON: what KIND of site this is, what its search box
         # does, whether it's viable to watch) to a pre-existing site_profiles table.
         sp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(site_profiles)").fetchall()]
@@ -465,6 +471,48 @@ def record_observation(
             """,
             (watch_id, watch_name, listing_key, ts, ts, int(matched), rating, judge_reason),
         )
+
+
+def mark_alerted(watch_id: str, listing_key: str, db_path: Path | None = None) -> None:
+    """Record that this match was actually PUSHED to the person. Distinct from 'seen' — a
+    baseline marks its matches seen so they don't fire a wall of alerts, which is exactly how
+    a match ends up recorded, deep-read, and never shown to anybody."""
+    if not watch_id or not listing_key:
+        return
+    try:
+        with _connect(_resolve(db_path)) as conn:
+            conn.execute("UPDATE observations SET alerted=1 WHERE watch_id=? AND listing_key=?",
+                         (watch_id, listing_key))
+    except Exception as exc:
+        log.debug("could not mark %s alerted: %s", listing_key, exc)
+
+
+def unalerted_matches(watch_id: str, min_rating: int = 4, limit: int = 50,
+                      db_path: Path | None = None) -> list[dict]:
+    """Matches this watch found and never pushed — best-rated first, then oldest.
+
+    Only rows with a body already read (details non-empty): an unread match has nothing to
+    say in an alert card beyond its title, and the deep-read backlog is about to reach it."""
+    try:
+        with _connect(_resolve(db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT o.listing_key, o.rating, o.judge_reason, l.url, l.title, l.price_text,
+                       l.image, l.details
+                  FROM observations o JOIN listings l ON l.listing_key = o.listing_key
+                 WHERE o.watch_id = ? AND o.matched = 1
+                   AND COALESCE(o.excluded, 0) = 0 AND COALESCE(o.alerted, 0) = 0
+                   AND COALESCE(o.rating, 0) >= ?
+                   AND TRIM(COALESCE(l.details, '')) <> ''
+                 ORDER BY o.rating DESC, o.first_seen ASC
+                 LIMIT ?
+                """,
+                (watch_id, int(min_rating), int(limit)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        log.debug("unalerted_matches failed for %s: %s", watch_id, exc)
+        return []
 
 
 def set_listing_archive(listing_key: str, path: str, db_path: Path | None = None) -> None:

@@ -323,3 +323,43 @@ def test_clear_watch_results_missing_db_is_safe(tmp_path):
     from web_watcher.storage import clear_watch_results
     removed = clear_watch_results(watch_id="x", watch_name="y", db_path=tmp_path / "nope.db")
     assert removed == {"observations": 0, "seen": 0, "listings": 0}
+
+
+# ── alerted vs seen: the hole the baseline left ─────────────────────────────────
+
+def test_unalerted_matches_finds_what_was_never_pushed(tmp_path):
+    """A baseline records its matches WITHOUT alerting (else a fresh watch fires a wall of
+    cards) and marks them seen — so 'seen' can never distinguish "we told you" from "we
+    deliberately didn't". Fifteen real matches sat in Results, unpushable."""
+    from web_watcher import storage as S
+    db = tmp_path / "t.db"
+    S.init_db(db)
+
+    for key, rating, details in (("k1", 5, "a real ad body"),
+                                 ("k2", 4, "another body"),
+                                 ("k3", 2, "junk body"),          # too low to push
+                                 ("k4", 5, "")):                  # not read yet
+        S.upsert_listing(key, source="facebook.com", url=f"https://x/{key}",
+                         title=f"boat {key}", details=details, ts="2026-08-28T02:36:00", db_path=db)
+        S.record_observation("w1", "W", key, "2026-08-28T02:36:00", matched=rating >= 4,
+                             rating=rating, db_path=db)
+
+    keys = [r["listing_key"] for r in S.unalerted_matches("w1", db_path=db)]
+    assert keys == ["k1", "k2"]            # best-rated first; junk and unread excluded
+
+    S.mark_alerted("w1", "k1", db_path=db)
+    assert [r["listing_key"] for r in S.unalerted_matches("w1", db_path=db)] == ["k2"]
+
+
+def test_excluded_matches_are_never_dripped(tmp_path):
+    """A listing the user hand-removed must not come back as an unprompted card."""
+    from web_watcher import storage as S
+    db = tmp_path / "t.db"
+    S.init_db(db)
+    S.upsert_listing("k1", source="s", url="https://x/1", title="t", details="body",
+                     ts="2026-08-28T00:00:00", db_path=db)
+    S.record_observation("w1", "W", "k1", "2026-08-28T00:00:00", matched=True,
+                         rating=5, db_path=db)
+    with S._connect(db) as conn:
+        conn.execute("UPDATE observations SET excluded=1 WHERE listing_key='k1'")
+    assert S.unalerted_matches("w1", db_path=db) == []

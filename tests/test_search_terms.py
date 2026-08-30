@@ -36,3 +36,25 @@ def test_generated_junk_is_dropped(monkeypatch):
     out = expand_search_terms("macgregor sailboats", "m")
     assert "MacGregor sailboat" in out and "MacGregor 26" in out
     assert "within 300 miles" not in out and "near Anacortes" not in out
+
+
+# ── modifier variants are junk only next to their sibling ───────────────────────
+
+def test_modifier_variants_collapse_into_the_real_term():
+    """Charlie's expansion, verbatim: three dressed-up Sailrites next to the real term.
+    "Seattle Sailrite" is a city typed as a keyword — the same bot-tell the location-box
+    guard exists for."""
+    from web_watcher.search_terms import _drop_modifier_variants
+    got = _drop_modifier_variants(["Sailrite sewing machine", "affordable Sailrite",
+                                   "northwest Sailrite", "Seattle Sailrite"])
+    assert got == ["Sailrite sewing machine"]
+
+
+def test_brands_that_look_like_modifiers_survive():
+    """"Western Flyer" is a bicycle brand; a bare compass rule would eat it. Junk is only
+    junk RELATIVE TO A SIBLING that already carries the item."""
+    from web_watcher.search_terms import _drop_modifier_variants
+    terms = ["western flyer bicycle", "vintage bicycle"]
+    assert _drop_modifier_variants(terms) == terms
+    # And a lone term is never eaten, whatever it starts with.
+    assert _drop_modifier_variants(["Seattle Sailrite"]) == ["Seattle Sailrite"]

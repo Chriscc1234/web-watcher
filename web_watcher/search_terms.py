@@ -47,6 +47,60 @@ _JUNK_TERM_RE = re.compile(
     re.I)
 
 
+# Modifier-plus-item junk: the expander dressed Charlie's Sailrite up three ways —
+# "affordable Sailrite" (a price adjective is not a thing), "northwest Sailrite" (a compass
+# region), "Seattle Sailrite" (a CITY typed as a keyword — the exact bot-tell the agent's
+# location-box guard exists for). BUT a modifier word can also be part of a BRAND ("Western
+# Flyer" bicycles), so this is only junk RELATIVE TO SIBLINGS: "northwest Sailrite" is junk
+# because "Sailrite ..." stands beside it in the same expansion. See _drop_modifier_variants;
+# _is_junk_term stays absolute (a lone user-typed term must never be eaten by a compass word).
+_MODIFIER_JUNK_RE = re.compile(
+    r"^(?:affordable|cheap|bargain|inexpensive|discount(?:ed)?|low[- ]?cost|budget|"
+    r"local|nearby|"
+    r"north(?:ern|west(?:ern)?|east(?:ern)?)?|south(?:ern|west(?:ern)?|east(?:ern)?)?|"
+    r"east(?:ern)?|west(?:ern)?)\s+(\S.*)$", re.I)
+
+
+def _leading_place_rest(term: str) -> str | None:
+    """The term minus its leading town name ("Seattle Sailrite" → "Sailrite"), else None."""
+    words = (term or "").split()
+    if len(words) < 2 or len(words) > 3 or any(ch.isdigit() for ch in term):
+        return None
+    try:
+        from web_watcher.cl_geo import place_latlon
+        if place_latlon(words[0]) is not None:
+            return " ".join(words[1:])
+    except Exception:
+        pass
+    return None
+
+
+def _drop_modifier_variants(terms: list[str]) -> list[str]:
+    """Drop modifier+item variants whose ITEM already lives in a sibling term. Junk only in
+    context: with "Sailrite sewing machine" present, "Seattle Sailrite" / "northwest
+    Sailrite" / "affordable Sailrite" add nothing but a bot-tell; alone, "western flyer
+    bicycle" is a brand and survives untouched."""
+    sibling_words = {}
+    for t in terms:
+        sibling_words[t] = {w.lower() for w in t.split()}
+    out = []
+    for t in terms:
+        rest = None
+        m = _MODIFIER_JUNK_RE.match(t or "")
+        if m:
+            rest = m.group(1)
+        else:
+            rest = _leading_place_rest(t)
+        if rest:
+            rest_words = {w.lower() for w in rest.split()}
+            covered = any(rest_words <= ws for o, ws in sibling_words.items() if o != t)
+            if covered:
+                log.info("Dropping junk search term %r (modifier variant of a sibling term)", t)
+                continue
+        out.append(t)
+    return out
+
+
 def _is_junk_term(term: str) -> bool:
     """True for a 'term' that describes WHERE or a CONSTRAINT, not WHAT — it would poison the feed."""
     t = (term or "").strip()
@@ -128,7 +182,7 @@ def expand_search_terms(intent: str, model: str, db_path=None,
         terms = [str(t).strip() for t in (data.get("terms") or []) if str(t).strip()]
         # de-dup, drop location/qualifier junk, cap
         seen, clean = set(), []
-        for t in terms:
+        for t in _drop_modifier_variants(list(terms)):
             if _is_junk_term(t):
                 log.info("Dropping junk search term %r (a place/constraint, not the item)", t)
                 continue

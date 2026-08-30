@@ -205,3 +205,48 @@ def test_cross_watch_skips_watches_the_user_stopped(monkeypatch, tmp_path):
     monkeypatch.setattr(sch, "has_seen_listing", lambda name, key, db: False)
     sch._cross_watch_match(boat, cfg, tmp_path / "db", fresh, "2026-08-29T00:00:00")
     assert judged == ["Fiat"]
+
+
+# ── starting a watch starts the DRIVER, not an ad-hoc thread ────────────────────
+
+def test_start_continuous_bootstraps_the_orchestrator(monkeypatch, tmp_path):
+    """The underlying reason a whole day ran on per-watch threads: start_orchestrator()
+    only ever ran at boot, and only if an enabled continuous watch existed at that instant.
+    After a boot with everything disabled (the stop-disable bug), every later start spawned
+    a thread on the wrong engine. Starting a watch now starts The Watcher itself."""
+    from unittest.mock import MagicMock
+    from web_watcher.services import ServiceManager
+    from web_watcher.scheduler import WatchScheduler
+
+    m = ServiceManager()
+    s = WatchScheduler.__new__(WatchScheduler)
+    s._running_state_path = lambda: tmp_path / "cr.json"
+    started_threads = []
+    s.start_continuous = lambda name: started_threads.append(name)
+    m._scheduler = s
+    m._paused = False
+    monkeypatch.setattr(m, "orchestrator_running", lambda: False)
+    monkeypatch.setattr(m, "start_orchestrator", lambda: True)
+    monkeypatch.setattr(m, "_nudge_oversight", lambda: None)
+
+    m.start_continuous("Sailrite Sewing Machine Watch")
+    assert started_threads == []                                  # no ad-hoc thread
+    assert s._remembered_running() == {"Sailrite Sewing Machine Watch"}
+
+
+def test_start_continuous_falls_back_to_a_thread_when_the_driver_wont_start(monkeypatch, tmp_path):
+    from web_watcher.services import ServiceManager
+    from web_watcher.scheduler import WatchScheduler
+    m = ServiceManager()
+    s = WatchScheduler.__new__(WatchScheduler)
+    s._running_state_path = lambda: tmp_path / "cr.json"
+    started_threads = []
+    s.start_continuous = lambda name: started_threads.append(name)
+    m._scheduler = s
+    m._paused = False
+    monkeypatch.setattr(m, "orchestrator_running", lambda: False)
+    monkeypatch.setattr(m, "start_orchestrator",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no driver")))
+    monkeypatch.setattr(m, "_nudge_oversight", lambda: None)
+    m.start_continuous("W")
+    assert started_threads == ["W"]                               # the fallback still works

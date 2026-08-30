@@ -583,6 +583,22 @@ class ServiceManager:
                      watch_name)
             self._nudge_oversight()
             return
+        # THE DRIVER IS THE ENGINE, NOT A BOOT-TIME ACCIDENT. start_orchestrator() only ever
+        # ran at launch, and only if an enabled continuous watch existed at that instant — so
+        # after a boot with everything disabled, every later start spawned an ad-hoc
+        # per-watch thread and the app ran the whole day on the wrong engine (extra browsers,
+        # no rotation, no shared pacing). Starting a watch now starts The Watcher itself;
+        # the per-watch thread survives only as the fallback when the driver won't start.
+        self._scheduler._remember_running(watch_name, True)
+        try:
+            if self.start_orchestrator():
+                log.info("%r starts The Watcher (orchestrator) — it will drive the rotation",
+                         watch_name)
+                self._nudge_oversight()
+                return
+        except Exception as exc:
+            log.warning("could not start the orchestrator for %r (%s) — falling back to a "
+                        "per-watch loop", watch_name, exc)
         self._scheduler.start_continuous(watch_name)
         self._nudge_oversight()
 

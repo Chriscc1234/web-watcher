@@ -1114,3 +1114,44 @@ def test_human_first_resets_the_typed_flag_each_navigation(monkeypatch):
     monkeypatch.setattr(N, "hints_for", lambda url: None)      # bails immediately
     sch._human_first_navigate(page, "https://example.com/x", _cont_watch())
     assert page._ww_searched is False
+
+
+def test_human_first_lands_in_the_section_not_the_domain_root(monkeypatch):
+    """It used to goto the bare domain root. On Facebook that's the news feed, which has no
+    Marketplace search box — so the query went into the GLOBAL search box and the sweep
+    searched all of Facebook (/search/top). Land on the section's own entry."""
+    import web_watcher.scheduler as sch
+    from web_watcher import navigate as N
+
+    page = MagicMock()
+    page.url = "https://www.google.com/"          # somewhere else entirely
+    monkeypatch.setattr(N, "hints_for", lambda url: {"search_box": "input"})
+    monkeypatch.setattr(N, "is_human_first_enabled", lambda url: True)
+    monkeypatch.setattr(N, "can_fully_drive", lambda req, hint: True)
+    monkeypatch.setattr(N, "apply_search_request",
+                        lambda p, req, hint: {"searched": True, "categorized": True,
+                                              "located": True, "filtered": True})
+    sch._human_first_navigate(
+        page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor",
+        _cont_watch())
+    assert page.goto.call_args[0][0] == "https://www.facebook.com/marketplace/"
+
+
+def test_human_first_does_not_re_enter_the_page_it_is_already_on(monkeypatch):
+    """"why does it just close then immediately open the homepage then go to marketplace
+    again? it was already open" — every sweep re-navigated the landing page."""
+    import web_watcher.scheduler as sch
+    from web_watcher import navigate as N
+
+    page = MagicMock()
+    page.url = "https://www.facebook.com/marketplace/"     # already there
+    monkeypatch.setattr(N, "hints_for", lambda url: {"search_box": "input"})
+    monkeypatch.setattr(N, "is_human_first_enabled", lambda url: True)
+    monkeypatch.setattr(N, "can_fully_drive", lambda req, hint: True)
+    monkeypatch.setattr(N, "apply_search_request",
+                        lambda p, req, hint: {"searched": True, "categorized": True,
+                                              "located": True, "filtered": True})
+    sch._human_first_navigate(
+        page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor",
+        _cont_watch())
+    page.goto.assert_not_called()

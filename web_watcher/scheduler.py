@@ -1106,6 +1106,7 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     control hints are complete, not before. Returns True only if the search was really driven."""
     from urllib.parse import urlparse
     from web_watcher import navigate as N
+    from web_watcher.monitor import search_landing_url
 
     # Fresh per navigation. The flag rides on the long-lived sweep page, so a stale True from
     # a previous sweep would suppress typing forever after.
@@ -1130,12 +1131,28 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
         return False
 
     p = urlparse(url)
-    home = f"{p.scheme}://{p.netloc}/"
+    # LAND IN THE RIGHT SECTION. This used to go to the bare domain root — on Facebook that's
+    # the news feed, which doesn't HAVE a Marketplace search box, so the query went into the
+    # global "Search Facebook" one and the sweep searched all of Facebook. search_landing_url
+    # already knows the shallow entry for each site (facebook.com → /marketplace/); this is
+    # the one place that wasn't asking it.
+    home = search_landing_url(url) or f"{p.scheme}://{p.netloc}/"
+    # ...AND DON'T RE-ENTER A PAGE WE'RE ALREADY ON. Every sweep reloaded the landing page
+    # even when the browser was sitting right there: the user watched it close Marketplace,
+    # open the homepage, and walk back to Marketplace again. A person who is already looking
+    # at Marketplace just uses the search box.
     try:
-        page.goto(home, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
-    except Exception as exc:
-        log.debug("human-first landing nav failed: %s", exc)
-        return False
+        here = (page.url or "").split("?")[0].rstrip("/")
+    except Exception:
+        here = ""
+    if here and here == home.split("?")[0].rstrip("/"):
+        log.debug("human-first: already on %s — using the page we're on", home)
+    else:
+        try:
+            page.goto(home, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+        except Exception as exc:
+            log.debug("human-first landing nav failed: %s", exc)
+            return False
     dismiss_popups(page, settle_ms=0)
 
     applied = N.apply_search_request(page, req, hint)

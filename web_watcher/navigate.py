@@ -108,6 +108,12 @@ CONTROL_HINTS: dict[str, dict] = {
     # under supervision before Facebook is handed the wheel.
     "facebook.com": {
         "search_box": 'input[aria-label*="Search Marketplace" i]',
+        # NEVER let the generic selector stand in for that box. Facebook's global "Search
+        # Facebook" input is ALSO type="search", so the default matches it happily — and a
+        # watch's query then goes to /search/top (posts, people, pages), not Marketplace.
+        # Watched live: the Marketplace box renders a beat after the SPA loads, the generic
+        # fallback won the race, and the sweep searched the whole of Facebook.
+        "search_box_strict": True,
         "location": {
             "open":    'div[role=button][aria-label*="Location:" i], '
                        '[role=button][aria-label*="Location:" i]',
@@ -384,24 +390,46 @@ def type_search(page, terms: str, hint: dict | None = None) -> bool:
     terms = (terms or "").strip()
     if not terms:
         return False
-    # Try the site's hint first, then ALWAYS fall back to the generic search-box selectors —
-    # a too-narrow hint (e.g. craigslist's results-page box) must never block the default that
+    # Try the site's hint first, then fall back to the generic search-box selectors — a
+    # too-narrow hint (e.g. craigslist's results-page box) must never block the default that
     # would have matched (the homepage's placeholder box).
+    #
+    # BUT WAIT FOR THE HINT FIRST. On an SPA the mapped box renders a beat after load, and
+    # racing it straight into the generic fallback is how "macgregor sailboat" went into
+    # Facebook's GLOBAL "Search Facebook" box instead of the Marketplace one — landing on
+    # /search/top, an entirely different surface. The hints file warns that both boxes are
+    # type="search"; the generic selector cannot tell them apart, so the only safe move is to
+    # give the real one time to appear.
     default_sel = ", ".join(_SEARCH_BOX_SELECTORS)
     hint_sel = (hint or {}).get("search_box")
+    strict = bool((hint or {}).get("search_box_strict"))
 
-    def _find_box():
-        b = _first_visible(page, hint_sel) if hint_sel else None
-        return b or _first_visible(page, default_sel)
+    box = None
+    if hint_sel:
+        try:
+            page.wait_for_selector(hint_sel, timeout=5000, state="visible")
+        except Exception:
+            pass
+        box = _first_visible(page, hint_sel)
 
-    box = _find_box()
+    if box is None and strict:
+        # Sites where the generic box does something ELSE entirely (Facebook's global search).
+        # Typing into the wrong box is worse than not typing at all — the caller falls back to
+        # the URL, which at least lands where the watch meant to be.
+        log.info("type_search: %s's own search box hasn't appeared — refusing the generic box "
+                 "(it searches something else); falling back", urlparse(page.url).netloc)
+        return False
+
+    if box is None:
+        box = _first_visible(page, default_sel)
     if box is None:
         # the form may render just after load — wait briefly, then retry
         try:
             page.wait_for_selector(default_sel, timeout=4000, state="visible")
         except Exception:
             pass
-        box = _find_box()
+        box = (_first_visible(page, hint_sel) if hint_sel else None) or \
+              _first_visible(page, default_sel)
     if box is None:
         log.debug("type_search: no search box found")
         return False

@@ -1412,6 +1412,30 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         )
         result = _complete_assistant_turn(system, messages, cfg, model, owner=owner)
 
+        # NOTHING IS RUNNING — say so. The user set up a watch from his phone, asked "what
+        # are you looking for?", got a fluent answer — and nothing was actually hunting.
+        # A watcher with zero running watches should never let a conversation end without
+        # mentioning it (once — not as a nag on every turn).
+        try:
+            mine = _watches_for_owner(cfg, owner)
+            rt = manager.runtime_map()
+            none_running = bool(mine) and not any(
+                (rt.get(w.name) or {}).get("running") for w in mine)
+            if none_running and result.get("message"):
+                hist = _load_watcher_history(owner)
+                recently_nudged = any("isn't running" in str(m.get("content", ""))
+                                      or "none of your watches are running"
+                                      in str(m.get("content", ""))
+                                      for m in hist[-6:] if m.get("role") == "assistant")
+                if not recently_nudged:
+                    ex = mine[0].name
+                    result["message"] = (str(result["message"]).rstrip()
+                        + f"\n\n\u26a0 Heads-up: none of your watches are running right now, "
+                          f"so nothing is being hunted. Say \u201cstart the {ex} watch\u201d "
+                          f"(or \u201cstart all my watches\u201d) and I'll get to work.")
+        except Exception as exc:
+            log.debug("nothing-running nudge failed: %s", exc)
+
         # The master switch (pause/resume the WHOLE Watcher) is executed here, server-side, so it
         # works identically from the desktop dock and the phone. _complete_assistant_turn only ever
         # sets program_action after confirming the requester is the admin, so this is safe to run.
@@ -4483,6 +4507,84 @@ def _is_hard_chat_turn(messages: list, focus: str | None) -> bool:
     return bool(_CHANGE_SIGNAL_RE.search(text) or _HARD_CHAT_RE.search(text))
 
 
+# Words that mean the user wants things TAKEN AWAY or REPLACED — only then may an update
+# card shrink a watch's url list. Everything else is additive or neutral.
+_REMOVAL_SIGNAL_RE = re.compile(
+    r"\b(remove|drop|delete|without|stop (?:searching|looking|checking)|no longer|"
+    r"only|just|instead|replace|swap)\b", re.I)
+
+# Marketplace name -> a canonical search URL we can build deterministically from a term.
+# Used when the user NAMES a site and the model's card fails to actually add it. Craigslist
+# gets the flat host on purpose: the per-sweep refiner rewrites it to the right region from
+# the watch's own instruction (region-from-zip), so we never guess a subdomain here.
+_SITE_URL_BUILDERS = {
+    "facebook":   lambda t: "https://www.facebook.com/marketplace/search?query=" + _q(t),
+    "offerup":    lambda t: "https://offerup.com/search?q=" + _q(t),
+    "ebay":       lambda t: "https://www.ebay.com/sch/i.html?_nkw=" + _q(t),
+    "craigslist": lambda t: "https://www.craigslist.org/search/sss?query=" + _q(t),
+}
+
+
+def _q(term: str) -> str:
+    from urllib.parse import quote_plus
+    return quote_plus(term or "")
+
+
+def _primary_search_term(watch) -> str:
+    """The term this watch actually searches — the most common q/query param across its
+    urls, else distinctive words of its name."""
+    from urllib.parse import urlparse, parse_qsl, unquote_plus
+    counts: dict = {}
+    for u in (getattr(watch, "urls", None) or []):
+        for k, v in parse_qsl(urlparse(u).query):
+            if k in ("q", "query", "_nkw", "keywords") and v.strip():
+                t = unquote_plus(v).strip().lower()
+                counts[t] = counts.get(t, 0) + 1
+    if counts:
+        return max(counts, key=counts.get)
+    return " ".join(_watch_focus_tokens(getattr(watch, "name", "") or ""))
+
+
+def _protect_additive_update(card: dict, latest: str, cfg) -> dict:
+    """Deterministic guard: an ADDITIVE request must never shrink a watch's coverage.
+
+    Live failure, applied and everything: "Look for the x1/9 on facebook as well" — Haiku's
+    card REPLACED the url list with four invented OfferUp searches: five good urls gone
+    (craigslist, eBay, the Bertone spellings), and no Facebook added. The user said "as
+    well"; nothing about removing anything. So unless the message carries a removal signal:
+      1. urls become existing ∪ proposed (nothing the user built is lost), and
+      2. any marketplace the user NAMED that is still missing gets a canonical search url
+         built from the watch's own primary term — the model's url quality stops mattering.
+    A watch that gains a facebook url also gains use_login_profile (Marketplace needs it)."""
+    try:
+        name = _resolve_watch_name(card.get("name", ""), cfg) or card.get("name", "")
+        w = next((x for x in getattr(cfg, "watches", []) if x.name == name), None)
+        if w is None:
+            return card
+        if "urls" in card and not _REMOVAL_SIGNAL_RE.search(latest or ""):
+            existing = list(getattr(w, "urls", None) or [])
+            proposed = [u for u in (card.get("urls") or []) if isinstance(u, str)]
+            merged = existing + [u for u in proposed if u not in existing]
+            low = (latest or "").lower()
+            hay = " ".join(merged).lower()
+            for site, build in _SITE_URL_BUILDERS.items():
+                if site in low and site not in hay:
+                    term = _primary_search_term(w)
+                    if term:
+                        merged.append(build(term))
+            if merged != proposed:
+                log.info("chat: additive update for %r — kept all %d existing url(s), "
+                         "final list has %d (model card had %d)",
+                         name, len(existing), len(merged), len(proposed))
+            card = dict(card)
+            card["urls"] = merged
+        if any("facebook" in (u or "").lower() for u in card.get("urls", [])):
+            card["use_login_profile"] = True
+    except Exception as exc:
+        log.debug("additive-update protection failed: %s", exc)
+    return card
+
+
 def _ground_update_suggestions(suggestions: list, messages: list, focus: str | None,
                                cfg=None) -> list:
     """Deterministic guard against SPURIOUS edit cards. The small extract model sometimes proposes
@@ -4503,7 +4605,7 @@ def _ground_update_suggestions(suggestions: list, messages: list, focus: str | N
         grounded = (all_watches or (bool(name) and name == focus)
                     or _watch_referenced_in(latest, name, cfg))
         if asked_change and grounded:
-            kept.append(s)
+            kept.append(_protect_additive_update(s, latest, cfg) if cfg is not None else s)
         else:
             log.info("chat: dropped ungrounded edit card for %r (asked_change=%s grounded=%s) — "
                      "the user didn't ask to edit it", name, asked_change, grounded)

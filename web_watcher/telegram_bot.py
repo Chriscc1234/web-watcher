@@ -536,6 +536,22 @@ class TelegramBridge:
         parts = []
         if done:
             parts.append("✅ Done — " + ", ".join(f"“{n}”" for n in done) + ".")
+            # "maybe if you just edit a watch, ask if you want to start it?" — exactly
+            # that. A change to a watch that isn't running is a change nobody will see;
+            # say so and hand the user the exact words that start it.
+            try:
+                r = httpx.get(f"{self.dashboard_url}/api/watches", timeout=15.0)
+                by = {w.get("name"): w for w in (r.json() or [])}
+                stopped = [n for n in done
+                           if n in by and not by[n].get("continuous_running")
+                           and by[n].get("mode") == "continuous"]
+                if stopped:
+                    names = " and ".join(f"“{n}”" for n in stopped)
+                    parts.append(f"💤 {names} isn't running right now — "
+                                 f"say “start the {stopped[0]} watch” and "
+                                 f"I'll get hunting.")
+            except Exception:
+                pass
         if already:
             parts.append("👍 " + ", ".join(f"“{n}”" for n in already)
                          + (" is" if len(already) == 1 else " are")

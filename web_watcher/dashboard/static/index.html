@@ -731,6 +731,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 </div>
 
 <!-- ================================================================ CONSOLE -->
+<div id="wd-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60;align-items:center;justify-content:center" onclick="if(event.target===this)closeWatchDetails()">
+  <div style="background:var(--panel,#101827);border:1px solid var(--border);border-radius:12px;max-width:640px;width:92%;max-height:82vh;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)">
+      <strong id="wd-title" style="flex:1;font-size:15px"></strong>
+      <button id="wd-toggle" onclick="wdToggle()"></button>
+      <button onclick="wdEdit()">Edit</button>
+      <button onclick="closeWatchDetails()">\u2715</button>
+    </div>
+    <div id="wd-body" style="padding:10px 16px 16px;overflow:auto;font-size:13px"></div>
+  </div>
+</div>
+
 <div id="tab-live" class="tab-panel">
   <section>
     <h2>Live activity</h2>
@@ -2499,7 +2511,7 @@ function watchRowHtml(w, isActive) {
     else state = `<span style="color:var(--dim)">out of stock</span>`;
     statsLine = `<br><small style="color:var(--dim)">📦 watching <strong>${size}</strong> — ${state}</small>`;
     return `<tr>
-      <td><strong>${w.name}</strong><span class="badge" style="background:#1e2a3a;color:#8fb8e8;margin-left:6px">restock</span><br><small style="color:var(--dim)">${w.urls[0]||''}</small>${statsLine}</td>
+      <td><strong style="cursor:pointer;text-decoration-line:underline;text-decoration-style:dotted;text-decoration-color:var(--dim)" onclick="showWatchDetails('${nm}')" title="Click for details">${w.name}</strong><span class="badge" style="background:#1e2a3a;color:#8fb8e8;margin-left:6px">restock</span><br><small style="color:var(--dim)">${w.urls[0]||''}</small>${statsLine}</td>
       <td>${statusCell}</td>
       <td style="color:var(--dim)">${lr ? timeAgo(lr.run_timestamp) : '—'}</td>
       <td>${foundBadge}</td>
@@ -2519,7 +2531,7 @@ function watchRowHtml(w, isActive) {
     statsLine = `<br><small style="color:var(--dim)">${foundTxt} of ${st.observations} seen${lastTxt}</small>`;
   }
   return `<tr>
-    <td><strong>${w.name}</strong>${agentBadge}${modeBadge}<br><small style="color:var(--dim)">${w.urls[0]||''}</small>${statsLine}</td>
+    <td><strong style="cursor:pointer;text-decoration-line:underline;text-decoration-style:dotted;text-decoration-color:var(--dim)" onclick="showWatchDetails('${nm}')" title="Click for details">${w.name}</strong>${agentBadge}${modeBadge}<br><small style="color:var(--dim)">${w.urls[0]||''}</small>${statsLine}</td>
     <td>${statusCell}</td>
     <td style="color:var(--dim)">${lr ? timeAgo(lr.run_timestamp) : '—'}</td>
     <td>${foundBadge}</td>
@@ -2532,6 +2544,84 @@ function watchRowHtml(w, isActive) {
       <button class="danger" onclick="deleteWatch('${nm}')">Delete</button>
     </div></td>
   </tr>`;
+}
+
+// ── Watch details popup: click a name, see the whole watch, act on it ────────────
+// "can we make it possible to click on the watch in the watch list so you can pop up
+// details of the watch?" + "maybe start and stop it with a click?" — both. Pure view over
+// /api/watches (no new backend); Start/Stop drives the same endpoints as the row buttons.
+let _detailsName = null;
+
+async function showWatchDetails(name) {
+  _detailsName = name;
+  let w = null;
+  try {
+    const all = await api('/api/watches');
+    w = all.find(x => x.name === name);
+  } catch (_) {}
+  if (!w) { alert('Could not load that watch.'); return; }
+  const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const st = w.stats || {};
+  const lr = w.last_run || {};
+  const running = !!w.continuous_running;
+  const row = (k, v) => v ? `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--dim);width:120px;flex-shrink:0">${k}</span>
+      <span style="flex:1;overflow-wrap:anywhere">${v}</span></div>` : '';
+  const urls = (w.urls || []).map(u =>
+    `<div style="padding:1px 0"><a href="${esc(u)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:12px;overflow-wrap:anywhere">${esc(u)}</a></div>`).join('');
+  const stateTxt = running
+    ? (w.sweeping_now ? '\ud83d\udc41 checking now' : '\u25cf running (' + esc(w.runtime_engine || '') + ')')
+    : (w.enabled ? '\u25cb stopped' : 'inactive');
+  document.getElementById('wd-title').textContent = w.name;
+  document.getElementById('wd-body').innerHTML =
+    row('State', stateTxt)
+    + row('Owner', esc(w.owner_name || w.owner || 'you (desktop)'))
+    + row('Mode', esc(w.mode) + (w.autonomous ? ' \u00b7 agent' : '')
+          + (w.use_login_profile ? ' \u00b7 login profile' : ''))
+    + row('Instruction', esc(w.instruction))
+    + row('Judge', esc(w.judgment_prompt || ''))
+    + row('Found', st.observations
+          ? `${st.matches || 0} matched of ${st.observations} seen \u00b7 ${st.runs || 0} runs`
+          : '')
+    + row('Last run', lr.run_timestamp
+          ? `${timeAgo(lr.run_timestamp)} \u2014 ${esc(lr.summary || '')}` : '')
+    + row('Alerts', (w.notify && w.notify.telegram ? 'Telegram' : '')
+          + (w.notify && w.notify.email ? ' + email' : '')
+          + (w.continuous_max_alerts ? ` \u00b7 ${w.continuous_max_alerts}/sweep` : ''))
+    + row('Pacing', w.continuous_idle_seconds
+          ? `${Math.round(w.continuous_idle_seconds/60)}\u2013${Math.round(w.continuous_idle_seconds*3/60)} min between sweeps` : '')
+    + row('Searches', urls);
+  const btn = document.getElementById('wd-toggle');
+  btn.textContent = running ? '\u23f9 Stop' : '\u25b6 Start';
+  btn.className = running ? 'danger' : 'primary';
+  btn.style.display = (w.mode === 'continuous' && w.enabled) ? '' : 'none';
+  document.getElementById('wd-overlay').style.display = 'flex';
+}
+
+async function wdToggle() {
+  if (!_detailsName) return;
+  try {
+    const all = await api('/api/watches');
+    const w = all.find(x => x.name === _detailsName);
+    const op = (w && w.continuous_running) ? 'stop' : 'start';
+    await api(`/api/watches/${encodeURIComponent(_detailsName)}/continuous/${op}`, { method: 'POST' });
+    setTimeout(() => { showWatchDetails(_detailsName); _watchesSig = ''; loadWatches(); }, 900);
+  } catch (e) { alert('Could not toggle it: ' + e.message); }
+}
+
+function wdEdit() {
+  const name = _detailsName;
+  closeWatchDetails();
+  api('/api/watches').then(all => {
+    const w = all.find(x => x.name === name);
+    if (w) editWatch(w);
+  }).catch(() => {});
+}
+
+function closeWatchDetails() {
+  document.getElementById('wd-overlay').style.display = 'none';
+  _detailsName = null;
 }
 
 // ── Person controls: things the developer used to do by hand, now buttons ────────

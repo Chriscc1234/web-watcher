@@ -432,7 +432,11 @@ def test_grounding_guard_keeps_the_x19_edit_card():
     card = {"action": "update", "name": "Fiat X19 Cars Watch",
             "urls": ["https://www.facebook.com/marketplace/seattle/search?query=fiat+x1%2F9"]}
     kept = S._ground_update_suggestions([card], msgs, focus=None, cfg=_ground_cfg())
-    assert kept == [card]
+    # The card SURVIVES (that's the fix) — and the guard may now improve it (additive
+    # protection adds use_login_profile for a facebook url), so check identity, not equality.
+    assert len(kept) == 1 and kept[0]["name"] == card["name"]
+    assert kept[0]["action"] == "update"
+    assert any("facebook" in u for u in kept[0]["urls"])
 
 
 # ── gung-ho escalation: recognised change turns skip the 14b ────────────────────
@@ -481,3 +485,45 @@ def test_extract_goes_straight_to_cloud_on_a_change_turn(monkeypatch):
     S._extract_watch_action(msgs, "All good.", cfg, "m", focus=None, force_local=False)
     if seen:                                   # a non-change turn must not skip local
         assert seen.get("skip_local") is not True
+
+
+# ── additive updates must never shrink a watch (the applied-and-destroyed card) ─
+
+def _fiat_cfg():
+    from types import SimpleNamespace
+    return SimpleNamespace(watches=[SimpleNamespace(
+        name="Fiat X19 Cars Watch",
+        urls=["https://offerup.com/search?q=Fiat+X1%2F9&radius=150",
+              "https://skagit.craigslist.org/search/cta?query=fiat+x1%2F9&postal=98221",
+              "https://www.ebay.com/sch/i.html?_nkw=fiat+x1%2F9"])])
+
+
+def test_additive_update_keeps_every_existing_url_and_adds_the_named_site():
+    """Live, applied and everything: "Look for the x1/9 on facebook as well" — Haiku's card
+    REPLACED the url list with four invented OfferUp searches (five real urls gone, no
+    Facebook added). The guard makes the final list existing ∪ proposed, and because the
+    user NAMED facebook and no facebook url survived, one is built from the watch's own
+    primary term. A facebook url also switches the login profile on."""
+    cfg = _fiat_cfg()
+    card = {"action": "update", "name": "Fiat X19 Cars Watch",
+            "urls": ["https://offerup.com/search?q=Fiat+sports&radius=150"]}
+    out = S._protect_additive_update(card, "Look for the x1/9 on facebook as well", cfg)
+    for u in cfg.watches[0].urls:
+        assert u in out["urls"], f"lost {u}"
+    assert any("facebook.com/marketplace" in u for u in out["urls"])
+    fb = next(u for u in out["urls"] if "facebook" in u)
+    assert "fiat+x1%2F9" in fb or "fiat+x1/9" in fb.lower()   # the watch's own term
+    assert out["use_login_profile"] is True
+
+
+def test_removal_requests_may_still_shrink():
+    cfg = _fiat_cfg()
+    card = {"action": "update", "name": "Fiat X19 Cars Watch",
+            "urls": ["https://offerup.com/search?q=Fiat+X1%2F9&radius=150"]}
+    out = S._protect_additive_update(card, "only search offerup, remove the rest", cfg)
+    assert out["urls"] == card["urls"]                       # user asked to shrink — allowed
+
+
+def test_primary_search_term_is_the_most_common_query():
+    cfg = _fiat_cfg()
+    assert S._primary_search_term(cfg.watches[0]) == "fiat x1/9"

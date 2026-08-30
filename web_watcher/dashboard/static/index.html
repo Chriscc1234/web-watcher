@@ -750,6 +750,8 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
       <input id="live-filter" type="text" placeholder="Filter text…" oninput="renderLive()"
              style="flex:1;font-size:13px;padding:5px 8px">
       <label style="font-size:12px;color:var(--dim);white-space:nowrap"><input type="checkbox" id="live-autoscroll" checked> Auto-scroll</label>
+      <button id="live-mode-feed" onclick="setLiveMode('feed')" class="primary" style="font-size:12px" title="Classic log lines">Feed</button>
+      <button id="live-mode-voices" onclick="setLiveMode('voices')" style="font-size:12px" title="The same activity as a conversation between the app's minds — the browser agent's thoughts, the judge's verdicts, the council's advice">🗣 Voices</button>
       <button onclick="clearLive()" style="font-size:12px">Clear</button>
     </div>
     <div id="live-feed" style="background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:6px;height:60vh;overflow:auto;font-size:13px"></div>
@@ -1098,6 +1100,64 @@ const LIVE_CATS = [
 ];
 const CAT_COLOR = Object.fromEntries(LIVE_CATS.filter(c=>c.key).map(c=>[c.key, c.color]));
 let _liveCat = '', _liveSeq = 0, _liveRows = [], _liveTimer = null;
+// 'feed' = the classic categorized log lines; 'voices' = the same records rendered as a
+// CONVERSATION between the app's minds — the user's wish, verbatim: "i wish there was some
+// kind of display of all the different agents talking". Nothing new is recorded; every voice
+// was already in the ring (logger + message), just flattened into log lines.
+let _liveMode = localStorage.getItem('ww-live-mode') || 'feed';
+
+function setLiveMode(m) {
+  _liveMode = m;
+  try { localStorage.setItem('ww-live-mode', m); } catch (_) {}
+  document.getElementById('live-mode-feed').classList.toggle('primary', m === 'feed');
+  document.getElementById('live-mode-voices').classList.toggle('primary', m === 'voices');
+  renderLive();
+}
+
+// Which of the app's minds said this line. Order matters: specific patterns before their
+// parent logger's fallback. Each speaker keeps a stable color + face so the eye can follow
+// one voice through the scroll.
+const VOICES = [
+  { name: 'Council',     emoji: '\u{1F9E0}', color: '#c084fc',
+    test: e => /council|get-unstuck/i.test(e.message) },
+  { name: 'Vision',      emoji: '\u{1F441}', color: '#67e8f9',
+    test: e => e.logger === 'agent' && /vision/i.test(e.message) },
+  { name: 'Judge',       emoji: '\u2696\uFE0F', color: '#fbbf24',
+    test: e => /rated \d|judge|verify pass|second look|appeal/i.test(e.message) },
+  { name: 'Browser',     emoji: '\u{1F916}', color: '#60a5fa',
+    test: e => e.logger === 'agent' },
+  { name: 'Hands',       emoji: '\u{1F5B1}\uFE0F', color: '#34d399',
+    test: e => e.logger === 'navigate' || e.logger === 'monitor'
+              || /human-first|human search|human location|typed the search|refreshing in place/i.test(e.message) },
+  { name: 'The Watcher', emoji: '\u{1F6A6}', color: '#f472b6',
+    test: e => e.logger === 'orchestrator' },
+  { name: 'Narrator',    emoji: '\u{1F4D3}', color: '#a3e635',
+    test: e => e.logger === 'oversight' },
+  { name: 'Messenger',   emoji: '\u{1F4E3}', color: '#fb923c',
+    test: e => e.logger === 'notify' || e.logger === 'telegram_bot' },
+  { name: 'Sweeper',     emoji: '\u{1F9F9}', color: '#94a3b8',
+    test: e => e.logger === 'scheduler' },
+];
+const VOICE_FALLBACK = { name: 'System', emoji: '\u2699\uFE0F', color: '#64748b' };
+
+function voiceOf(e) { return VOICES.find(v => v.test(e)) || VOICE_FALLBACK; }
+
+// Reshape a raw log line into what the voice is SAYING. The agent's inner monologue is the
+// star: "Agent action: scroll (thought: X)" reads as the thought, with the action as a tag.
+function voiceText(e) {
+  const m = e.message;
+  let mm = m.match(/^Agent action: (\S+)\s*(?:el=\S+\s*)?\(thought: ([\s\S]*)\)\s*$/);
+  if (mm) return { text: mm[2], tag: mm[1] };
+  mm = m.match(/^Vision description \(\d+ chars\): ([\s\S]*)$/);
+  if (mm) return { text: mm[1], tag: 'sees' };
+  mm = m.match(/^\s*rated (\d): ([\s\S]*)$/);
+  if (mm) return { text: mm[2], tag: '\u2605'.repeat(+mm[1]) + '\u2606'.repeat(5 - +mm[1]) };
+  mm = m.match(/^Get-unstuck: ([\s\S]*)$/) || m.match(/^Council recommends: ([\s\S]*)$/);
+  if (mm) return { text: mm[1], tag: 'advises' };
+  mm = m.match(/^Read (\d+\/\d+): ([\s\S]*)$/);
+  if (mm) return { text: mm[2], tag: 'read ' + mm[1] };
+  return { text: m, tag: '' };
+}
 
 function _renderLiveChips() {
   const box = document.getElementById('live-chips');
@@ -1114,6 +1174,7 @@ function setLiveCat(k) { _liveCat = k; _renderLiveChips(); renderLive(); }
 
 function startLive() {
   _renderLiveChips();
+  setLiveMode(_liveMode);   // restore Feed/Voices choice (persisted per browser)
   _liveSeq = 0; _liveRows = [];
   document.getElementById('live-feed').innerHTML =
     '<div style="color:var(--dim);padding:12px">Listening for activity…</div>';
@@ -1192,6 +1253,26 @@ function renderLive() {
   if (!rows.length) {
     feed.innerHTML = '<div style="color:var(--dim);padding:12px">Nothing yet' +
       (_liveCat || txt ? ' for this filter.' : ' — start a watch and activity will stream here.') + '</div>';
+    return;
+  }
+  if (_liveMode === 'voices') {
+    // The conversation view. Consecutive lines from the same voice drop the repeated
+    // name — like a chat app — and hang off that voice's colored rail.
+    let prev = null;
+    feed.innerHTML = rows.map(e => {
+      const v = voiceOf(e);
+      const vt = voiceText(e);
+      const head = (prev === v.name) ? '' :
+        `<div style="margin-top:7px;font-size:11.5px;font-weight:700;color:${v.color}">${v.emoji} ${esc(v.name)}` +
+        (e.watch ? `<span style="color:var(--dim);font-weight:400"> - ${esc(e.watch)}</span>` : '') + `</div>`;
+      prev = v.name;
+      const tagHtml = vt.tag ? `<span style="font-size:10px;color:${v.color};border:1px solid ${v.color}44;border-radius:4px;padding:0 5px;margin-right:6px;white-space:nowrap">${esc(vt.tag)}</span>` : '';
+      return head + `<div style="display:flex;gap:6px;align-items:baseline;padding:1px 0 1px 14px;border-left:2px solid ${v.color}55;margin-left:5px">
+        <span style="color:#475569;font-family:monospace;font-size:10px;flex-shrink:0">${time(e.ts)}</span>
+        <span style="flex:1;color:#cbd5e1;font-size:12.5px">${tagHtml}${esc(vt.text)}</span>
+      </div>`;
+    }).join('');
+    if (document.getElementById('live-autoscroll').checked) feed.scrollTop = feed.scrollHeight;
     return;
   }
   feed.innerHTML = rows.map(e => {

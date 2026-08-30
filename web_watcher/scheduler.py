@@ -1985,6 +1985,11 @@ _FAILING_REASON_RE = re.compile(
     r"\b(outside|too far|not within|beyond the|over budget|over the (stated |)budget|"
     r"wrong (make|model|brand|kind|type|category|item)|not a match|no match|"
     r"does\s?n[o']t match|unrelated|excluded|not the right|different (make|model|brand)|"
+    # Real substance a year-appeal must never wash away: "Automatic, wrong year" is an
+    # automatic first and a year quibble second — the rejection stands. Same for a
+    # parts/accessory/salvage/dealer-ad citation riding alongside an invented cutoff.
+    r"automatic|auto trans|parts?(?: truck| car| only)?\b|part[- ]out|accessor|salvage|"
+    r"scrap|dealer(?:ship)? ad|"
     r"another (country|state|region)|not rated by judge)\b", re.IGNORECASE)
 
 
@@ -2291,6 +2296,23 @@ _PRICE_REASON_RE = re.compile(
     r"price (?:mismatch|does ?n[o']t match|discrepanc|inconsisten))", re.IGNORECASE)
 
 
+_YEAR_REASON_RE = re.compile(
+    r"\b(too old|too new|wrong year|future model|year (?:is )?(?:out|off|wrong)|"
+    r"older than|newer than|outdated|(?:model )?year (?:does ?n[o']t|not) match)\b",
+    re.IGNORECASE)
+
+
+def _watch_states_year(watch) -> bool:
+    """Did the user write a year/age constraint into this watch? Only then is age a
+    legitimate ground for rejection. A four-digit year, "newer/older than", "since 20XX",
+    a year range, or the words "recent/new model" all count."""
+    text = f"{getattr(watch, 'instruction', '') or ''} {getattr(watch, 'judgment_prompt', '') or ''}"
+    return bool(re.search(
+        r"\b(19|20)\d{2}\b|\b(newer|older|later|earlier)\s+than\b|\bsince\s+(19|20)\d{2}|"
+        r"\b(recent|late)[- ]model\b|\byears?\s+(?:or\s+)?(newer|older)\b",
+        text, re.IGNORECASE))
+
+
 def _watch_states_price(watch) -> bool:
     """Did the user actually write a price constraint into this watch? Only then is price a
     legitimate ground for rejection."""
@@ -2309,6 +2331,10 @@ def _appealable_rejection(watch, why: str, title: str) -> str:
       price — the reason is about PRICE and the watch never stated a price. The rubric says
               'never invent a budget', but the model still writes "Price too high" against
               nothing (observed twice on the same $21,500 boat) — prompts ask, this enforces.
+      year  — the reason is about AGE and the watch never stated one. Observed on the Tacoma
+              watch's first sweep: "Too old" (1997), "wrong year" (2023), "Future model"
+              (2025) — three invented cutoffs in one batch, all against an instruction that
+              names no year at all.
 
     Any OTHER failure cited alongside (wrong brand, parts, toy…) makes the rejection stand:
     the appeal exists for criteria the judge had no basis to apply, never to soften real ones.
@@ -2326,6 +2352,15 @@ def _appealable_rejection(watch, why: str, title: str) -> str:
             return ""                      # the user DID state a price — stands
         grounds.append("no stated budget")
         rest = _PRICE_REASON_RE.sub(" ", rest)
+    if _YEAR_REASON_RE.search(rest):
+        # year — the reason is about AGE and the watch never mentioned a year. Same disease
+        # as the invented budget, seen live the first hour of the Tacoma watch: a 1997
+        # manual Tacoma rejected "Too old" and a lot-fresh 2025 rejected "Future model"
+        # against an instruction that says only "manual transmission ... near Seattle".
+        if _watch_states_year(watch):
+            return ""                      # the user DID constrain the year — stands
+        grounds.append("no stated year")
+        rest = _YEAR_REASON_RE.sub(" ", rest)
     if not grounds or _FAILING_REASON_RE.search(rest):
         return ""
     return ", ".join(grounds)

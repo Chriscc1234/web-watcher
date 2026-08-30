@@ -331,3 +331,39 @@ def test_filter_can_defer_verification(monkeypatch):
     assert called["verify"] == 0
     scheduler._filter_listings_by_judgment(ls, w, cfg, verify=True)
     assert called["verify"] == 1
+
+
+# ── the invented year: the Tacoma watch's first sweep ────────────────────────────
+
+def _tacoma_watch(instruction="Look for manual transmission Toyota Tacoma pickup trucks "
+                              "on Facebook Marketplace near Seattle WA."):
+    from types import SimpleNamespace
+    return SimpleNamespace(instruction=instruction, judgment_prompt=None)
+
+
+def test_invented_year_rejections_get_a_second_look():
+    """Live, three in one batch: "Too old" (a 1997 — exactly what a manual-Tacoma hunter
+    wants), "wrong year" (2023), "Future model" (2025) — all against an instruction that
+    names no year at all. Same disease as the invented budget; same cure."""
+    import web_watcher.scheduler as S
+    w = _tacoma_watch()
+    for why in ("Too old", "Future model", "wrong year"):
+        assert S._appealable_rejection(w, why, "1997 Toyota tacoma Seattle, WA") \
+            == "no stated year", why
+
+
+def test_year_rejection_stands_when_the_user_stated_one():
+    import web_watcher.scheduler as S
+    w = _tacoma_watch("Tacomas newer than 2015, manual transmission, near Seattle")
+    assert S._appealable_rejection(w, "Too old", "1997 tacoma Seattle, WA") == ""
+
+
+def test_real_failures_alongside_a_year_quibble_still_stand():
+    """"Automatic, wrong year" is an automatic FIRST — the appeal exists for criteria the
+    judge had no basis to apply, never to soften real ones."""
+    import web_watcher.scheduler as S
+    w = _tacoma_watch()
+    for why in ("Automatic, wrong year", "Too old, and it is a parts truck",
+                "Not manual transmission", "Wrong trans type", "No transmission info",
+                "Engine part"):
+        assert S._appealable_rejection(w, why, "1997 tacoma Seattle, WA") == "", why

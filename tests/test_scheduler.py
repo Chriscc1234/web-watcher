@@ -1155,3 +1155,87 @@ def test_human_first_does_not_re_enter_the_page_it_is_already_on(monkeypatch):
         page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor",
         _cont_watch())
     page.goto.assert_not_called()
+
+
+# ── stay on the results page instead of re-walking to it ────────────────────────
+
+def _fb_req(instruction="Look for MacGregor sailboats near Seattle WA"):
+    from web_watcher import navigate as N
+    return N.build_search_request(
+        "https://www.facebook.com/marketplace/seattle/search?query=macgregor+sailboat",
+        instruction)
+
+
+def test_recognises_its_own_results_page():
+    import web_watcher.scheduler as sch
+    req = _fb_req()
+    page = MagicMock()
+    page.url = "https://www.facebook.com/marketplace/seattle/search/?query=macgregor%20sailboat&exact=false"
+    assert sch._showing_our_results(page, req, "https://www.facebook.com/marketplace/") is True
+
+
+def test_does_not_mistake_another_search_for_ours():
+    """Strict on purpose: a loose match would keep an unrelated results page and sweep the
+    wrong thing."""
+    import web_watcher.scheduler as sch
+    req = _fb_req()
+    for other in (
+        "https://www.facebook.com/marketplace/seattle/search/?query=catalina%20sailboat",
+        "https://www.facebook.com/marketplace/",              # section home, no results
+        "https://www.facebook.com/search/top?q=macgregor%20sailboat",   # global search
+        "",
+    ):
+        page = MagicMock()
+        page.url = other
+        assert sch._showing_our_results(
+            page, req, "https://www.facebook.com/marketplace/") is False, other
+
+
+def test_stays_put_and_refreshes_when_already_on_results(monkeypatch):
+    """"no need to navigate back to the homepage so often" — a person watching for a boat
+    leaves the results tab open and refreshes it."""
+    import web_watcher.scheduler as sch
+    from web_watcher import navigate as N
+
+    monkeypatch.setattr(sch.random, "random", lambda: 0.99)   # not the variety branch
+    monkeypatch.setattr(N, "hints_for", lambda url: {"search_box": "input"})
+    monkeypatch.setattr(N, "is_human_first_enabled", lambda url: True)
+    monkeypatch.setattr(N, "can_fully_drive", lambda req, hint: True)
+    typed = []
+    monkeypatch.setattr(N, "apply_search_request",
+                        lambda p, req, hint: typed.append(1) or {"searched": True})
+
+    page = MagicMock()
+    page.url = "https://www.facebook.com/marketplace/seattle/search/?query=macgregor%20sailboat"
+    watch = _cont_watch()
+    watch.instruction = "Look for MacGregor sailboats near Seattle WA"
+
+    assert sch._human_first_navigate(
+        page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor+sailboat",
+        watch) is True
+    page.reload.assert_called_once()          # refreshed in place...
+    page.goto.assert_not_called()             # ...no walk back to the section
+    assert not typed                          # ...and no retyping the same query
+    assert page._ww_searched is True          # caller knows not to type either
+
+
+def test_sometimes_takes_the_long_way_for_variety(monkeypatch):
+    """Doing the identical thing every visit is its own pattern."""
+    import web_watcher.scheduler as sch
+    from web_watcher import navigate as N
+
+    monkeypatch.setattr(sch.random, "random", lambda: 0.01)   # the variety branch
+    monkeypatch.setattr(N, "hints_for", lambda url: {"search_box": "input"})
+    monkeypatch.setattr(N, "is_human_first_enabled", lambda url: True)
+    monkeypatch.setattr(N, "can_fully_drive", lambda req, hint: True)
+    monkeypatch.setattr(N, "apply_search_request",
+                        lambda p, req, hint: {"searched": True, "located": True})
+
+    page = MagicMock()
+    page.url = "https://www.facebook.com/marketplace/seattle/search/?query=macgregor%20sailboat"
+    watch = _cont_watch()
+    watch.instruction = "Look for MacGregor sailboats near Seattle WA"
+    sch._human_first_navigate(
+        page, "https://www.facebook.com/marketplace/seattle/search?query=macgregor+sailboat",
+        watch)
+    assert page.goto.call_args[0][0] == "https://www.facebook.com/marketplace/"

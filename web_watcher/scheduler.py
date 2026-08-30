@@ -1093,6 +1093,40 @@ def _run_agent_continuous_sweep(
     _explore_matches(watch, cfg, db_path, page, stop_event)
 
 
+# How often to take the long way round (back to the section, retype the search) when the
+# browser is already sitting on this watch's results. Mostly we just refresh in place.
+_RESEARCH_ODDS = 0.2
+
+
+def _showing_our_results(page, req, section: str = "") -> bool:
+    """Is the page already showing THIS search's results, in the RIGHT SECTION?
+
+    Deliberately strict: same host, inside the watch's own section, a results-shaped path,
+    and EVERY search term present in the query. A loose match keeps a stale or unrelated page
+    and quietly sweeps the wrong thing — and without the section test, Facebook's GLOBAL
+    /search/top?q=macgregor+sailboat matches perfectly, which is the very page v0.152 was
+    about escaping."""
+    from urllib.parse import urlparse, unquote_plus
+    try:
+        cur = page.url or ""
+    except Exception:
+        return False
+    if not cur or not req.terms:
+        return False
+    u = urlparse(cur)
+    if "search" not in (u.path or "").lower():
+        return False
+    if section:
+        s = urlparse(section)
+        if (u.netloc or "").lower() != (s.netloc or "").lower():
+            return False
+        want = (s.path or "/").rstrip("/")
+        if want and not (u.path or "").startswith(want):
+            return False
+    haystack = unquote_plus(f"{u.path}?{u.query}").lower()
+    return all(t.lower() in haystack for t in req.terms.split() if t)
+
+
 def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     """Run this watch's search by DRIVING the site's own controls like a person — land on the
     site's shallow entry (the region/site homepage), then type the search + set the sidebar
@@ -1129,6 +1163,31 @@ def _human_first_navigate(page, url: str, watch: Watch) -> bool:
     # quietly browse the wrong thing.
     if not (req.terms or req.category) or not N.can_fully_drive(req, hint):
         return False
+
+    # ALREADY IN POSITION? After a sweep the browser is sitting on THIS WATCH'S OWN results.
+    # Walking back to the section home and retyping the query — every 5 to 15 minutes, forever
+    # — is not what a person does: someone watching for a boat leaves the results tab open and
+    # refreshes it. It's also three navigations where one will do. So most of the time, stay
+    # and reload in place.
+    #
+    # Not ALWAYS, though: doing the identical thing every single visit is its own pattern, and
+    # a real person does drift back to Marketplace and search again now and then. _RESEARCH_ODDS
+    # of the time we take the long way round on purpose.
+    if _showing_our_results(page, req, search_landing_url(url) or ""):
+        if random.random() > _RESEARCH_ODDS:
+            log.info("Human-first nav on %s: already on this search's results — refreshing in "
+                     "place rather than re-navigating", urlparse(url).netloc)
+            try:
+                page.reload(timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+            except Exception as exc:
+                log.debug("in-place refresh failed, will re-navigate: %s", exc)
+            else:
+                dismiss_popups(page, settle_ms=0)
+                setattr(page, "_ww_searched", True)   # the query is already in the page
+                return True
+        else:
+            log.info("Human-first nav on %s: on the results already, but going back to search "
+                     "again this time (variety)", urlparse(url).netloc)
 
     p = urlparse(url)
     # LAND IN THE RIGHT SECTION. This used to go to the bare domain root — on Facebook that's

@@ -780,8 +780,26 @@ def _quiet_window_today(now=None):
             _QUIET_END_H + rnd.uniform(-0.42, 0.42))
 
 
+def _night_wake_slots(now=None):
+    """One or two brief wake windows inside tonight's quiet hours — a person surfacing to
+    check their phone, then going back to sleep. The user's ask, verbatim: "i like the human
+    sleep thing. but maybe check it like one or twice at night." Date-seeded like the quiet
+    window itself: tonight's wake-ups are fixed, tomorrow's are different. Each slot is
+    ~9-20 minutes — enough for a sweep or two at the normal pacing, not a work session."""
+    from datetime import datetime
+    now = now or datetime.now()
+    rnd = random.Random(now.strftime("%Y%m%d") + "wake")
+    start, end = _quiet_window_today(now)
+    slots = []
+    for _ in range(rnd.choice((1, 2))):
+        t = rnd.uniform(start + 0.5, end - 0.75)      # never right at the edges
+        slots.append((t, t + rnd.uniform(0.15, 0.33)))
+    return slots
+
+
 def _in_quiet_hours(watch, now=None) -> bool:
-    """Should this watch sit out the current hour? Only quiet-listed sites ever do."""
+    """Should this watch sit out the current hour? Only quiet-listed sites ever do — and
+    even they get the night-check exception: during a wake slot, sweeps run normally."""
     try:
         hosts = " ".join(urlparse(u).netloc.lower() for u in (watch.urls or []))
         if not any(q in hosts for q in _QUIET_SITES):
@@ -790,7 +808,12 @@ def _in_quiet_hours(watch, now=None) -> bool:
         now = now or datetime.now()
         h = now.hour + now.minute / 60.0
         start, end = _quiet_window_today(now)
-        return start <= h < end
+        if not (start <= h < end):
+            return False
+        for a, b in _night_wake_slots(now):
+            if a <= h < b:
+                return False                          # awake — checking the phone
+        return True
     except Exception:
         return False
 

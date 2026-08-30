@@ -1299,3 +1299,39 @@ def test_quiet_skip_does_not_feed_the_blind_scraper_streak(monkeypatch):
     monkeypatch.setattr(sch, "_in_quiet_hours", lambda w, now=None: True)
     assert sch._run_continuous_sweep(fb, None, None, 0, None) == -1
     assert sch._run_agent_continuous_sweep(fb, None, None, 0, None) is None
+
+
+def test_night_wake_slots_let_a_sleeper_check_their_phone():
+    """"i like the human sleep thing. but maybe check it like one or twice at night" —
+    inside a wake slot the watch sweeps normally; in the deep night it sleeps."""
+    import web_watcher.scheduler as sch
+    from types import SimpleNamespace
+    from datetime import datetime
+    fb = SimpleNamespace(urls=["https://www.facebook.com/marketplace/x"], name="FB")
+
+    now = datetime(2026, 8, 30, 3, 0)
+    start, end = sch._quiet_window_today(now)
+    slots = sch._night_wake_slots(now)
+    assert 1 <= len(slots) <= 2
+    for a, b in slots:
+        assert start < a < b < end                    # slots live inside the window
+        assert 0.14 <= b - a <= 0.34                  # ~9-20 minutes: a glance, not a shift
+        mid = (a + b) / 2
+        t = datetime(2026, 8, 30, int(mid), int(mid % 1 * 60))
+        assert sch._in_quiet_hours(fb, t) is False    # awake — sweeps allowed
+
+    # A moment in the window but in no slot is still asleep.
+    probe = start + 0.05
+    t = datetime(2026, 8, 30, int(probe), int(probe % 1 * 60))
+    if not any(a <= probe < b for a, b in slots):
+        assert sch._in_quiet_hours(fb, t) is True
+
+
+def test_night_wake_slots_differ_by_date_but_hold_within_one():
+    import web_watcher.scheduler as sch
+    from datetime import datetime
+    a1 = sch._night_wake_slots(datetime(2026, 8, 30, 1, 0))
+    a2 = sch._night_wake_slots(datetime(2026, 8, 30, 6, 0))
+    b = sch._night_wake_slots(datetime(2026, 8, 31, 1, 0))
+    assert a1 == a2
+    assert a1 != b

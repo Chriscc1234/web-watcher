@@ -492,12 +492,11 @@ class TelegramBridge:
                                           "title": str(row0.get("title") or "").strip(),
                                           "watch": watch0}
         else:
-            # TAPPABLE WATCHES. The desktop dashboard got click-a-watch-for-details; the
-            # user's next question, verbatim: "how does it work in telegram?" Telegram's
-            # answer to clickable anything is inline buttons — so when a reply mentions the
-            # user's watches (a status list, an edit confirmation), each one becomes a
-            # button: tap → details card → Start/Stop buttons.
-            wbtns = self._watch_buttons_for(reply, to)
+            # TAPPABLE WATCHES — only where the server EXPLICITLY listed them (the watch
+            # status list, the nothing-running nudge). Matching names against reply text
+            # put an irrelevant Cars button under a list of MacGregor matches, because the
+            # nudge sentence happened to mention that watch's name.
+            wbtns = self._watch_buttons_for(result.get("watch_buttons"), to)
             self._send(reply or "(no reply)", to, html=as_html, buttons=wbtns)
 
     def _apply_pending(self, pending: list[dict], chat_id: str = "") -> str:
@@ -979,9 +978,12 @@ class TelegramBridge:
             text += f'\n<a href="{_h.escape(url, quote=True)}">open</a>'
         self._send(text, chat, html=True, buttons=buttons)
 
-    def _watch_buttons_for(self, reply: str, chat_id: str) -> list | None:
-        """One inline button per watch the reply MENTIONS (scoped to watches this person may
-        touch). Returns None when the reply names none — most messages stay button-free."""
+    def _watch_buttons_for(self, names, chat_id: str) -> list | None:
+        """One inline button per EXPLICITLY named watch (scoped: a buddy only ever gets
+        buttons for their own). None when the server named none — most messages stay
+        button-free."""
+        if not names:
+            return None
         try:
             import httpx as _hx
             r = _hx.get(f"{self.dashboard_url}/api/watches", timeout=10.0)
@@ -989,10 +991,9 @@ class TelegramBridge:
         except Exception:
             return None
         admin = str(chat_id) == str(self.chat_id)
-        mine = [w for w in watches
-                if admin or str(w.get("owner") or "") == str(chat_id)]
-        low = (reply or "").lower()
-        hit = [w for w in mine if w.get("name", "").lower() in low][:6]
+        mine = {w.get("name"): w for w in watches
+                if admin or str(w.get("owner") or "") == str(chat_id)}
+        hit = [mine[n] for n in names if n in mine][:6]
         if not hit:
             return None
         self._wd_names[str(chat_id)] = [w["name"] for w in hit]

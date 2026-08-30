@@ -527,3 +527,19 @@ def test_removal_requests_may_still_shrink():
 def test_primary_search_term_is_the_most_common_query():
     cfg = _fiat_cfg()
     assert S._primary_search_term(cfg.watches[0]) == "fiat x1/9"
+
+
+# ── "show me the watches" is about the WATCHES, not the finds ───────────────────
+
+def test_show_me_the_watches_is_status_not_lookup():
+    """Live, twice in a row: "Show me the watches" matched the bare "show me" lookup
+    alternative, hijacked the turn into the listings lookup (53-char nothing-reply), and the
+    lookup veto then blocked the status path. Watch-noun without listing-words → status."""
+    for t in ("Show me the watches", "No show me the watches I have",
+              "show me all my watches"):
+        assert S._is_watch_status_request(t), t
+        assert not S._is_lookup_request(t), t
+    # The finds side is untouched — including a lookup that NAMES a watch.
+    for t in ("show me the matches", "show me the latest match",
+              "show me matches for the boats watch"):
+        assert S._is_lookup_request(t), t

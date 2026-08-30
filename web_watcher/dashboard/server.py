@@ -1358,7 +1358,11 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             msg = _render_watch_status(cfg, manager, owner)
             if _glob:
                 msg = _render_global_running(cfg, manager) + "\n\n" + msg
-            result = {"message": msg, "watch_suggestion": None, "html": True, "raw": None}
+            result = {"message": msg, "watch_suggestion": None, "html": True, "raw": None,
+                      # Explicit list for the bridge's tappable buttons — matching names
+                      # against reply TEXT attached buttons to anything that mentioned a
+                      # watch (a nudge sentence produced a Cars button under a boat list).
+                      "watch_buttons": [w.name for w in _watches_for_owner(cfg, owner)][:6]}
             result["raw"] = result["message"]
             _persist_chat_turn(messages, result, owner)
             result.pop("raw", None)
@@ -1429,6 +1433,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                                       for m in hist[-6:] if m.get("role") == "assistant")
                 if not recently_nudged:
                     ex = mine[0].name
+                    result.setdefault("watch_buttons", [ex])
                     result["message"] = (str(result["message"]).rstrip()
                         + f"\n\n\u26a0 Heads-up: none of your watches are running right now, "
                           f"so nothing is being hunted. Say \u201cstart the {ex} watch\u201d "
@@ -2957,6 +2962,14 @@ def _is_lookup_request(text: str) -> bool:
     t = (text or "").strip()
     if not t or _NOT_LOOKUP_RE.search(t):
         return False
+    # "Show me the watches" is about the WATCHES, not the finds — but the bare "show me"
+    # alternative matched it, hijacked the turn into the listings lookup, and its veto then
+    # blocked the status path (seen live, twice in a row, 53-char nothing-replies). A message
+    # that says watch(es) and never says match/listing/find belongs to status.
+    if re.search(r"\bwatch(es)?\b", t, re.I) and not re.search(
+            r"\b(match|matches|listing|listings|find|finds|found|result|results|hits?)\b",
+            t, re.I):
+        return False
     return bool(_LOOKUP_RE.search(t))
 
 
@@ -3071,6 +3084,7 @@ _WATCH_STATUS_RE = re.compile(
     r"watch\s*list|watchlist|"
     r"(running|active)\s+watches|"
     r"list\s+(my\s+|the\s+)?watches|my\s+watches\b|"
+    r"show\s+(me\s+)?(all\s+)?(my\s+|the\s+)?watches\b|"
     r"how\s+many\s+watches|status\s+of\s+(my\s+)?watches|"
     # How a NOVICE asks the same question — no "watch" vocabulary required. The welcome
     # message even teaches "what am I watching?", and that exact phrase used to fall through

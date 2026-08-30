@@ -1348,7 +1348,17 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
         tab = None
         try:
             tab = ctx.new_page()
-            tab.goto(l.url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+            # OPEN LIKE A CTRL-CLICK, NOT A COLD LOAD. A bare goto in a fresh tab arrives
+            # with NO referrer — no click origin, no browsing context — which was the biggest
+            # remaining tell on Facebook: the "user" reads a results page in one tab while
+            # listing pages materialise from nowhere in others. With the results page sent as
+            # the referer, each tab reads as "opened in a new tab from the search results" —
+            # exactly how a person actually browses a marketplace.
+            try:
+                ref = page.url or None
+            except Exception:
+                ref = None
+            tab.goto(l.url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded", referer=ref)
             dismiss_popups(tab, settle_ms=0)
             # Spend a believable amount of time ON the ad — scrolling the description,
             # looking at the photos — BEFORE scraping it. Reading first also means the

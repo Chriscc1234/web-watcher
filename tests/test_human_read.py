@@ -444,3 +444,33 @@ def test_short_sections_do_not_get_a_bogus_selector():
         seg = [s for s in path.split("/") if s]
         section = re.sub(r"[^a-z]", "", seg[0].lower()) if seg else ""
         assert not len(section) > 3
+
+
+def test_deep_read_tabs_carry_the_results_page_as_referer():
+    """The last flagged Facebook tell: deep-read tabs were bare goto()s — no referrer, no
+    click origin, listing pages materialising from nowhere while the "user" sat on the
+    results page. Each tab must now open like a ctrl-click: referer = the results page."""
+    from types import SimpleNamespace
+    from web_watcher import scheduler as S
+
+    calls = []
+
+    class _Tab:
+        def goto(self, url, timeout=None, wait_until=None, referer=None):
+            calls.append({"url": url, "referer": referer})
+            raise RuntimeError("stop here — navigation recorded")   # skip read/extract
+
+        def close(self):
+            pass
+
+    class _Ctx:
+        def new_page(self):
+            return _Tab()
+
+    page = SimpleNamespace(context=_Ctx(), url="https://www.facebook.com/marketplace/search?query=macgregor")
+    listing = SimpleNamespace(url="https://www.facebook.com/marketplace/item/123", title="t",
+                              key="fb:123", details="", posted_at=None)
+    S._capture_listing_bodies(page, [listing], stop_event=None)
+
+    assert calls and calls[0]["url"].endswith("/item/123")
+    assert calls[0]["referer"] == "https://www.facebook.com/marketplace/search?query=macgregor"

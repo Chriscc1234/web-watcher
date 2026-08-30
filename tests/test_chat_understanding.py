@@ -433,3 +433,51 @@ def test_grounding_guard_keeps_the_x19_edit_card():
             "urls": ["https://www.facebook.com/marketplace/seattle/search?query=fiat+x1%2F9"]}
     kept = S._ground_update_suggestions([card], msgs, focus=None, cfg=_ground_cfg())
     assert kept == [card]
+
+
+# ── gung-ho escalation: recognised change turns skip the 14b ────────────────────
+
+def test_naming_a_marketplace_is_a_change_signal():
+    """Live, three phrasings dead in a row: "Let's look for the fiat on facebook" and "Yes
+    watch on facebook" each had a CORRECT Haiku edit card dropped (asked_change=False), and
+    "I want to modify that watch..." got an empty local extraction that PASSED validation.
+    Which sites a watch covers is a setting; the site's name is the change signal."""
+    for t in ("Let's look for the fiat on facebook", "Yes watch on facebook",
+              "I want to modify that watch to also look on facebook",
+              "check craigslist too", "add offerup"):
+        assert S._CHANGE_SIGNAL_RE.search(t), t
+    for t in ("any luck?", "what watches do i have", "you still there?"):
+        assert not S._CHANGE_SIGNAL_RE.search(t), t
+
+
+def test_change_signal_turns_are_hard_turns():
+    """The two gates must agree: a change-signal turn is escalation-eligible, so the
+    gung-ho skip_local actually engages (force_local = not hard)."""
+    msgs = [{"role": "user", "content": "Let's look for the fiat on facebook"}]
+    assert S._is_hard_chat_turn(msgs, focus=None) is True
+
+
+def test_extract_goes_straight_to_cloud_on_a_change_turn(monkeypatch):
+    from web_watcher import llm as L
+    seen = {}
+
+    def fake_chat_smart(msgs, **kw):
+        seen.update(kw)
+        return {"text": "{}", "used": "cloud", "escalated": True, "why": ""}
+
+    from web_watcher import llm as _L
+    monkeypatch.setattr(_L, "chat_smart", fake_chat_smart)
+    monkeypatch.setattr(S, "_build_watches_context", lambda *a, **k: "")
+    from web_watcher.config import AppConfig
+    cfg = AppConfig()
+    cfg.models.cloud.auto = True
+    msgs = [{"role": "user", "content": "Yes watch on facebook"}]
+    S._extract_watch_action(msgs, "Sure — updating it now.", cfg, "m",
+                            focus=None, force_local=False)
+    assert seen.get("skip_local") is True
+
+    seen.clear()
+    msgs = [{"role": "user", "content": "how are things going"}]
+    S._extract_watch_action(msgs, "All good.", cfg, "m", focus=None, force_local=False)
+    if seen:                                   # a non-change turn must not skip local
+        assert seen.get("skip_local") is not True

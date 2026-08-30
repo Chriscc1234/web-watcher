@@ -400,3 +400,20 @@ def test_vision_calls_get_a_real_context_window(monkeypatch):
                      format_json=True, images=[_png_b64(2560, 1440)], timeout=5.0)
     assert sent["options"]["num_ctx"] == llm._VISION_NUM_CTX      # not the 4096 default
     assert _edge(sent["messages"][-1]["images"][0]) == llm._MAX_IMAGE_EDGE
+
+
+# ── skip_local: gung-ho callers bypass the 14b entirely ─────────────────────────
+
+def test_skip_local_never_calls_the_local_model(monkeypatch):
+    from web_watcher import llm as L
+
+    def boom(*a, **k):
+        raise AssertionError("local model was called despite skip_local")
+
+    monkeypatch.setattr(L, "chat", boom)
+    monkeypatch.setattr(L, "cloud_ready", lambda cfg, role: (False, "no key"))
+    out = L.chat_smart([{"role": "user", "content": "x"}], role="extract",
+                       local_model="m", cfg=object(), skip_local=True)
+    # Cloud unavailable -> degrades gracefully with empty local text, but the local
+    # model must never have been invoked.
+    assert out["used"] == "local" and out["text"] == ""

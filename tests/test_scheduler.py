@@ -812,7 +812,11 @@ def test_min_rating_clamped_to_1_5():
 
 def test_fb_checkpoint_on_landing_stops_and_backs_off(db, monkeypatch):
     """Landing on a Facebook checkpoint must alert + set a cooldown + NOT process listings."""
+    # This test runs REAL sweep entry code, which now observes quiet hours — at
+    # night the sweep skipped before reaching the checkpoint logic and the test
+    # failed only after 00:45 local. Tests must not depend on the wall clock.
     import web_watcher.scheduler as sch
+    monkeypatch.setattr(sch, "_in_quiet_hours", lambda w, now=None: False)
     cfg = AppConfig.model_validate({})
     watch = _cont_watch(name="FB Trucks",
                         urls=["https://www.facebook.com/marketplace/seattle/search?query=truck"],

@@ -4185,6 +4185,11 @@ _CHANGE_SIGNAL_RE = re.compile(
     r"expand\w*|broaden\w*|narrow\w*|raise|lower|increase|decrease|bump|cap\b|limit\b|"
     r"only\b|no longer|as well|max\b|min\b|price|budget|under|over|less than|more than|"
     r"radius|distance|sites?|keyword|antikeyword|"
+    # Naming a MARKETPLACE is asking for a site change: "Let's look for the fiat on
+    # facebook" and "Yes watch on facebook" each had a CORRECT (Haiku-built) edit card
+    # dropped because no verb on this list appeared. Which site a watch covers is as much
+    # a setting as its budget — the site's name is the change signal.
+    r"facebook|marketplace|craigslist|offerup|ebay|boattrader|cargurus|autotrader|"
     # run-mode changes: "make it always run", "run continuously", "keep it running", "24/7".
     r"always run|run always|run all the time|all the time|run continuous\w*|continuous\w*|"
     r"keep (it )?running|24/?7|nonstop|constantly|every \d+ ?min\w*|hourly|daily)\b", re.IGNORECASE)
@@ -4658,7 +4663,14 @@ def _extract_watch_action(messages: list, reply: str, cfg, model: str,
             # Miata watch" and no watch is created. This validator ties the extraction to the
             # reply: if the reply committed to a create/change, the extraction MUST carry an
             # action; otherwise (a no-op turn) an empty result is correct and stays local.
+            # Gung-ho escalation (the user's own words): on a turn the change-signal
+            # recognises, skip the 14b entirely — it produced empty extractions that PASSED
+            # validation ("I want to modify that watch to also look on facebook" → nothing),
+            # so the ladder never fired and the conversation died. A recognised change turn
+            # goes straight to the cloud; a cent per turn against a request that works.
+            _gung_ho = bool(_CHANGE_SIGNAL_RE.search(_latest_user_text(messages)))
             content = llm.chat_smart(msgs, role="extract", local_model=model, cfg=cfg,
+                                     skip_local=_gung_ho and not force_local,
                                      format_json=True, timeout=60.0,
                                      validate=lambda t: _extract_result_usable(t, reply)
                                      ).get("text", "")

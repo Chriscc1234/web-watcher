@@ -646,7 +646,8 @@ def escalation_summary(data_dir=None) -> dict:
 def chat_smart(messages: list[dict], *, role: str, local_model: str, cfg=None,
                validate: Optional[Callable[[str], bool]] = None, format_json: bool = False,
                timeout: float = 90.0, num_ctx: int = 0, max_tokens: int = 4096,
-               cache_system: bool = False, images: Optional[list[str]] = None) -> dict:
+               cache_system: bool = False, images: Optional[list[str]] = None,
+               skip_local: bool = False) -> dict:
     """Run a call the thrifty way: LOCAL first, then climb the cloud ladder only if the local
     answer fails the check.
 
@@ -666,19 +667,32 @@ def chat_smart(messages: list[dict], *, role: str, local_model: str, cfg=None,
 
     check = validate or (lambda t: looks_usable(t, format_json))
 
-    # 1. Local always gets first refusal. It's free and, on this hardware, usually right.
+    # 1. Local always gets first refusal. It's free and, on this hardware, usually right —
+    #    EXCEPT when the caller says otherwise: skip_local is for turns a deterministic
+    #    signal has recognised as ones the 14b keeps fumbling (a watch-change request from
+    #    a phone — the user watched three phrasings die). Cents beat a dead conversation.
+    #    The ladder still degrades to local when the cloud is unconfigured or over budget.
     local_text = ""
-    try:
-        local_text = chat(messages, role=role, local_model=local_model, cfg=cfg,
-                          format_json=format_json, images=images, timeout=timeout,
-                          cache_system=cache_system, max_tokens=max_tokens,
-                          force_local=True, num_ctx=num_ctx)
-        if check(local_text):
-            return {"text": local_text, "used": "local", "escalated": False, "why": ""}
-        why = "the local answer failed the check"
-    except Exception as exc:
-        why = f"the local model errored ({type(exc).__name__})"
-        log.warning("chat_smart: local failed for role %r: %s", role, exc)
+    if skip_local:
+        # Nothing to skip TO -> local is all we have. Without this, a gung-ho turn with no
+        # cloud key returned an EMPTY extraction — worse than the 14b it was avoiding.
+        _ok, _blocked = cloud_ready(cfg, role)
+        if not _ok or images:
+            skip_local = False
+    if skip_local:
+        why = "caller requested the cloud directly (skip_local)"
+    else:
+        try:
+            local_text = chat(messages, role=role, local_model=local_model, cfg=cfg,
+                              format_json=format_json, images=images, timeout=timeout,
+                              cache_system=cache_system, max_tokens=max_tokens,
+                              force_local=True, num_ctx=num_ctx)
+            if check(local_text):
+                return {"text": local_text, "used": "local", "escalated": False, "why": ""}
+            why = "the local answer failed the check"
+        except Exception as exc:
+            why = f"the local model errored ({type(exc).__name__})"
+            log.warning("chat_smart: local failed for role %r: %s", role, exc)
 
     ok, blocked = cloud_ready(cfg, role)
     if not ok:

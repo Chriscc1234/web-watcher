@@ -165,6 +165,9 @@ class TelegramBridge:
         # Watch changes the assistant proposed and is waiting on a yes/no for. The dashboard
         # shows these as click-to-confirm cards; on a phone the confirmation is the next message.
         self._pending: dict[str, list[dict]] = {}
+        # Watch names behind the tappable buttons, per chat. Telegram callback_data is capped
+        # at 64 bytes and watch names aren't, so buttons carry an INDEX into this list.
+        self._wd_names: dict[str, list[str]] = {}
         # Destructive lifecycle actions (delete) held for a yes. Reversible ones (start/stop/
         # enable/disable) are applied immediately — no confirmation needed.
         self._pending_deletes: dict[str, list[dict]] = {}
@@ -489,7 +492,13 @@ class TelegramBridge:
                                           "title": str(row0.get("title") or "").strip(),
                                           "watch": watch0}
         else:
-            self._send(reply or "(no reply)", to, html=as_html)
+            # TAPPABLE WATCHES. The desktop dashboard got click-a-watch-for-details; the
+            # user's next question, verbatim: "how does it work in telegram?" Telegram's
+            # answer to clickable anything is inline buttons — so when a reply mentions the
+            # user's watches (a status list, an edit confirmation), each one becomes a
+            # button: tap → details card → Start/Stop buttons.
+            wbtns = self._watch_buttons_for(reply, to)
+            self._send(reply or "(no reply)", to, html=as_html, buttons=wbtns)
 
     def _apply_pending(self, pending: list[dict], chat_id: str = "") -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the
@@ -752,6 +761,11 @@ class TelegramBridge:
             log.warning("Telegram: ignoring button from unauthorized chat %s", chat)
             return
 
+        # Tappable watches: details card / start / stop.
+        if data.startswith("wdet:") or data.startswith("wact:"):
+            self._handle_watch_callback(cb, str(chat), data)
+            return
+
         # Approve / ignore a new user, right from the chat. Only the ADMIN (the main configured
         # chat) may — another allow-listed buddy can't let in strangers.
         if data.startswith("allow:") or data.startswith("deny:"):
@@ -964,6 +978,99 @@ class TelegramBridge:
         if url.startswith("http"):
             text += f'\n<a href="{_h.escape(url, quote=True)}">open</a>'
         self._send(text, chat, html=True, buttons=buttons)
+
+    def _watch_buttons_for(self, reply: str, chat_id: str) -> list | None:
+        """One inline button per watch the reply MENTIONS (scoped to watches this person may
+        touch). Returns None when the reply names none — most messages stay button-free."""
+        try:
+            import httpx as _hx
+            r = _hx.get(f"{self.dashboard_url}/api/watches", timeout=10.0)
+            watches = r.json() or []
+        except Exception:
+            return None
+        admin = str(chat_id) == str(self.chat_id)
+        mine = [w for w in watches
+                if admin or str(w.get("owner") or "") == str(chat_id)]
+        low = (reply or "").lower()
+        hit = [w for w in mine if w.get("name", "").lower() in low][:6]
+        if not hit:
+            return None
+        self._wd_names[str(chat_id)] = [w["name"] for w in hit]
+        rows = []
+        for i, w in enumerate(hit):
+            dot = "\U0001f7e2" if w.get("continuous_running") else "\u26aa"
+            rows.append([{"text": f"{dot} {w['name'][:40]}", "callback_data": f"wdet:{i}"}])
+        return rows
+
+    def _watch_for_callback(self, chat: str, idx_text: str):
+        """Resolve a wdet:/wact: index back to a live watch row, owner-checked."""
+        try:
+            import httpx as _hx
+            names = self._wd_names.get(str(chat)) or []
+            name = names[int(idx_text)]
+            r = _hx.get(f"{self.dashboard_url}/api/watches", timeout=10.0)
+            w = next((x for x in (r.json() or []) if x.get("name") == name), None)
+            if w is None:
+                return None
+            admin = str(chat) == str(self.chat_id)
+            if not admin and str(w.get("owner") or "") != str(chat):
+                return None                        # never another person's watch
+            return w
+        except Exception:
+            return None
+
+    def _handle_watch_callback(self, cb, chat: str, data: str) -> bool:
+        """wdet:<i> → details card with Start/Stop; wact:<op>:<i> → do it. True if handled."""
+        import httpx as _hx
+        import html as _h
+        _esc = _h.escape
+        if data.startswith("wdet:"):
+            w = self._watch_for_callback(chat, data[5:])
+            if w is None:
+                self._answer_callback(cb.get("id"), "That one isn't available any more.")
+                return True
+            self._answer_callback(cb.get("id"))
+            st = w.get("stats") or {}
+            lr = w.get("last_run") or {}
+            running = bool(w.get("continuous_running"))
+            state = ("\U0001f441 checking now" if w.get("sweeping_now")
+                     else "\U0001f7e2 running" if running
+                     else "\u26aa stopped" if w.get("enabled") else "inactive")
+            lines = [f"<b>{_esc(w['name'])}</b>", state]
+            if w.get("instruction"):
+                lines.append(_esc(w["instruction"]))
+            if st.get("observations"):
+                lines.append(f"{st.get('matches', 0)} matched of {st['observations']} seen"
+                             f" \u00b7 {st.get('runs', 0)} runs")
+            if lr.get("summary"):
+                lines.append(f"last: {_esc(str(lr['summary'])[:120])}")
+            lines.append(f"{len(w.get('urls') or [])} search url(s)")
+            idx = data[5:]
+            btns = [[{"text": ("\u23f9 Stop" if running else "\u25b6 Start"),
+                      "callback_data": f"wact:{'stop' if running else 'start'}:{idx}"}]]
+            self._send("\n".join(lines), chat, html=True, buttons=btns)
+            return True
+        if data.startswith("wact:"):
+            try:
+                op, idx = data[5:].split(":", 1)
+            except ValueError:
+                return True
+            w = self._watch_for_callback(chat, idx)
+            if w is None or op not in ("start", "stop"):
+                self._answer_callback(cb.get("id"), "That one isn't available any more.")
+                return True
+            try:
+                from urllib.parse import quote
+                _hx.post(f"{self.dashboard_url}/api/watches/{quote(w['name'])}"
+                         f"/continuous/{op}", timeout=30.0)
+                self._answer_callback(cb.get("id"),
+                                      "Starting\u2026" if op == "start" else "Stopping\u2026")
+                verb = ("\u25b6 Started" if op == "start" else "\u23f9 Stopped")
+                self._send(f"{verb} \u201c{w['name']}\u201d.", chat)
+            except Exception:
+                self._answer_callback(cb.get("id"), "Couldn't reach the app \u2014 try again.")
+            return True
+        return False
 
     def _answer_callback(self, cb_id, text: str = "") -> None:
         """Acknowledge the tap so Telegram stops the button's spinner."""

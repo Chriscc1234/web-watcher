@@ -3268,15 +3268,32 @@ def _render_watch_status(cfg, manager, owner: str | None) -> str:
 
     blocks = [head]
     from web_watcher.storage import watch_stats
+
+    # The admin's list mixes everyone's watches; grouped headers make "what is mine and
+    # what is unassigned?" answerable from the layout alone. A buddy's view (only their
+    # own watches) stays a flat list.
+    groups: dict = {}
     for w in mine:
-        dot, label = _state(w)
-        line = [f"{dot} <b>{_h.escape(w.name)}</b>", f"   {label}"]
-        try:
-            st = watch_stats(w.id or w.name, w.name)
-            line.append(f"   {st['matches']} matched of {st['observations']} seen")
-        except Exception:
-            pass
-        blocks.append("\n".join(line))
+        groups.setdefault(_owner_label_for(w, owner, cfg), []).append(w)
+    grouped = _is_admin_owner(owner, cfg) and len(groups) > 1
+    ordered = (sorted(groups.items(), key=lambda kv: (kv[0] != "yours", kv[0]))
+               if grouped else [("", mine)])
+
+    for glabel, gwatches in ordered:
+        if grouped:
+            title = ("Yours" if glabel == "yours"
+                     else "Unassigned (managed by you)"
+                     if glabel.startswith("unassigned") else glabel)
+            blocks.append(f"\U0001f464 <b>{_h.escape(title)}</b>")
+        for w in gwatches:
+            dot, label = _state(w)
+            line = [f"{dot} <b>{_h.escape(w.name)}</b>", f"   {label}"]
+            try:
+                st = watch_stats(w.id or w.name, w.name)
+                line.append(f"   {st['matches']} matched of {st['observations']} seen")
+            except Exception:
+                pass
+            blocks.append("\n".join(line))
 
     # A blank line between each block is what makes the titles stand apart.
     return "\n\n".join(blocks)
@@ -3669,6 +3686,24 @@ def _watches_for_owner(cfg, owner: str | None):
     return [w for w in cfg.watches if str(getattr(w, "owner", "") or "") == str(owner)]
 
 
+def _owner_label_for(w, asker: str | None, cfg) -> str:
+    """Whose watch is this, from the ASKER's seat. The admin sees every watch, and neither
+    the model context nor the status list said anything about ownership — so "what is mine
+    and what is unassigned?" was answered by guesswork. Facts, per watch."""
+    try:
+        wid = str(getattr(w, "owner", "") or "")
+        main = str(cfg.notifications.telegram.chat_id or "")
+        asker_id = str(asker) if asker is not None else main
+        if not wid:
+            return "unassigned (managed by you)" if _is_admin_owner(asker, cfg) else "unassigned"
+        if wid == asker_id or (asker is None and wid == main):
+            return "yours"
+        name = _load_owner_names().get(wid, "")
+        return f"{name} (chat {wid})" if name else f"chat {wid}"
+    except Exception:
+        return ""
+
+
 def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
     """Render the user's watches IN FULL, each with a HEALTH line (state + last-run
     result/error + matches found), for the assistant/Watcher system prompt. Shared by
@@ -3722,6 +3757,7 @@ def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
         )
         lines = [
             f"  • {w.name}",
+            f"      owner: {_owner_label_for(w, owner, cfg)}",
         ]
         # The decoded search terms first — this is what the user means by "what are we
         # searching for / what are our terms", so make it the most prominent, plain line.

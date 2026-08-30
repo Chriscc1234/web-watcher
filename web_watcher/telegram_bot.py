@@ -496,12 +496,16 @@ class TelegramBridge:
             # status list, the nothing-running nudge). Matching names against reply text
             # put an irrelevant Cars button under a list of MacGregor matches, because the
             # nudge sentence happened to mention that watch's name.
-            wbtns = self._watch_buttons_for(result.get("watch_buttons"), to)
-            # With buttons on screen, the full per-watch list in the TEXT is a dupe — the
-            # compact header + info-carrying buttons ARE the list.
-            if wbtns and result.get("tg_message"):
-                reply, as_html = result["tg_message"], True
-            self._send(reply or "(no reply)", to, html=as_html, buttons=wbtns)
+            wnames = result.get("watch_buttons")
+            if wnames and result.get("tg_message"):
+                # One MESSAGE per watch, its buttons attached to it. Button labels are
+                # one-line and truncate ("Lots of \u2026"), so the info lives in the message
+                # text — full name, state, stats — and the buttons are pure ACTIONS.
+                self._send(result["tg_message"], to, html=True)
+                self._send_watch_cards(wnames, to)
+            else:
+                wbtns = self._watch_buttons_for(wnames, to)
+                self._send(reply or "(no reply)", to, html=as_html, buttons=wbtns)
 
     def _apply_pending(self, pending: list[dict], chat_id: str = "") -> str:
         """Create/update the proposed watches through the app's own API (the same endpoints the
@@ -981,6 +985,49 @@ class TelegramBridge:
         if url.startswith("http"):
             text += f'\n<a href="{_h.escape(url, quote=True)}">open</a>'
         self._send(text, chat, html=True, buttons=buttons)
+
+    @staticmethod
+    def _watch_card_text(w) -> str:
+        """One watch as one Telegram message: full name (never truncated), state, owner-ish
+        detail and stats. HTML — every dynamic value escaped."""
+        import html as _h
+        running = bool(w.get("continuous_running"))
+        state = ("\U0001f441 checking now" if w.get("sweeping_now")
+                 else "\U0001f7e2 on \u2014 watching" if running
+                 else "\u26aa off \u2014 not watching" if w.get("enabled")
+                 else "\u26ab inactive")
+        lines = [f"<b>{_h.escape(w.get('name') or '')}</b>", state]
+        st = w.get("stats") or {}
+        if st.get("observations"):
+            lines.append(f"{st.get('matches', 0)} matched of {st['observations']} seen")
+        return "\n".join(lines)
+
+    def _send_watch_cards(self, names, chat_id: str) -> None:
+        """One message per watch with its OWN action buttons. The user's design, verbatim:
+        "maybe multiple messages, the info in a message then the button for one watch"."""
+        import httpx as _hx
+        try:
+            r = _hx.get(f"{self.dashboard_url}/api/watches", timeout=10.0)
+            watches = r.json() or []
+        except Exception:
+            return
+        admin = str(chat_id) == str(self.chat_id)
+        mine = {w.get("name"): w for w in watches
+                if admin or str(w.get("owner") or "") == str(chat_id)}
+        hit = [mine[n] for n in names if n in mine][:8]
+        if not hit:
+            return
+        self._wd_names[str(chat_id)] = [w["name"] for w in hit]
+        for i, w in enumerate(hit):
+            running = bool(w.get("continuous_running"))
+            row = []
+            if w.get("mode") == "continuous" and w.get("enabled"):
+                row.append({"text": ("\u23f9 Stop" if running else "\u25b6 Start"),
+                            "callback_data": f"wact:{'stop' if running else 'start'}:{i}"})
+            row.append({"text": "\U0001f50d Details", "callback_data": f"wdet:{i}"})
+            self._send(self._watch_card_text(w), chat_id, html=True, buttons=[row])
+            if i < len(hit) - 1:
+                time.sleep(0.3)
 
     def _watch_buttons_for(self, names, chat_id: str) -> list | None:
         """One inline button per EXPLICITLY named watch (scoped: a buddy only ever gets

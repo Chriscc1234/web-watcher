@@ -3266,7 +3266,7 @@ def _render_watch_status_compact(cfg, manager, owner: str | None) -> str:
         head = f"\u23f8 <b>Watching is paused.</b> {len(mine)} watch(es) \u2014 tap one:"
     elif running == 0:
         head = (f"\u26aa <b>Nothing is running.</b> {len(mine)} watch(es) \u2014 "
-                f"tap one to see it or start it:")
+                f"its card is below:")
     else:
         head = f"\U0001f7e2 <b>{running} of {len(mine)} running</b> \u2014 tap a watch:"
     lines = [head]

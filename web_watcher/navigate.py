@@ -569,8 +569,35 @@ def set_location(page, place: str, radius: int | None = None, hint: dict | None 
     # Facebook: marker read "Location: Anacortes, Washington, Within 100 mi", the watch wanted
     # Anacortes, and set_location said False. Not touching a control that is already right is
     # also what a person does.
-    place_key = re.sub(r"[^a-z]", "", (place.split(",")[0] or "").lower())
-    if place_key and place_key in re.sub(r"[^a-z]", "", (before or "").lower()):
+    #
+    # A ZIP has to be recognised by the TOWN the site displays. The next live round of the
+    # same bug: the control showed "Seattle" (set by the previous sweep), the watch wanted
+    # 98121 — which IS Seattle — and "98121" is not a substring of "Seattle", so the picker
+    # was reopened and re-set every sweep, and then reported failure because nothing changed.
+    keys = [place.split(",")[0]]
+    if re.fullmatch(r"\d{5}", place):
+        try:
+            from web_watcher.cl_geo import place_for_zip
+            town = place_for_zip(place)
+            if town:
+                keys.append(town)
+        except Exception:
+            pass
+
+    def _shows_target(marker: str) -> bool:
+        # Letters only, and an EMPTY key never matches: "98121" strips to "" and `"" in hay`
+        # is always True, which would call every location already-correct and never touch the
+        # picker at all. (Caught by the test for a zip in a DIFFERENT town.)
+        hay = re.sub(r"[^a-z]", "", (marker or "").lower())
+        if not hay:
+            return False
+        for k in keys:
+            kk = re.sub(r"[^a-z]", "", (k or "").lower())
+            if kk and kk in hay:
+                return True
+        return False
+
+    if _shows_target(before):
         log.info("Human location: already set to %r — leaving the control alone", place)
         return True
 
@@ -607,12 +634,15 @@ def set_location(page, place: str, radius: int | None = None, hint: dict | None 
     page.wait_for_timeout(2500)
 
     after = _location_marker(page)
-    changed = bool(after) and after != before
-    if changed:
+    # Success = the site is now showing the right area. Either the marker moved, OR it names
+    # our target town (re-asserting an already-right location changes nothing and used to be
+    # scored a failure — the caller then "fell back" from a state that was already correct).
+    ok = _shows_target(after) or (bool(after) and after != before)
+    if ok:
         log.info("Human location: set to %r via the page control", place)
     else:
         log.info("set_location: entered %r but couldn't confirm the location changed", place)
-    return changed
+    return ok
 
 
 def _location_marker(page) -> str:

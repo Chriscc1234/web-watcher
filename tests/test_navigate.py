@@ -289,6 +289,39 @@ def test_already_correct_location_is_success_not_failure():
     assert "already set to" in src, "the already-there short-circuit is gone"
 
 
+def test_zip_recognised_by_the_town_the_site_shows(monkeypatch):
+    """The live bug, functional this time: Facebook's control showed "Seattle, Washington"
+    (set last sweep); the watch wanted 98121, which IS Seattle. "98121" is not a substring of
+    "Seattle", so the picker was reopened and re-set every sweep, then reported failure
+    because nothing had changed. A zip must be matched by the TOWN it resolves to."""
+    from unittest.mock import MagicMock
+    from web_watcher import navigate
+
+    page = MagicMock()
+    monkeypatch.setattr(navigate, "_location_marker",
+                        lambda p: "Location: Seattle, Washington, Within 100 mi")
+    opened = {"n": 0}
+    monkeypatch.setattr(navigate, "_first_visible",
+                        lambda p, sel: opened.__setitem__("n", opened["n"] + 1))
+
+    assert navigate.set_location(page, "98121") is True     # recognised as Seattle
+    assert opened["n"] == 0, "should not have touched the picker — already correct"
+
+
+def test_zip_for_a_different_town_still_drives_the_picker(monkeypatch):
+    """The guard must not over-match: 98221 is Anacortes, not Seattle, so a control showing
+    Seattle really does need changing."""
+    from unittest.mock import MagicMock
+    from web_watcher import navigate
+    page = MagicMock()
+    monkeypatch.setattr(navigate, "_location_marker",
+                        lambda p: "Location: Seattle, Washington, Within 100 mi")
+    # No input/opener found → set_location bails via the picker path, i.e. it did NOT
+    # short-circuit as already-correct.
+    monkeypatch.setattr(navigate, "_first_visible", lambda p, sel: None)
+    assert navigate.set_location(page, "98221") is False    # tried to change, couldn't here
+
+
 def test_click_button_by_label_has_no_undefined_name():
     """It called _human_click(page, …) with only `scope` in scope — a NameError swallowed by
     its own bare except, so the confirm step of set_location never clicked anything."""

@@ -155,6 +155,28 @@ def nearest_zip(lat: float, lon: float) -> str | None:
     return best
 
 
+@lru_cache(maxsize=256)
+def place_for_zip(zip5: str) -> str | None:
+    """The town name a zip belongs to — the reverse of place_latlon, for matching what a
+    SITE displays. Facebook's location control shows "Seattle, Washington"; a watch that set
+    98121 could never recognise its own location in that ("98121" is not a substring of
+    "Seattle"), so it re-set an already-correct picker every sweep and then reported failure
+    because nothing changed. Capped at ~15 mi so a bogus zip resolves to nothing rather than
+    to some far-away town."""
+    ll = zip_latlon(str(zip5 or "").strip())
+    if not ll:
+        return None
+    lat, lon = ll
+    coslat = math.cos(math.radians(lat))
+    best, best_d = None, float("inf")
+    for name, entries in _place_table().items():
+        for _st, la, lo in entries:
+            d = math.hypot(la - lat, (lo - lon) * coslat)
+            if d < best_d:
+                best, best_d = name, d
+    return best if best_d < 0.22 else None      # ~15 miles
+
+
 def nearest_region_host(lat: float, lon: float) -> str | None:
     """The craigslist region hostname geographically closest to (lat, lon)."""
     best, best_d = None, float("inf")

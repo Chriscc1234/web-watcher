@@ -2675,9 +2675,10 @@ async function showWatchDetails(name) {
           ? `${Math.round(w.continuous_idle_seconds/60)}\u2013${Math.round(w.continuous_idle_seconds*3/60)} min between sweeps` : '')
     + row('Searches', urls);
   const btn = document.getElementById('wd-toggle');
-  btn.textContent = running ? '\u23f9 Stop' : '\u25b6 Start';
+  btn.textContent = running ? '\u23f9 Stop' : (w.enabled ? '\u25b6 Start' : '\u26a1 Activate');
   btn.className = running ? 'danger' : 'primary';
-  btn.style.display = (w.mode === 'continuous' && w.enabled) ? '' : 'none';
+  // A shelved watch gets Activate (enable + start in one click) instead of nothing.
+  btn.style.display = (w.mode === 'continuous' || !w.enabled) ? '' : 'none';
   document.getElementById('wd-overlay').style.display = 'flex';
 }
 
@@ -2687,7 +2688,9 @@ async function wdToggle() {
     const all = await api('/api/watches');
     const w = all.find(x => x.name === _detailsName);
     const op = (w && w.continuous_running) ? 'stop' : 'start';
-    await api(`/api/watches/${encodeURIComponent(_detailsName)}/continuous/${op}`, { method: 'POST' });
+    // The mode-aware action endpoint: start enables a shelved watch too; stop keeps the shelf.
+    await api(`/api/watches/${encodeURIComponent(_detailsName)}/action`,
+              { method: 'POST', body: JSON.stringify({ action: op }) });
     setTimeout(() => { showWatchDetails(_detailsName); _watchesSig = ''; loadWatches(); }, 900);
   } catch (e) { alert('Could not toggle it: ' + e.message); }
 }

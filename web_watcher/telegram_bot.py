@@ -1021,7 +1021,13 @@ class TelegramBridge:
         for i, w in enumerate(hit):
             running = bool(w.get("continuous_running"))
             row = []
-            if w.get("mode") == "continuous" and w.get("enabled"):
+            if not w.get("enabled"):
+                # A shelved watch's card was read-only — "shouldn't we also have a start
+                # or activate button on the deactivated ones?" Activate = the action
+                # endpoint's start: enable + start in one tap.
+                row.append({"text": "\u26a1 Activate",
+                            "callback_data": f"wact:start:{i}"})
+            elif w.get("mode") == "continuous":
                 row.append({"text": ("\u23f9 Stop" if running else "\u25b6 Start"),
                             "callback_data": f"wact:{'stop' if running else 'start'}:{i}"})
             row.append({"text": "\U0001f50d Details", "callback_data": f"wdet:{i}"})
@@ -1102,7 +1108,10 @@ class TelegramBridge:
                 lines.append(f"last: {_esc(str(lr['summary'])[:120])}")
             lines.append(f"{len(w.get('urls') or [])} search url(s)")
             idx = data[5:]
-            btns = [[{"text": ("\u23f9 Stop" if running else "\u25b6 Start"),
+            label = ("\u23f9 Stop" if running
+                     else "\u25b6 Start" if w.get("enabled")
+                     else "\u26a1 Activate")
+            btns = [[{"text": label,
                       "callback_data": f"wact:{'stop' if running else 'start'}:{idx}"}]]
             self._send("\n".join(lines), chat, html=True, buttons=btns)
             return True
@@ -1117,8 +1126,12 @@ class TelegramBridge:
                 return True
             try:
                 from urllib.parse import quote
+                # The mode-aware ACTION endpoint, not continuous/{op}: its start ENABLES a
+                # shelved watch before starting it (continuous/start records intent the
+                # rotation would then ignore — the watch stays off), and its stop keeps
+                # the enabled shelf-state (v0.170: stop is not disable).
                 _hx.post(f"{self.dashboard_url}/api/watches/{quote(w['name'])}"
-                         f"/continuous/{op}", timeout=30.0)
+                         f"/action", json={"action": op}, timeout=30.0)
                 self._answer_callback(cb.get("id"),
                                       "Starting\u2026" if op == "start" else "Stopping\u2026")
                 verb = ("\u25b6 Started" if op == "start" else "\u23f9 Stopped")

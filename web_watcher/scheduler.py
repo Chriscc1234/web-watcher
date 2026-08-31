@@ -2614,78 +2614,93 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
     return confirmed + over_cap
 
 
-def _auto_vet(watch, l, cfg, db_path, run_ts):
-    """Run Deep Inspect on a match whose critical spec is unconfirmed, BEFORE it alerts.
-    Returns (ok, one_line) or None when the vet can't run. The verdict is persisted onto
-    the observation either way — "a vet should update the entire match"."""
+_VET_UNSURE_RE = re.compile(
+    r"unclear|cannot (?:determine|tell|verify)|can't (?:determine|tell|verify)|not sure|"
+    r"unable to|insufficient|hard to say|would need", re.I)
+
+
+def _vet_verdict_usable(text: str) -> bool:
+    """The 'does the local model need help?' check — this validator IS the escalation
+    trigger (chat_smart escalates exactly when it fails). Unusable when: the JSON is
+    malformed or incomplete, the model admits it can't tell, or the verdict contradicts
+    its own reason (a failing reason with match=true is the golf-club signature)."""
     try:
-        from web_watcher.inspect import deep_inspect_listing
-        criteria = (getattr(watch, "judgment_prompt", "") or
-                    getattr(watch, "instruction", "") or "")
-        v = deep_inspect_listing(l.url, criteria, cfg)
-        if not v or v.get("deal_quality") is None:
-            return None
-        scam = str(v.get("scam_risk") or "").lower()
-        deal = v.get("deal_quality") or 0
-        line = f"deal {deal}/5, scam risk {scam or '?'}" + \
-               (f" — {v.get('summary', '')[:90]}" if v.get("summary") else "")
-        ok = scam != "high" and deal >= 2
-        try:
-            record_observation(watch.id or watch.name, watch.name, l.key, run_ts,
-                               matched=ok, rating=(getattr(l, "rating", None)
-                                                   if ok else 2),
-                               judge_reason=f"auto-vet: {line}", db_path=db_path)
-        except Exception:
-            pass
-        return (ok, line)
-    except Exception as exc:
-        log.debug("auto-vet unavailable for %s: %s", l.url[:60], exc)
-        return None
+        import json as _json
+        t = text or ""
+        i, j = t.find("{"), t.rfind("}")
+        if i < 0 or j <= i:
+            return False
+        d = _json.loads(t[i:j + 1])
+        if not all(k in d for k in ("match", "deal_quality", "scam_risk", "reason")):
+            return False
+        if str(d.get("scam_risk", "")).lower() not in ("low", "medium", "high"):
+            return False
+        dq = d.get("deal_quality")
+        if not isinstance(dq, (int, float)) or not 1 <= dq <= 5:
+            return False
+        reason = str(d.get("reason", ""))
+        if _VET_UNSURE_RE.search(reason):
+            return False                       # the model says it needs help — believe it
+        if bool(d.get("match")) and _FAILING_REASON_RE.search(reason):
+            return False                       # "match" with a failing reason — contradiction
+        return True
+    except Exception:
+        return False
 
 
-def _cloud_confirm_match(watch, l, cfg):
-    """The last check before a match interrupts a person's phone: the cloud reads what we
-    know about the listing against the watch's own criteria. Returns (ok, reason) or None
-    when the cloud can't answer (no key, over budget, error) — FAIL-OPEN: an alert must
-    never be lost to a cloud hiccup, only to a confident rejection.
-
-    Exists because the local judge alerted a $25 "Macgregor Great-Scot MP-8" — a GOLF CLUB
-    — as a four-star sailboat. Automatic, no toggle: escalation happens exactly where a
-    mistake costs the most (the user's attention), and alerts are capped, so it's cents."""
+def _boundary_vet(watch, l, cfg, db_path, run_ts):
+    """ONE full vet per alert, LOCAL FIRST — the user's design: "can we not offload it onto
+    the local model and escalate when the local model needs help? 15sec really doesn't make
+    a difference." The local big model runs the whole rubric (~15-20s measured, free);
+    chat_smart climbs to the cloud only when _vet_verdict_usable says the local answer
+    can't be trusted. Returns (ok, one_line) or None (vet unavailable — FAIL-OPEN).
+    The verdict is persisted onto the observation either way."""
     try:
         import json as _json
         from web_watcher import llm
-        ok, _why = llm.cloud_ready(cfg, "alert_verify")
-        if not ok:
-            return None
+        from web_watcher.inspect import resolve_inspect_model
         criteria = (getattr(watch, "judgment_prompt", "") or
                     getattr(watch, "instruction", "") or "").strip()
         if not criteria:
             return None
-        body = (getattr(l, "details", "") or "").strip()[:1200]
+        body = (getattr(l, "details", "") or "").strip()[:1500]
         content = (f"WATCH CRITERIA: {criteria}\n\nLISTING\nTITLE: {l.title}\n"
                    f"PRICE: {l.price or '(none shown)'}\n"
                    + (f"AD BODY: {body}" if body else "(the ad body has not been read)"))
         sys_p = (
-            "You confirm marketplace matches moments before they interrupt a person's "
-            "phone. Answer STRICT JSON: {\"match\": true or false, \"reason\": \"one "
-            "short line\"}. A listing that is a different KIND of thing sharing a brand "
-            "name — parts, accessories, apparel, memorabilia, a golf club against a "
-            "sailboat brand — is false. When the evidence is thin, judge the kind of thing "
-            "it plainly is.")
+            "You vet marketplace matches moments before they interrupt a person's phone. "
+            "Answer STRICT JSON: {\"match\": true|false, \"deal_quality\": 1-5, "
+            "\"scam_risk\": \"low|medium|high\", \"reason\": \"one short line\"}. "
+            "match=false when the listing is a different KIND of thing sharing a brand "
+            "name (parts, accessories, apparel, a golf club against a sailboat brand) or "
+            "fails a stated requirement. Judge scams by the classic signs: too-cheap "
+            "price, stock photos, urgency, off-platform payment. Judge the kind of thing "
+            "the listing plainly is; never answer with uncertainty words — commit.")
         out = llm.chat_smart(
             [{"role": "system", "content": sys_p}, {"role": "user", "content": content}],
-            role="alert_verify", local_model=cfg.models.effective_council_model, cfg=cfg,
-            skip_local=True, format_json=True, timeout=45.0,
-            validate=lambda t: '"match"' in (t or ""))
+            role="alert_verify", local_model=resolve_inspect_model(cfg), cfg=cfg,
+            format_json=True, timeout=120.0, validate=_vet_verdict_usable)
         text = (out or {}).get("text") or ""
         i, j = text.find("{"), text.rfind("}")
-        data = _json.loads(text[i:j + 1]) if i >= 0 <= j else {}
-        if "match" not in data:
+        if i < 0 or j <= i:
             return None
-        return (bool(data["match"]), str(data.get("reason", ""))[:160])
+        d = _json.loads(text[i:j + 1])
+        if "match" not in d:
+            return None
+        deal = d.get("deal_quality") or 0
+        scam = str(d.get("scam_risk") or "?").lower()
+        line = f"deal {deal}/5, scam risk {scam} — {str(d.get('reason', ''))[:110]}"
+        ok = bool(d.get("match")) and scam != "high" and (deal or 3) >= 2
+        try:
+            record_observation(watch.id or watch.name, watch.name, l.key, run_ts,
+                               matched=ok,
+                               rating=(getattr(l, "rating", None) if ok else 2),
+                               judge_reason=f"vet: {line}", db_path=db_path)
+        except Exception:
+            pass
+        return (ok, line)
     except Exception as exc:
-        log.debug("alert-boundary confirm unavailable: %s", exc)
+        log.debug("boundary vet unavailable for %s: %s", getattr(l, "url", "")[:60], exc)
         return None
 
 
@@ -2736,42 +2751,21 @@ def _alert_new_listings(
         summary = f"{star_prefix}New match: {title}" + (f" — {price}" if price else "")
         if why:
             summary += f"\n{why}"      # the judge's one-line verdict, in the alert
-        # THE ALERT BOUNDARY. Confirmed by the cloud when available; fail-open otherwise.
-        # An UNCONFIRMED-SPEC match ("manual trans unconfirmed", rating 3) gets the full
-        # vet first — the user's ask, verbatim: "the vet should auto run on stuff like
-        # this before even giving the match over... a vet should update the entire match".
-        # The vet is offline-first now (stored body, no browser), so this is one model
-        # call, and its verdict is PERSISTED onto the observation either way.
-        _why_l = (getattr(l, "judge_reason", "") or "").lower()
-        _unconfirmed = ((getattr(l, "rating", None) == 3)
-                        or any(t in _why_l for t in
-                               ("unconfirmed", "not specified", "doesn't say",
-                                "no transmission", "not stated", "unclear")))
-        if _unconfirmed:
-            _vet = _auto_vet(watch, l, cfg, db_path, run_ts)
-            if _vet is not None and not _vet[0]:
-                log.info("Auto-vet rejected %r before alert — %s",
-                         (l.title or "")[:60], _vet[1])
-                _mark_seen(l)
-                continue
-            if _vet is not None:
-                why = (why + "\n" if why else "") + f"Vet: {_vet[1]}"
-                summary = f"{star_prefix}New match: {title}" + \
-                          (f" — {price}" if price else "") + f"\n{why}"
-
-        _confirm = _cloud_confirm_match(watch, l, cfg)
-        if _confirm is not None and _confirm[0] is False:
-            log.info("Alert boundary: cloud rejected %r — %s (not sending)",
-                     (l.title or "")[:60], _confirm[1])
-            try:
-                record_observation(watch.id or watch.name, watch.name, l.key,
-                                   run_ts, matched=False, rating=2,
-                                   judge_reason=f"alert-boundary: {_confirm[1]}",
-                                   db_path=db_path)
-            except Exception:
-                pass
+        # THE ALERT BOUNDARY: every alert gets ONE full vet, local first, cloud only when
+        # the local verdict fails the usable-check ("escalate when the local model needs
+        # help"). Confident-bad verdicts (no-match / scam-high / bottom-deal) block the
+        # alert and demote the match; everything else rides along on the card. FAIL-OPEN:
+        # no vet available → the alert still goes.
+        _vet = _boundary_vet(watch, l, cfg, db_path, run_ts)
+        if _vet is not None and not _vet[0]:
+            log.info("Boundary vet rejected %r — %s (not sending)",
+                     (l.title or "")[:60], _vet[1])
             _mark_seen(l)                       # never reconsider it every sweep
             continue
+        if _vet is not None:
+            why = (why + "\n" if why else "") + f"Vet: {_vet[1]}"
+            summary = f"{star_prefix}New match: {title}" + \
+                      (f" — {price}" if price else "") + f"\n{why}"
 
         result = ReasoningResult(found=True, summary=summary, confidence="high", link=l.url)
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=ts)

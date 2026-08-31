@@ -96,16 +96,14 @@ def test_alert_boundary_blocks_the_golf_club(monkeypatch, tmp_path):
                        title="1997 MacGregor 26X", price="$14,000")
     boat.rating = 4
 
-    monkeypatch.setattr(sch, "_cloud_confirm_match",
-                        lambda w, l, cfg: (False, "a golf club, not a sailboat")
-                        if "MP-8" in l.title else (True, "a real MacGregor sailboat"))
-    sent, seen, demoted = [], [], []
+    monkeypatch.setattr(sch, "_boundary_vet",
+                        lambda w, l, cfg, db, ts: (False, "a golf club, not a sailboat")
+                        if "MP-8" in l.title else (True, "deal 4/5, scam risk low"))
+    sent, seen = [], []
     monkeypatch.setattr(sch, "send_notifications", lambda payload, *a, **k:
                         sent.append(payload.result.summary))
     monkeypatch.setattr(sch, "save_seen_listing",
                         lambda name, key, ts, **k: seen.append(key))
-    monkeypatch.setattr(sch, "record_observation",
-                        lambda *a, **k: demoted.append(k.get("judge_reason", "")))
     monkeypatch.setattr(sch.time, "sleep", lambda s: None)
     from types import SimpleNamespace as NS
     cfg = NS(notifications=NS())
@@ -115,7 +113,6 @@ def test_alert_boundary_blocks_the_golf_club(monkeypatch, tmp_path):
     assert sent and "MacGregor 26X" in sent[0]            # the boat went out
     assert not any("MP-8" in s for s in sent)             # the club never did
     assert "fb:1" in seen                                 # ...and won't come back
-    assert any("golf club" in d for d in demoted)
 
 
 def test_alert_boundary_fails_open(monkeypatch, tmp_path):
@@ -126,7 +123,7 @@ def test_alert_boundary_fails_open(monkeypatch, tmp_path):
                continuous_max_alerts=5, notify=NS(telegram=True, email=False),
                owner="", urls=["https://x"])
     l = sch.Listing(key="k", url="https://x/1", title="thing", price="$5")
-    monkeypatch.setattr(sch, "_cloud_confirm_match", lambda w, li, cfg: None)
+    monkeypatch.setattr(sch, "_boundary_vet", lambda w, li, cfg, db, ts: None)
     sent = []
     monkeypatch.setattr(sch, "send_notifications",
                         lambda payload, *a, **k: sent.append(1))
@@ -166,9 +163,8 @@ def test_data_only_watches_are_not_flagged_for_unalerted():
 
 
 def test_unconfirmed_spec_match_is_auto_vetted_before_alerting(monkeypatch, tmp_path):
-    """"why give me a watch if it says manual trans unconfirmed. the vet should auto run on
-    stuff like this before even giving the match over" — a rating-3/unconfirmed match runs
-    the (offline-first) vet; a scam verdict blocks the alert and updates the record."""
+    """Every alert is vetted now (local-first, cloud when the local answer fails the
+    usable-check); a confident-bad verdict blocks the alert and marks it seen."""
     import web_watcher.scheduler as sch
     from types import SimpleNamespace as NS
     watch = NS(name="W", id="w1", judgment_prompt="manual tacomas", instruction="",
@@ -179,9 +175,8 @@ def test_unconfirmed_spec_match_is_auto_vetted_before_alerting(monkeypatch, tmp_
     sketchy.rating = 3
     sketchy.judge_reason = "manual transmission unconfirmed"
 
-    monkeypatch.setattr(sch, "_auto_vet",
+    monkeypatch.setattr(sch, "_boundary_vet",
                         lambda w, l, cfg, db, ts: (False, "deal 1/5, scam risk high"))
-    monkeypatch.setattr(sch, "_cloud_confirm_match", lambda w, l, cfg: None)
     sent, seen = [], []
     monkeypatch.setattr(sch, "send_notifications", lambda *a, **k: sent.append(1))
     monkeypatch.setattr(sch, "save_seen_listing", lambda name, key, ts, **k: seen.append(key))
@@ -191,7 +186,7 @@ def test_unconfirmed_spec_match_is_auto_vetted_before_alerting(monkeypatch, tmp_
     assert n == 0 and not sent and "k1" in seen
 
 
-def test_confirmed_spec_match_skips_the_auto_vet(monkeypatch, tmp_path):
+def test_passing_vet_annotates_and_sends(monkeypatch, tmp_path):
     import web_watcher.scheduler as sch
     from types import SimpleNamespace as NS
     watch = NS(name="W", id="w1", judgment_prompt="x", instruction="",
@@ -200,12 +195,36 @@ def test_confirmed_spec_match_skips_the_auto_vet(monkeypatch, tmp_path):
     good = sch.Listing(key="k2", url="https://x/2", title="clean manual", price="$5")
     good.rating = 4
     good.judge_reason = "manual confirmed in ad body"
-    monkeypatch.setattr(sch, "_auto_vet",
-                        lambda *a: (_ for _ in ()).throw(AssertionError("vet must not run")))
-    monkeypatch.setattr(sch, "_cloud_confirm_match", lambda w, l, cfg: None)
+    monkeypatch.setattr(sch, "_boundary_vet",
+                        lambda w, l, cfg, db, ts: (True, "deal 4/5, scam risk low"))
     sent = []
     monkeypatch.setattr(sch, "send_notifications", lambda *a, **k: sent.append(1))
     monkeypatch.setattr(sch, "save_seen_listing", lambda *a, **k: None)
     monkeypatch.setattr(sch.time, "sleep", lambda s: None)
     assert sch._alert_new_listings(watch, NS(notifications=NS()), [good],
                                    "2026-08-30T21:00:00", tmp_path) == 1
+
+
+# ── the "needs help" validator: escalation fires exactly when local can't be trusted ─
+
+def test_vet_validator_accepts_a_committed_verdict():
+    import web_watcher.scheduler as sch
+    good = '{"match": true, "deal_quality": 4, "scam_risk": "low", "reason": "real manual Tacoma, fair price"}'
+    assert sch._vet_verdict_usable(good) is True
+
+
+def test_vet_validator_escalates_on_uncertainty_and_contradiction():
+    """"escalate when the local model needs help" — the validator IS the trigger: an
+    admitted can't-tell, a malformed verdict, or match=true wearing a failing reason
+    (the golf-club signature) all fail the check, which is what makes chat_smart climb."""
+    import web_watcher.scheduler as sch
+    assert not sch._vet_verdict_usable(
+        '{"match": true, "deal_quality": 3, "scam_risk": "low", '
+        '"reason": "unclear whether it is manual"}')
+    assert not sch._vet_verdict_usable(
+        '{"match": true, "deal_quality": 3, "scam_risk": "low", '
+        '"reason": "wrong kind of item but nice"}')
+    assert not sch._vet_verdict_usable('{"match": true}')
+    assert not sch._vet_verdict_usable("I think it looks fine")
+    assert not sch._vet_verdict_usable(
+        '{"match": true, "deal_quality": 9, "scam_risk": "low", "reason": "x"}')

@@ -738,3 +738,39 @@ def test_viewer_renders_thumbnail_and_open_link():
     html = (Path(D.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
     assert "alert-thumb" in html and "alert-open" in html
     assert "Open listing" in html
+
+
+# ── vet-card photos come from what we own ───────────────────────────────────────
+
+def test_listing_image_prefers_our_saved_thumb(monkeypatch, tmp_path):
+    """"Is there a reason it's no longer showing images in the vet?" — the card passed an
+    empty image url and leaned on og:image, which on facebook is a login wall. Our own
+    saved bytes come first now."""
+    from web_watcher import notify as N
+    from web_watcher import thumbs as T
+    monkeypatch.setattr(N, "_known_facts", lambda url: {"listing_key": "fb:9", "image": ""})
+    f = tmp_path / "fb_9.jpg"
+    f.write_bytes(b"JPEGBYTES")
+    monkeypatch.setattr(T, "file_for", lambda name: f)
+    monkeypatch.setattr(N, "og_image_for",
+                        lambda url: (_ for _ in ()).throw(AssertionError("no live fetch")))
+    assert N.image_bytes_for_listing("", "https://www.facebook.com/marketplace/item/9/") \
+        == b"JPEGBYTES"
+
+
+def test_listing_image_uses_stored_url_then_never_og_on_facebook(monkeypatch):
+    from web_watcher import notify as N
+    from web_watcher import thumbs as T
+    monkeypatch.setattr(T, "file_for", lambda name: None)
+    monkeypatch.setattr(N, "_known_facts",
+                        lambda url: {"listing_key": "fb:9",
+                                     "image": "https://scontent.example/photo.jpg"})
+    monkeypatch.setattr(N, "fetch_image_bytes",
+                        lambda u: b"STORED" if "scontent" in u else None)
+    assert N.image_bytes_for_listing("", "https://www.facebook.com/marketplace/item/9/") \
+        == b"STORED"
+    # No stored url at all → facebook og fetch is refused, not attempted.
+    monkeypatch.setattr(N, "_known_facts", lambda url: {"listing_key": "fb:9", "image": ""})
+    monkeypatch.setattr(N, "og_image_for",
+                        lambda url: (_ for _ in ()).throw(AssertionError("no og on fb")))
+    assert N.image_bytes_for_listing("", "https://www.facebook.com/marketplace/item/9/") is None

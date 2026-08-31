@@ -486,12 +486,37 @@ def og_image_for(listing_url: str) -> str:
 
 
 def image_bytes_for_listing(image_url: str, listing_url: str = "") -> bytes | None:
-    """The bytes of a listing's picture, ready to upload. Tries the stored thumbnail first; if
-    there isn't one (agent sweeps miss lazy-loaded images) or it can't be fetched, recovers the
-    photo from the listing page's og:image. Returns None → caller sends text only."""
-    img = fetch_image_bytes(image_url) if (image_url or "").startswith("http") else None
-    if img:
-        return img
+    """The bytes of a listing's picture, ready to upload. Order of preference:
+
+      1. OUR OWN SAVED COPY (thumbs store — the exact bytes once sent for this listing).
+      2. The caller's image url, then the image url STORED with the listing in the DB —
+         the vet card used to pass "" here and skip straight to og:image, which is why
+         vet photos vanished for offline-vetted listings.
+      3. The live page's og:image — NEVER for facebook (an anonymous HTTP fetch gets the
+         login wall, not a photo).
+
+    Returns None → caller sends text only; a verdict is never lost to a missing picture."""
+    known = _known_facts(listing_url)
+    try:
+        from web_watcher import thumbs
+        key = str(known.get("listing_key") or "")
+        if key:
+            fp = thumbs.file_for(thumbs._safe(key) + ".jpg")
+            if fp:
+                return fp.read_bytes()
+    except Exception:
+        pass
+    for candidate in (image_url, str(known.get("image") or "")):
+        if (candidate or "").startswith("http"):
+            img = fetch_image_bytes(candidate)
+            if img:
+                return img
+    try:
+        from urllib.parse import urlparse
+        if "facebook." in urlparse(listing_url or "").netloc.lower():
+            return None
+    except Exception:
+        pass
     recovered = og_image_for(listing_url)
     if recovered:
         return fetch_image_bytes(recovered)

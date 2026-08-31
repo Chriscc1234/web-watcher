@@ -63,6 +63,10 @@ _INSPECT_SYSTEM = (
     "item; a price far below market with a flimsy reason; urgency/pressure; a vague or "
     "copy-pasted description that doesn't match the title; no VIN/serial/plates when those "
     "would be normal; requests for a deposit or personal/financial info up front.\n"
+    "When a SELLER line is present, weigh the seller's reputation: an established "
+    "account (years old, high percent positive feedback, many ratings/sales) lowers scam "
+    "risk; a brand-new account paired with a below-market price raises it. Sites like "
+    "craigslist show no seller info by design — absence is normal there, never a flag.\n"
     "Be fair: MOST listings are legitimate. Do NOT call something a scam without a specific "
     "signal — a plain, ordinary ad with a normal price is low risk. Only escalate to "
     "medium/high when you can NAME the red flags, and put each in red_flags.\n"
@@ -108,9 +112,14 @@ def verdict_from_text(title: str, body: str, criteria: str, cfg,
     # listing's TITLE and metadata, not its prose — so a model given only the ad body concludes
     # "no price mentioned" about a listing whose price we have known all along. Everything we
     # already stored is stated up front, plainly labelled, ahead of the free text.
+    from web_watcher.monitor import split_seller_details
+    body, _seller = split_seller_details(body or "")
+    _seller = _seller or str((known or {}).get("seller") or "").strip()
     lines = []
     if title:
         lines.append(f"TITLE: {title}")
+    if _seller:
+        lines.append(f"SELLER: {_seller}")
     for label, key in (("PRICE", "price_text"), ("SOURCE", "source"),
                        ("POSTED", "posted_at"), ("LOCATION", "location"),
                        ("YEAR", "year"), ("MILEAGE", "mileage")):
@@ -220,6 +229,13 @@ def fetch_listing_text(url: str, cfg) -> dict:
             except Exception:
                 pass
             out["body"] = extract_listing_body(page)
+            try:
+                from web_watcher.monitor import extract_seller_details, SELLER_MARK
+                _s = extract_seller_details(page)
+                if _s:
+                    out["body"] += SELLER_MARK + _s
+            except Exception:
+                pass
             try:
                 out["title"] = (page.title() or "").strip()
             except Exception:

@@ -228,3 +228,57 @@ def test_vet_validator_escalates_on_uncertainty_and_contradiction():
     assert not sch._vet_verdict_usable("I think it looks fine")
     assert not sch._vet_verdict_usable(
         '{"match": true, "deal_quality": 9, "scam_risk": "low", "reason": "x"}')
+
+
+def test_the_vet_sees_the_seller_even_past_the_body_cap(monkeypatch):
+    """"we need to make sure we look at seller details when we vet" — the SELLER section is
+    stored at the END of details, exactly where the vet's 1500-char body cap used to cut it
+    off. The vet must split it out FIRST and present it as a labeled fact."""
+    from types import SimpleNamespace as NS
+    from web_watcher import scheduler as sch
+    from web_watcher.monitor import SELLER_MARK
+
+    seen = {}
+
+    def fake_chat_smart(messages, **kw):
+        seen["user"] = messages[1]["content"]
+        seen["system"] = messages[0]["content"]
+        return {"text": '{"match": true, "deal_quality": 4, '
+                        '"scam_risk": "low", "reason": "established seller"}',
+                "used": "local"}
+
+    monkeypatch.setattr("web_watcher.llm.chat_smart", fake_chat_smart)
+    monkeypatch.setattr("web_watcher.inspect.resolve_inspect_model", lambda cfg: "m")
+    monkeypatch.setattr(sch, "record_observation",
+                        lambda *a, **k: None, raising=False)
+    long_body = "runs and drives, new tires. " * 100          # ~2800 chars > the 1500 cap
+    l = NS(title="1985 Toyota Pickup", price="$4,500", url="https://e/1", key="k1",
+           rating=4, details=long_body + SELLER_MARK
+           + "joesales99 (2,341) 99.2% positive | Member since 2011")
+    w = NS(name="Trucks", id="w1", instruction="a Toyota pickup", judgment_prompt="")
+    out = sch._boundary_vet(w, l, NS(models=NS()), None, "2026-08-30T22:00:00")
+    assert out is not None and out[0] is True
+    assert "SELLER: joesales99 (2,341) 99.2% positive" in seen["user"]
+    assert "Member since 2011" in seen["user"]                 # never truncated away
+    assert "SELLER line" in seen["system"]                     # the rubric weighs it
+    assert "absence is normal" in seen["system"]               # craigslist anonymity ≠ flag
+
+
+def test_deep_inspect_labels_the_seller_as_a_fact(monkeypatch):
+    from web_watcher import inspect as ins
+    from web_watcher.monitor import SELLER_MARK
+    seen = {}
+
+    def fake_chat_smart(messages, **kw):
+        seen["user"] = messages[1]["content"]
+        return {"text": '{"deal_quality": 3, "deal_reason": "fair", "scam_risk": "low", '
+                        '"red_flags": [], "summary": "ok"}', "used": "local"}
+
+    monkeypatch.setattr("web_watcher.llm.chat_smart", fake_chat_smart)
+    v = ins.verdict_from_text(
+        "1985 Toyota Pickup", "solid truck" + SELLER_MARK + "Joined Facebook in 2024",
+        "a pickup", NS_CFG := __import__("types").SimpleNamespace(), model="m")
+    assert v.get("deal_quality") == 3
+    assert "SELLER: Joined Facebook in 2024" in seen["user"]
+    assert "solid truck" in seen["user"]
+    assert SELLER_MARK not in seen["user"]                     # split, not leaked raw

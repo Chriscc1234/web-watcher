@@ -513,6 +513,64 @@ _POSTED_JS = r"""() => {
 }"""
 
 
+# WHO is selling — the strongest scam signal the ad text itself never carries. The seller
+# card lazy-loads late (human_read already waits for it); until now we waited and then
+# threw it away. Site cards first; generic fallback scans the page for seller-signal lines.
+_SELLER_JS = r"""() => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const sel = [
+        '.x-sellercard-atf', '[data-testid="x-sellercard-atf"]',   // ebay seller card
+        '.ux-seller-section', '[data-testid="str-seller-card"]',
+        '[aria-label*="seller information" i]', '[aria-label*="seller details" i]',
+    ];
+    const parts = []; const seen = new Set();
+    for (const s of sel) {
+        try {
+            document.querySelectorAll(s).forEach(el => {
+                const t = clean(el.innerText);
+                if (t && t.length > 5 && t.length < 400 && !seen.has(t)) {
+                    seen.add(t); parts.push(t);
+                }
+            });
+        } catch (e) {}
+    }
+    if (parts.length) return parts.join(' | ').slice(0, 400);
+    const re = /(positive feedback|member since|joined [a-z]*\s*(in )?(19|20)\d{2}|seller (information|details|rating)|response rate|\d+(\.\d+)?% positive|\(\d+ (ratings?|reviews?)\)|\d[\d,]* items? sold|truyou)/i;
+    const lines = (document.body ? document.body.innerText : '').split('\n');
+    const hits = [];
+    for (const ln of lines) {
+        const t = clean(ln);
+        if (t && t.length < 160 && re.test(t) && !hits.includes(t)) hits.push(t);
+        if (hits.length >= 5) break;
+    }
+    return hits.join(' | ').slice(0, 400);
+}"""
+
+SELLER_MARK = "\n\nSELLER: "     # labeled section appended to details; split_seller_details undoes it
+
+
+def extract_seller_details(page: Page) -> str:
+    """Best-effort seller reputation line off a listing-detail page ('' when the site shows
+    none — craigslist is anonymous by design and that is normal, not suspicious)."""
+    try:
+        val = page.evaluate(_SELLER_JS)
+        return val.strip()[:400] if isinstance(val, str) else ""
+    except Exception as exc:
+        log.debug("Seller-details extraction failed: %s", exc)
+        return ""
+
+
+def split_seller_details(details: str) -> tuple[str, str]:
+    """(body, seller) out of a stored details blob. The SELLER section lives at the END of
+    details, so any consumer that caps the body (vet [:1500], judge [:600]) would silently
+    truncate exactly the part this exists for — split FIRST, cap the body only."""
+    d = details or ""
+    i = d.find(SELLER_MARK)
+    if i < 0:
+        return d, ""
+    return d[:i].rstrip(), d[i + len(SELLER_MARK):].strip()
+
+
 def extract_listing_posted_at(page: Page) -> str:
     """Best-effort absolute posted-date for a listing-detail page (ISO-ish string), or ''."""
     try:

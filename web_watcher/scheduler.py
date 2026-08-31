@@ -1598,6 +1598,13 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
             # human. See monitor.human_read.
             spent = human_read(tab, stop_event)
             l.details = extract_listing_body(tab)
+            try:
+                from web_watcher.monitor import extract_seller_details, SELLER_MARK
+                _seller = extract_seller_details(tab)
+                if _seller:
+                    l.details = (l.details or "") + SELLER_MARK + _seller
+            except Exception:
+                pass
             l.posted_at = extract_listing_posted_at(tab)
             # One line per ad. Reading properly turned this phase from seconds into minutes,
             # and a phase that logs nothing for six minutes is indistinguishable from a hang —
@@ -2688,9 +2695,12 @@ def _boundary_vet(watch, l, cfg, db_path, run_ts):
                     getattr(watch, "instruction", "") or "").strip()
         if not criteria:
             return None
-        body = (getattr(l, "details", "") or "").strip()[:1500]
+        from web_watcher.monitor import split_seller_details
+        body, seller = split_seller_details((getattr(l, "details", "") or "").strip())
+        body = body[:1500]
         content = (f"WATCH CRITERIA: {criteria}\n\nLISTING\nTITLE: {l.title}\n"
                    f"PRICE: {l.price or '(none shown)'}\n"
+                   + (f"SELLER: {seller}\n" if seller else "")
                    + (f"AD BODY: {body}" if body else "(the ad body has not been read)"))
         sys_p = (
             "You vet marketplace matches moments before they interrupt a person's phone. "
@@ -2699,7 +2709,11 @@ def _boundary_vet(watch, l, cfg, db_path, run_ts):
             "match=false when the listing is a different KIND of thing sharing a brand "
             "name (parts, accessories, apparel, a golf club against a sailboat brand) or "
             "fails a stated requirement. Judge scams by the classic signs: too-cheap "
-            "price, stock photos, urgency, off-platform payment. Judge the kind of thing "
+            "price, stock photos, urgency, off-platform payment. When a SELLER line is "
+            "present, weigh it: an established account (years old, high percent positive, "
+            "many ratings) lowers scam risk; a brand-new account paired with a "
+            "below-market price raises it. Some sites (craigslist) show no seller info "
+            "at all — absence is normal there, never a red flag. Judge the kind of thing "
             "the listing plainly is; never answer with uncertainty words — commit.")
         out = llm.chat_smart(
             [{"role": "system", "content": sys_p}, {"role": "user", "content": content}],

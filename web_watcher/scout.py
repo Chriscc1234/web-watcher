@@ -179,11 +179,23 @@ def maybe_scout(watch, cfg, db_path, page, stop_event=None) -> bool:
                             + (f" — {l.price}" if l.price else "")
                             for l in uniq[:3])
         term = _primary_term(watch) or "it"
-        msg = (f"\U0001f9ed Your “{watch.name}” has been quiet — not much "
+        # SUGGEST ONLY WHAT WOULD ACTUALLY CHANGE THIS WATCH. The template used to offer
+        # “add ebay” to watches that already search eBay — the bot must never propose
+        # a no-op. Derived from the same urls the probe widened.
+        hosts = " ".join(u.lower() for u in (getattr(watch, "urls", None) or []))
+        offers = []
+        if "ebay." not in hosts:
+            offers.append(f"“add ebay to the {watch.name}”")
+        if "search_distance=" in hosts or "_sadis=" in hosts:
+            offers.append(f"“widen the {watch.name} to 500 miles”")
+        if not offers:
+            offers.append(f"“broaden the {watch.name}”")
+        ask = " or ".join(offers[:2])
+        msg = (f"🧭 Your “{watch.name}” has been quiet — not much "
                f"{term} inside your search area right now. I took a wider look and found "
                f"{len(uniq)} beyond it, for example:\n{samples}\n\n"
-               f"Want me to search wider? Reply “widen the {watch.name} to 500 miles” "
-               f"or “add ebay to the {watch.name}” and I’ll set it up.")
+               f"Want me to search wider? Reply {ask} and I’ll set it up.")
+
         from web_watcher.notify import send_plain_telegram, _mirror_to_thread
         owner = str(getattr(watch, "owner", "") or "")
         ok = send_plain_telegram(msg, cfg.notifications,

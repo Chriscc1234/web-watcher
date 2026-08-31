@@ -108,3 +108,34 @@ def test_scout_cooldown_and_data_only_watches(monkeypatch, tmp_path):
     assert len(sent) == 1
     silent = _watch(notify=NS(telegram=False, email=False))
     assert scout.maybe_scout(silent, cfg, None, _Page()) is False  # data-only: never nags
+
+
+def test_suggestions_match_the_watch_never_a_noop(monkeypatch, tmp_path):
+    """"is ebay already added?" — the offer line derives from the watch's own urls: no
+    "add ebay" for a watch that already searches eBay; no "widen to N miles" for a watch
+    with no distance-bearing url to widen."""
+    hit = [Listing(key="e1", url="https://e/1", title="Sailrite LSZ-1", price="$850")]
+    # Charlie-shaped: craigslist distance + NO ebay → both offers are real changes.
+    sent = _arm(monkeypatch, tmp_path, hit)
+    cfg = NS(notifications=NS(telegram=NS(chat_id="111")))
+    scout.maybe_scout(_watch(), cfg, None, _Page())
+    msg = sent[0][1]
+    assert "add ebay" in msg and "widen the" in msg
+
+    # Fiat-shaped: eBay already pinned → "add ebay" must NOT be offered.
+    sent2 = _arm(monkeypatch, tmp_path, hit)
+    w2 = _watch(name="Fiat X19 Cars Watch",
+                keywords=["sailrite"],
+                urls=["https://www.ebay.com/sch/i.html?_nkw=sailrite&_stpos=98101&_sadis=200"])
+    scout.maybe_scout(w2, cfg, None, _Page())
+    msg2 = sent2[0][1]
+    assert "add ebay" not in msg2 and "widen the Fiat X19 Cars Watch" in msg2
+
+    # FB/OU-only: nothing url-widenable → the generic broaden ask, never a fake offer.
+    sent3 = _arm(monkeypatch, tmp_path, hit)
+    w3 = _watch(name="FB Only Watch",
+                urls=["https://www.facebook.com/marketplace/search?query=sailrite"])
+    scout.maybe_scout(w3, cfg, None, _Page())
+    msg3 = sent3[0][1]
+    assert "widen the FB Only Watch to 500" not in msg3
+    assert "add ebay" in msg3          # no ebay url → that offer IS real

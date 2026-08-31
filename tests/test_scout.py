@@ -181,3 +181,27 @@ def test_a_motor_kit_is_not_a_machine(monkeypatch, tmp_path):
     assert chat2 == "8991052415"
     assert "parts and accessories" in msg2
     assert "found 1 beyond it" not in msg2          # never counts a motor as a machine
+
+
+def test_over_budget_finds_rank_closest_to_the_cap_and_offer_a_lift(monkeypatch, tmp_path):
+    """"we should also be looking outside of the budget range, while favoring results
+    closer in budget to the max the user asked for" — the $1,050 find leads against a
+    $1,000 cap, the $4,000 one trails, both labeled, and the reply words offer an
+    evidence-derived budget lift."""
+    w = _watch()                                       # max_price=1000 in its url
+    urls = scout.widened_urls(w)
+    assert any("max_price" not in u and "craigslist" in u and "search_distance=150" in u
+               for u in urls)                          # same-area, budget-lifted probe
+    found = [Listing(key="a", url="https://e/a", title="Sailrite LSZ big rig", price="$4,000"),
+             Listing(key="b", url="https://e/b", title="Sailrite LSZ-1 nearly new", price="$1,050"),
+             Listing(key="c", url="https://e/c", title="Sailrite Ultrafeed", price="$900")]
+    sent = _arm(monkeypatch, tmp_path, found)
+    cfg = NS(notifications=NS(telegram=NS(chat_id="111")))
+    assert scout.maybe_scout(w, cfg, None, _Page()) is True
+    msg = sent[0][1]
+    in_budget = msg.index("Ultrafeed")                 # $900: within cap, leads
+    close = msg.index("nearly new")
+    far = msg.index("big rig")
+    assert in_budget < close < far
+    assert "(over your $1,000 cap)" in msg
+    assert "raise the Sailrite Sewing Machine Watch budget to $1,050" in msg

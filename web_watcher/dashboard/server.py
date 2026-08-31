@@ -4527,6 +4527,60 @@ def _named_lifecycle_action(text: str, cfg, owner):
     return None
 
 
+_DELETE_VERB_RE = re.compile(r"\b(delete|remove|get rid of|trash|scrap|erase)\b", re.I)
+
+
+def _named_delete_actions(text: str, cfg, owner):
+    """"delete the X watch and the Y watch" → concrete delete actions, decided in code.
+
+    Live whiff (2026-08-30): asked to delete two test watches by exact name, the model
+    replied "Sure, I've deleted them" with NO watch_actions attached — a claimed action
+    that never happened; both watches kept running. Same disease the deterministic
+    start/stop fallback cures, so: same cure. Safe to propose boldly — every
+    watch_actions list goes through the app's confirm-before-running step.
+
+    Scoped to the SENTENCES that carry the delete verb, because a message often names
+    other watches as context ("delete A — its search moved into B"): B must not become
+    a target just for being mentioned. A watch matches only when ALL its distinctive
+    name words appear in those sentences (so multiple explicit names each match); a
+    single any-word match is accepted only when it's unambiguous — mirroring
+    _watch_named_in. "remove X FROM the watch" is an edit, never a delete."""
+    t = (text or "").strip()
+    if not t or t.endswith("?"):
+        return None
+    sents = [x for x in re.split(r"[.!?\n]+", t) if _DELETE_VERB_RE.search(x)]
+    sents = [x for x in sents
+             if not re.search(r"\b(delete|remov\w*|drop|erase)\b[^.!?]*\bfrom\b", x, re.I)]
+    if not sents:
+        return None
+    scope = " ".join(sents)
+    # Scope guards run on the DELETE sentences, not the whole message — "they were BOTH
+    # test WATCHES" in a trailing context sentence must not read as an all-mine bulk ask.
+    if _WHOLE_PROGRAM_RE.search(scope) or _ALL_MINE_RE.search(scope):
+        return None
+    words = {w for w in _text_token_set(scope) if len(w) > 2 and w not in _WATCH_NAME_NOISE}
+    if not words:
+        return None
+
+    def _stem_in(b):
+        return any(a == b or a.rstrip("s") == b.rstrip("s") for a in words)
+
+    full, partial = [], []
+    for w in _watches_for_owner(cfg, owner):
+        name_words = {x for x in re.findall(r"[a-z0-9']+", w.name.lower())
+                      if len(x) > 2 and x not in _WATCH_NAME_NOISE}
+        if not name_words:
+            continue
+        if all(_stem_in(b) for b in name_words):
+            full.append(w.name)
+        elif any(_stem_in(b) for b in name_words):
+            partial.append(w.name)
+    targets = full or (partial if len(partial) == 1 else [])
+    if not targets:
+        return None
+    return [{"action": "delete", "name": n} for n in targets]
+
+
 def _perform_transfer(watch_name: str, new_owner: str, actor: str | None,
                       owner_name: str = "") -> tuple[bool, str]:
     """Move a watch to another person. Returns (ok, error-detail). Shared by the API endpoint
@@ -5284,6 +5338,14 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 watch_actions = [_life]
                 message = ("Starting it now." if _life["action"] == "start" else "Stopping it now.")
                 log.info("chat: deterministic %s of %r", _life["action"], _life["name"])
+        if not watch_actions:
+            _dels = _named_delete_actions(latest_user, cfg, owner)
+            if _dels:
+                watch_actions = _dels
+                _names = ", ".join(f"\u201c{a['name']}\u201d" for a in _dels)
+                message = (f"Sure \u2014 deleting {_names}. Confirm below and "
+                           + ("they're" if len(_dels) > 1 else "it's") + " gone for good.")
+                log.info("chat: deterministic delete of %s", _names)
 
         # ── Master switch vs "my watches" (deterministic — too consequential for the 14b) ──
         # The whole-Watcher pause/resume is admin-only; a person's bare "stop" is scoped to their

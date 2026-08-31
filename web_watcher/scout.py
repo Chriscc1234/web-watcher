@@ -68,6 +68,7 @@ def widened_urls(watch) -> list[str]:
         if "ebay." in host and "ebay" not in seen_sites:
             q.pop("_stpos", None)
             q.pop("_sadis", None)
+            q.pop("_udhi", None)                   # the national look ignores the cap too
             out.append(urlunparse(p._replace(query=urlencode(q))))
             seen_sites.add("ebay")
         elif "craigslist." in host and "craigslist" not in seen_sites:
@@ -75,13 +76,34 @@ def widened_urls(watch) -> list[str]:
                 q["search_distance"] = str(_WIDE_CL_MILES)
                 out.append(urlunparse(p._replace(query=urlencode(q))))
                 seen_sites.add("craigslist")
+            if q.get("max_price"):                 # same area, budget lifted — "we
+                # should also be looking outside of the budget range"
+                q2 = dict(parse_qsl(p.query, keep_blank_values=True))
+                q2.pop("max_price", None)
+                out.append(urlunparse(p._replace(query=urlencode(q2))))
+                seen_sites.add("craigslist")
     # A watch with no eBay url still deserves the national look — build one from its term.
     if "ebay" not in seen_sites:
         term = _primary_term(watch)
         if term:
             from urllib.parse import quote_plus
             out.append("https://www.ebay.com/sch/i.html?_nkw=" + quote_plus(term))
-    return out[:2]
+    return out[:3]
+
+
+def _watch_max_price(watch) -> int:
+    """The budget cap stated in the watch's own urls (0 = none stated)."""
+    for u in (getattr(watch, "urls", None) or []):
+        for k, v in parse_qsl(urlparse(u).query):
+            if k in ("max_price", "_udhi", "price_max") and str(v).strip().isdigit():
+                return int(v)
+    return 0
+
+
+def _price_num(price) -> int:
+    """'$1,100' -> 1100; unparseable -> 0."""
+    digits = re.sub(r"[^0-9]", "", str(price or ""))
+    return int(digits) if digits else 0
 
 
 def _primary_term(watch) -> str:
@@ -209,9 +231,21 @@ def maybe_scout(watch, cfg, db_path, page, stop_event=None) -> bool:
                      watch.name)
             return False
 
-        samples = "\n".join(f"  • {(l.title or '?')[:70]}"
-                            + (f" — {l.price}" if l.price else "")
-                            for l in uniq[:3])
+        # FAVOR CLOSER TO THE USER'S MAX: in-budget finds first, then over-budget ones
+        # ordered by how little they exceed the cap — a $1,050 find against a $1,000 cap
+        # leads; a $4,000 one trails. No stated cap = original order.
+        cap = _watch_max_price(watch)
+        if cap:
+            uniq.sort(key=lambda l: (0, 0) if 0 < _price_num(l.price) <= cap
+                      else (1, (_price_num(l.price) - cap) if _price_num(l.price) else 10**9))
+
+        def _line(l):
+            t = f"  • {(l.title or '?')[:70]}" + (f" — {l.price}" if l.price else "")
+            if cap and _price_num(l.price) > cap:
+                t += f" (over your ${cap:,} cap)"
+            return t
+
+        samples = "\n".join(_line(l) for l in uniq[:3])
         term = _primary_term(watch) or "it"
         # SUGGEST ONLY WHAT WOULD ACTUALLY CHANGE THIS WATCH. The template used to offer
         # “add ebay” to watches that already search eBay — the bot must never propose
@@ -222,6 +256,13 @@ def maybe_scout(watch, cfg, db_path, page, stop_event=None) -> bool:
             offers.append(f"“add ebay to the {watch.name}”")
         if "search_distance=" in hosts or "_sadis=" in hosts:
             offers.append(f"“widen the {watch.name} to 500 miles”")
+        over = [l for l in uniq if cap and _price_num(l.price) > cap]
+        if over:
+            # Round the closest over-budget price up to a clean figure to suggest as the
+            # new cap — evidence-derived, like every other offer here.
+            best = min(_price_num(l.price) for l in over)
+            lift = ((best + 49) // 50) * 50
+            offers.insert(0, f"“raise the {watch.name} budget to ${lift:,}”")
         if not offers:
             offers.append(f"“broaden the {watch.name}”")
         ask = " or ".join(offers[:2])

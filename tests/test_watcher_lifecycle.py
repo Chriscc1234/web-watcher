@@ -419,3 +419,50 @@ def test_disable_still_disables(monkeypatch):
                     json={"action": "disable"})
     assert r.status_code == 200
     assert cfg.watches[0].enabled is False
+
+
+# ── deterministic named DELETE (the "Sure, I've deleted them" whiff, 2026-08-30) ──
+
+def _cfg_test_fleet():
+    ws = [Watch(name="Facebook Marketplace Watch", urls=["https://x"], instruction="x",
+                interval_minutes=30, owner=""),
+          Watch(name="Facebook Miata Watch", urls=["https://x"], instruction="x",
+                interval_minutes=30, owner=""),
+          Watch(name="Anacortes MacGregor Sailboats Watch", urls=["https://x"], instruction="x",
+                interval_minutes=30, owner="111"),
+          Watch(name="Sailrite Sewing Machine Watch", urls=["https://x"], instruction="x",
+                interval_minutes=30, owner="222")]
+    return AppConfig(notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+                     watches=ws)
+
+
+def test_named_delete_carries_both_watches_but_not_the_context_mention():
+    """The live message: two delete targets by exact name, plus a THIRD watch named only
+    as context in the next sentence. Both targets, never the bystander."""
+    cfg = _cfg_test_fleet()
+    acts = S._named_delete_actions(
+        "Please delete the Facebook Marketplace Watch and the Facebook Miata Watch. "
+        "They were both test watches - the MacGregor search already moved into my real "
+        "Anacortes MacGregor Sailboats Watch.", cfg, None)
+    assert acts is not None
+    assert sorted(a["name"] for a in acts) == ["Facebook Marketplace Watch",
+                                               "Facebook Miata Watch"]
+    assert all(a["action"] == "delete" for a in acts)
+
+
+def test_named_delete_stays_in_its_lane():
+    cfg = _cfg_test_fleet()
+    # a question is not a command
+    assert S._named_delete_actions("should I delete the miata watch?", cfg, None) is None
+    # "remove X FROM the watch" is an edit, never a delete
+    assert S._named_delete_actions(
+        "remove ebay from the Facebook Miata Watch", cfg, None) is None
+    # an ambiguous shared word ("facebook" matches two watches) proposes nothing
+    assert S._named_delete_actions("delete the facebook watch", cfg, None) is None
+    # a unique partial name IS enough — mirrors _watch_named_in
+    acts = S._named_delete_actions("get rid of the miata watch", cfg, None)
+    assert acts == [{"action": "delete", "name": "Facebook Miata Watch"}]
+    # a buddy can only delete their own — the admin fleet is invisible to them
+    assert S._named_delete_actions("delete the miata watch", cfg, "222") is None
+    acts2 = S._named_delete_actions("delete my sailrite sewing machine watch", cfg, "222")
+    assert acts2 == [{"action": "delete", "name": "Sailrite Sewing Machine Watch"}]

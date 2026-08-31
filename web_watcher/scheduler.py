@@ -1157,6 +1157,14 @@ def _run_agent_continuous_sweep(
     # Go back for matches this watch banked BEFORE it could read them — from a priming
     # sweep, or from any run made while the deep-read was gated off. See _explore_matches.
     _explore_matches(watch, cfg, db_path, page, stop_event)
+    # The scarcity scout: a THIN watch (barely any alerts despite many runs) triggers the
+    # BOT ITSELF to look wider and message the owner about what exists beyond their area —
+    # the admin's design: "the app/bot needs to do it", not the developer by hand.
+    try:
+        from web_watcher import scout as _scout
+        _scout.maybe_scout(watch, cfg, db_path, page, stop_event)
+    except Exception as _exc:
+        log.debug("scout hook failed: %s", _exc)
 
 
 # How often to take the long way round (back to the section, retype the search) when the
@@ -1399,6 +1407,14 @@ def _run_continuous_sweep(
     # Same backlog drain as the agent sweep — a watch that never used the agent can have
     # just as many unread matches banked behind it. See _explore_matches.
     _explore_matches(watch, cfg, db_path, page, stop_event)
+    # The scarcity scout: a THIN watch (barely any alerts despite many runs) triggers the
+    # BOT ITSELF to look wider and message the owner about what exists beyond their area —
+    # the admin's design: "the app/bot needs to do it", not the developer by hand.
+    try:
+        from web_watcher import scout as _scout
+        _scout.maybe_scout(watch, cfg, db_path, page, stop_event)
+    except Exception as _exc:
+        log.debug("scout hook failed: %s", _exc)
     return len(listings)
 
 

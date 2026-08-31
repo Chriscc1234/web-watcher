@@ -473,6 +473,20 @@ def record_observation(
         )
 
 
+def alerted_count(watch_id: str, db_path: Path | None = None) -> int:
+    """How many matches this watch has actually PUSHED to its owner — the number the
+    scarcity scout's thin-trigger cares about (recorded matches nobody heard don't count
+    as being heard)."""
+    try:
+        with _connect(_resolve(db_path)) as conn:
+            r = conn.execute("SELECT COUNT(*) AS n FROM observations "
+                             "WHERE watch_id=? AND COALESCE(alerted,0)=1",
+                             (watch_id,)).fetchone()
+            return int(r["n"] if r else 0)
+    except Exception:
+        return 0
+
+
 def mark_alerted(watch_id: str, listing_key: str, db_path: Path | None = None) -> None:
     """Record that this match was actually PUSHED to the person. Distinct from 'seen' — a
     baseline marks its matches seen so they don't fire a wall of alerts, which is exactly how

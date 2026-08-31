@@ -1,0 +1,110 @@
+# -*- coding: utf-8 -*-
+"""The Scarcity Scout — the BOT looks wider when a watch runs thin, and asks the owner.
+
+The admin's design, verbatim: "wouldn't this be the right time to ask him about updating
+the distance or something? have we looked further? we should let him know if there is
+anything in the area outside his search distance. don't do it yourself. the app/bot needs
+to do it."
+"""
+
+from __future__ import annotations
+
+import time
+from types import SimpleNamespace as NS
+
+import pytest
+
+from web_watcher import scout
+from web_watcher.monitor import Listing
+
+
+def _watch(**over):
+    base = dict(
+        name="Sailrite Sewing Machine Watch", id="w1", owner="8991052415",
+        keywords=["sailrite"],
+        notify=NS(telegram=True, email=False),
+        urls=["https://seattle.craigslist.org/search/sss?query=Sailrite+sewing+machine"
+              "&max_price=1000&postal=98101&search_distance=150"])
+    base.update(over)
+    return NS(**base)
+
+
+def test_widened_urls_go_national_and_wide():
+    w = _watch()
+    urls = scout.widened_urls(w)
+    assert any("search_distance=1000" in u for u in urls)          # craigslist, wide
+    assert any("ebay.com" in u and "_stpos" not in u for u in urls)  # national, no zip pin
+    # A watch that already has a pinned eBay url gets it UNPINNED, not duplicated.
+    w2 = _watch(urls=["https://www.ebay.com/sch/i.html?_nkw=sailrite&_stpos=98101&_sadis=200"])
+    urls2 = scout.widened_urls(w2)
+    assert urls2 and all("_stpos" not in u and "_sadis" not in u for u in urls2)
+
+
+def test_thin_trigger_counts_alerts_heard_not_matches_recorded(monkeypatch):
+    monkeypatch.setattr("web_watcher.storage.watch_stats",
+                        lambda wid, name, db_path=None: {"runs": 10})
+    monkeypatch.setattr("web_watcher.storage.alerted_count",
+                        lambda wid, db_path=None: 1)
+    assert scout._is_thin(_watch(), None) is True
+    monkeypatch.setattr("web_watcher.storage.alerted_count",
+                        lambda wid, db_path=None: 5)
+    assert scout._is_thin(_watch(), None) is False
+    monkeypatch.setattr("web_watcher.storage.watch_stats",
+                        lambda wid, name, db_path=None: {"runs": 2})
+    assert scout._is_thin(_watch(), None) is False                 # too young to judge
+
+
+class _Page:
+    def __init__(self):
+        self.visited = []
+
+    def goto(self, url, timeout=None, wait_until=None):
+        self.visited.append(url)
+
+
+def _arm(monkeypatch, tmp_path, found):
+    monkeypatch.setattr(scout, "_notes_path", lambda: tmp_path / "scout_notes.json")
+    monkeypatch.setattr(scout, "_is_thin", lambda w, db: True)
+    monkeypatch.setattr("web_watcher.monitor.extract_listings", lambda page: found)
+    monkeypatch.setattr("web_watcher.monitor.dismiss_popups",
+                        lambda page, settle_ms=0: None)
+    monkeypatch.setattr("web_watcher.storage.has_seen_listing",
+                        lambda name, key, db: False)
+    sent = []
+    monkeypatch.setattr("web_watcher.notify.send_plain_telegram",
+                        lambda msg, notif, chat_id_override=None:
+                        sent.append((chat_id_override, msg)) or True)
+    monkeypatch.setattr("web_watcher.notify._mirror_to_thread",
+                        lambda chat, text, url="", image="": None)
+    return sent
+
+
+def test_scout_messages_the_owner_in_the_watchers_voice(monkeypatch, tmp_path):
+    found = [Listing(key="e1", url="https://e/1",
+                     title="Sailrite LSZ-1 walking foot machine", price="$850"),
+             Listing(key="e2", url="https://e/2",
+                     title="Sailrite Ultrafeed LS-1", price="$700"),
+             Listing(key="e3", url="https://e/3",
+                     title="Brother serger", price="$100")]        # noise — filtered out
+    sent = _arm(monkeypatch, tmp_path, found)
+    page = _Page()
+    cfg = NS(notifications=NS(telegram=NS(chat_id="111")))
+    assert scout.maybe_scout(_watch(), cfg, None, page) is True
+    chat, msg = sent[0]
+    assert chat == "8991052415"                                    # the OWNER, not the admin
+    assert "wider look" in msg and "2" in msg
+    assert "Sailrite LSZ-1" in msg and "Brother serger" not in msg
+    assert "widen the Sailrite Sewing Machine Watch" in msg        # the exact reply words
+    assert page.visited                                            # it really probed
+
+
+def test_scout_cooldown_and_data_only_watches(monkeypatch, tmp_path):
+    sent = _arm(monkeypatch, tmp_path, [Listing(key="e1", url="https://e/1",
+                                                title="Sailrite LSZ-1", price="$850")])
+    cfg = NS(notifications=NS(telegram=NS(chat_id="111")))
+    w = _watch()
+    assert scout.maybe_scout(w, cfg, None, _Page()) is True
+    assert scout.maybe_scout(w, cfg, None, _Page()) is False       # 3-day cooldown holds
+    assert len(sent) == 1
+    silent = _watch(notify=NS(telegram=False, email=False))
+    assert scout.maybe_scout(silent, cfg, None, _Page()) is False  # data-only: never nags

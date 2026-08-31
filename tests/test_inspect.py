@@ -112,3 +112,52 @@ def test_blank_known_fields_are_left_out_of_the_prompt(monkeypatch):
                         known={"price_text": "", "year": 0, "source": None})
     prompt = sent["messages"][-1]["content"]
     assert "PRICE:" not in prompt and "YEAR:" not in prompt and "SOURCE:" not in prompt
+
+
+# ── offline-first vetting: judge our own copy, never a login wall ───────────────
+
+def test_vet_judges_from_the_stored_body_without_a_browser(monkeypatch):
+    """"why does the vetter have to open the page again?" — it doesn't. A listing whose ad
+    body was deep-read is judged from the store: no browser, no login wall, no flag risk."""
+    from web_watcher import inspect as I
+
+    monkeypatch.setattr(I, "fetch_listing_text",
+                        lambda url, cfg: (_ for _ in ()).throw(
+                            AssertionError("live fetch must not happen")))
+    monkeypatch.setattr("web_watcher.storage.get_listing_by_url",
+                        lambda url: {"title": "2015 Toyota Tacoma manual",
+                                     "details": "x" * 500, "price_text": "$15,000"})
+    seen = {}
+    monkeypatch.setattr(I, "verdict_from_text",
+                        lambda title, body, criteria, cfg, model=None, known=None:
+                        seen.update(body=body) or
+                        {"deal_quality": 4, "scam_risk": "low", "red_flags": [],
+                         "summary": "solid"})
+    from types import SimpleNamespace as NS
+    out = I.deep_inspect_listing("https://www.facebook.com/marketplace/item/1/",
+                                 "manual tacomas", NS(browser=NS(headless=True, stealth=True)),
+                                 model="m")
+    assert out["fetched"] is True and out["deal_quality"] == 4
+    assert len(seen["body"]) == 500
+
+
+def test_vet_never_opens_a_logged_out_browser_at_facebook(monkeypatch):
+    """The live failure: no stored copy → fresh browser → FB login wall → the model judged
+    WALL TEXT and called a real listing a scam. On login sites with no copy, the vet says
+    so instead of browsing logged-out."""
+    from web_watcher import inspect as I
+    monkeypatch.setattr(I, "fetch_listing_text",
+                        lambda url, cfg: (_ for _ in ()).throw(
+                            AssertionError("live fetch must not happen on facebook")))
+    monkeypatch.setattr("web_watcher.storage.get_listing_by_url", lambda url: {})
+    from types import SimpleNamespace as NS
+    out = I.deep_inspect_listing("https://www.facebook.com/marketplace/item/2/",
+                                 "x", NS(browser=NS(headless=True, stealth=True)), model="m")
+    assert out["fetched"] is False
+    assert "error" in out
+
+
+def test_facebook_wall_phrases_read_as_dead_pages():
+    from web_watcher.inspect import _looks_like_dead_page
+    wall = ("Log in or sign up to view. See posts, photos and more on Facebook. " * 5)
+    assert _looks_like_dead_page("Facebook", wall) is True

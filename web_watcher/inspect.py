@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path as pathlib_Path
+from urllib.parse import urlparse
 from typing import Optional
 
 import httpx
@@ -172,6 +174,37 @@ def _normalize_verdict(data: dict, model: str) -> dict:
     }
 
 
+def _needs_login_profile(url: str) -> bool:
+    """Sites where a fresh browser means a login wall, not a listing."""
+    host = urlparse(url).netloc.lower()
+    return "facebook." in host
+
+
+def _archived_text(known: dict) -> str:
+    """Readable text out of the frozen MHTML copy, if one was kept. Crude on purpose —
+    quoted-printable decode the html part, strip tags — the judge needs prose, not DOM."""
+    try:
+        import quopri, re as _re
+        path = str((known or {}).get("archive_path") or "")
+        if not path:
+            return ""
+        raw = pathlib_Path(path).read_text(encoding="utf-8", errors="ignore")
+        i = raw.lower().find("content-type: text/html")
+        if i < 0:
+            return ""
+        chunk = raw[i:i + 400_000]
+        j = chunk.find("\n\n")
+        body = chunk[j:] if j > 0 else chunk
+        body = quopri.decodestring(body.encode("utf-8", "ignore")).decode("utf-8", "ignore")
+        body = _re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", body, flags=_re.S | _re.I)
+        text = _re.sub(r"<[^>]+>", " ", body)
+        text = _re.sub(r"\s+", " ", text).strip()
+        return text[:8000] if len(text) >= 200 else ""
+    except Exception as exc:
+        log.debug("could not read archive copy: %s", exc)
+        return ""
+
+
 def fetch_listing_text(url: str, cfg) -> dict:
     """Open the listing in a real browser and return {title, body, images}. Best-effort and
     bounded; on any failure returns empty strings so the caller can still report cleanly."""
@@ -214,7 +247,10 @@ def fetch_listing_text(url: str, cfg) -> dict:
 _DEAD_PAGE_RE = __import__("re").compile(
     r"something went wrong|page not found|no longer available|this listing (?:was|has) ended|"
     r"item is no longer|been removed|404|access denied|are you a human|verify you are|"
-    r"unusual (?:traffic|activity)|sign in to continue|log in to see",
+    r"unusual (?:traffic|activity)|sign in to continue|log in to see|"
+    # Facebook's logged-out interstitials — one of these slipped past and the model judged
+    # WALL TEXT, confidently calling a real listing a scam.
+    r"log in or sign up|you must log in|create new account|join facebook",
     __import__("re").I,
 )
 
@@ -244,7 +280,30 @@ def deep_inspect_listing(url: str, criteria: str, cfg, model: Optional[str] = No
     except Exception as exc:
         log.debug("Deep Inspect: no stored record for %s: %s", url, exc)
 
-    got = fetch_listing_text(url, cfg)
+    # OFFLINE FIRST. The user's question, verbatim: "why does the vetter have to open the
+    # page again, when the page has already been scraped? shouldn't we have a full copy
+    # offline?" We do — the deep-read stored the ad body, and matches carry a frozen MHTML
+    # archive. Reading our own copy is instant, burns no browser, can't hit a login wall,
+    # and can't get the account flagged. The live page is only for listings we never read.
+    # On LOGIN sites (facebook) we NEVER live-fetch here: a fresh vetter browser is
+    # logged-out by design (the login profile belongs to the sweeps), so a live visit
+    # yields a wall — which is exactly how a real listing got vetted as "a scam".
+    got = {"title": "", "body": "", "images": []}
+    stored_body = str(known.get("details") or "").strip()
+    if len(stored_body) >= 120:
+        got = {"title": str(known.get("title") or ""), "body": stored_body, "images": []}
+        log.info("Deep Inspect: judging %s from the stored ad body (%d chars, no browser)",
+                 url[:60], len(stored_body))
+    else:
+        arch = _archived_text(known)
+        if arch:
+            got = {"title": str(known.get("title") or ""), "body": arch, "images": []}
+            log.info("Deep Inspect: judging %s from the frozen archive copy", url[:60])
+        elif _needs_login_profile(url):
+            log.info("Deep Inspect: %s is on a login site and we hold no copy — not "
+                     "opening a logged-out browser at it", url[:60])
+        else:
+            got = fetch_listing_text(url, cfg)
     fetched = bool(got.get("body")) and not _looks_like_dead_page(got.get("title", ""), got["body"])
     if not fetched:
         # The page is gone (or gated, or blocking us). Report that plainly AND hand back

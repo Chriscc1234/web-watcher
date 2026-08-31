@@ -108,20 +108,31 @@ def _is_thin(watch, db_path) -> bool:
         return False
 
 
-def _relevant(listings, watch) -> list:
-    """Probe results that actually contain the watch's item words — a national search page
-    is full of noise; count only what the owner would recognize."""
+# A title that is a PART or accessory of the thing, not the thing. The first live scout
+# note offered "Sailrite LSZ Motor, Foot Control, Balance Wheel — $95" as its example —
+# a motor kit presented as a find. A person scanning wider says "only parts out there";
+# the bot must make the same distinction ("updates need to be smart and not just
+# jibberish for users").
+_PARTS_RE = re.compile(
+    r"\b(motor|foot control|pedal|parts?|needles?|bobbins?|belt|attachment|accessor\w*|"
+    r"cover|case only|manual only|instructions?|brochure|decal|sticker|for parts)\b", re.I)
+
+
+def _relevant(listings, watch) -> tuple[list, list]:
+    """(whole_items, parts) from the probe — both carry the watch's item words; parts-ish
+    titles are separated so the message can be honest about what's actually out there."""
     term = _primary_term(watch)
     kws = [k.lower() for k in (getattr(watch, "keywords", None) or []) if k.strip()]
     words = kws or [w for w in term.split() if len(w) > 3][:2]
     if not words:
-        return []
-    out = []
+        return [], []
+    items, parts = [], []
     for l in listings:
         t = (l.title or "").lower()
-        if any(w in t for w in words):
-            out.append(l)
-    return out
+        if not any(w in t for w in words):
+            continue
+        (parts if _PARTS_RE.search(t) else items).append(l)
+    return items, parts
 
 
 def maybe_scout(watch, cfg, db_path, page, stop_event=None) -> bool:
@@ -143,14 +154,16 @@ def maybe_scout(watch, cfg, db_path, page, stop_event=None) -> bool:
             return False
 
         from web_watcher.monitor import extract_listings, dismiss_popups
-        found = []
+        found, parts_found = [], []
         for u in probes:
             if stop_event is not None and stop_event.is_set():
                 return False
             try:
                 page.goto(u, timeout=30_000, wait_until="domcontentloaded")
                 dismiss_popups(page, settle_ms=0)
-                found.extend(_relevant(extract_listings(page), watch))
+                _items, _parts = _relevant(extract_listings(page), watch)
+                found.extend(_items)
+                parts_found.extend(_parts)
             except Exception as exc:
                 log.debug("scout probe failed for %s: %s", u[:60], exc)
         # De-dup by key and drop anything the watch already saw locally.
@@ -171,6 +184,27 @@ def maybe_scout(watch, cfg, db_path, page, stop_event=None) -> bool:
         notes[watch.name] = time.time()
         _save_notes(notes)
         if not uniq:
+            if parts_found:
+                # Honest scarcity: only parts/accessories exist out there. Saying so IS
+                # the useful update — silence would read as "we never looked".
+                term_p = _primary_term(watch) or "it"
+                msg = (f"\U0001f9ed Your \u201c{watch.name}\u201d has been quiet, and a wider "
+                       f"look found no complete {term_p} either \u2014 only parts and "
+                       f"accessories right now (e.g. "
+                       f"{(parts_found[0].title or '?')[:60]}). They\u2019re genuinely "
+                       f"scarce; I\u2019ll keep watching.")
+                from web_watcher.notify import send_plain_telegram, _mirror_to_thread
+                owner_p = str(getattr(watch, "owner", "") or "")
+                if send_plain_telegram(msg, cfg.notifications,
+                                       chat_id_override=owner_p or None):
+                    try:
+                        _mirror_to_thread(owner_p or
+                                          str(cfg.notifications.telegram.chat_id or ""), msg)
+                    except Exception:
+                        pass
+                    log.info("Scout: told %s that only parts exist beyond the area for %r",
+                             owner_p or "the admin", watch.name)
+                    return True
             log.info("Scout: %r is thin and the wider look found nothing new either",
                      watch.name)
             return False

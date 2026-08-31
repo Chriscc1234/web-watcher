@@ -152,3 +152,32 @@ def test_dry_sweeps_reach_the_scout():
     for blk in blocks[1:]:
         head = blk[:900]
         assert "maybe_scout" in head, "a no-listings return skips the scout"
+
+
+def test_a_motor_kit_is_not_a_machine(monkeypatch, tmp_path):
+    """The FIRST live scout note (2026-08-30 22:20) offered "Sailrite Sewing Machine LSZ
+    Motor, Foot Control, Balance Wheel - $95" as its example find. That is a PARTS
+    listing; a person scanning wider says "only parts out there". "updates need to be
+    smart and not just jibberish for users"."""
+    motor = Listing(key="p1", url="https://e/p1",
+                    title="Sailrite Sewing Machine LSZ Motor, Foot Control, Balance Wheel",
+                    price="$95")
+    machine = Listing(key="m1", url="https://e/m1",
+                      title="Sailrite Ultrafeed LSZ-1 walking foot machine", price="$850")
+    cfg = NS(notifications=NS(telegram=NS(chat_id="111")))
+
+    # Mixed probe: the machine is the example; the motor never headlines the message.
+    sent = _arm(monkeypatch, tmp_path, [machine, motor])
+    assert scout.maybe_scout(_watch(), cfg, None, _Page()) is True
+    msg = sent[0][1]
+    assert "Ultrafeed" in msg and "Motor, Foot Control" not in msg
+
+    # Parts-only probe: still a message — but an HONEST one about scarcity, not a "find".
+    # (fresh notes dir — the mixed probe above just armed this watch's 3-day cooldown)
+    sent2 = _arm(monkeypatch, tmp_path / "again", [motor])
+    (tmp_path / "again").mkdir()
+    assert scout.maybe_scout(_watch(), cfg, None, _Page()) is True
+    chat2, msg2 = sent2[0]
+    assert chat2 == "8991052415"
+    assert "parts and accessories" in msg2
+    assert "found 1 beyond it" not in msg2          # never counts a motor as a machine

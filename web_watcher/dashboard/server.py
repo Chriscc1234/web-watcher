@@ -3157,8 +3157,14 @@ _WATCH_STATUS_RE = re.compile(
 
 def _is_watch_status_request(text: str) -> bool:
     """True when the person is asking about the WATCHES (which exist / are running), not to see
-    the listings a watch has found. A status answer must never drag a wall of matches with it."""
-    return bool(_WATCH_STATUS_RE.search(text or ""))
+    the listings a watch has found. A status answer must never drag a wall of matches with it.
+
+    A message that IS just the noun — "Watches" — is the tersest possible form of the same
+    question (sent live, and the 14b improvised instead of showing the cards)."""
+    t = (text or "").strip()
+    if re.fullmatch(r"(?:my\s+)?watch(?:es)?\s*[?!.]*", t, re.I):
+        return True
+    return bool(_WATCH_STATUS_RE.search(t))
 
 
 # An imperative about the watches. "Turn off all my watches. Actually wait, keep the MacGregor

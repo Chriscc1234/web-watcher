@@ -112,3 +112,12 @@ def test_welcome_taught_phrases_are_deterministic():
     assert S._is_lookup_request("any luck?")
     assert S._classify_lifecycle("stop")[0] == "pause"
     assert S._is_help_request("help")
+
+
+def test_the_bare_noun_is_the_tersest_status_question():
+    """Sent live: "Watches" — improvised prose, no cards. The lone noun IS the question."""
+    for t in ("Watches", "watches?", "my watches", "watch"):
+        assert S._is_watch_status_request(t), t
+        assert not S._is_lookup_request(t), t
+    # ...but the noun inside a sentence still needs the normal patterns to decide.
+    assert not S._is_watch_status_request("that watch band is nice")

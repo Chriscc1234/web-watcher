@@ -710,7 +710,7 @@ class BrowserSession:
         for channel, sandbox in attempts:
             ctx = None
             try:
-                _heal_profile_exit(user_data_dir)
+                _heal_profile_exit(self._profile_dir)
                 ctx = self._pw.chromium.launch_persistent_context(
                     user_data_dir=str(self._profile_dir),
                     headless=self._headless,

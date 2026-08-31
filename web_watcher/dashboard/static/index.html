@@ -306,6 +306,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
   <button class="active" onclick="showTab('watches',this)">Watches</button>
   <button onclick="showTab('results',this)">Results</button>
   <button onclick="showTab('chats',this)">Chats</button>
+  <button onclick="showTab('market',this)">Market</button>
   <button onclick="showTab('live',this)">Live</button>
   <button onclick="showTab('history',this)">Activity</button>
   <button onclick="showTab('claude',this)">Claude</button>
@@ -731,6 +732,19 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue)}
 </div>
 
 <!-- ================================================================ CONSOLE -->
+<div id="tab-market" class="tab-panel">
+  <section>
+    <h2>Market Map</h2>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">What's actually out there — everything every watch has ever seen, matches first. Search anything, or view one watch's slice of the market.</div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <input id="mkt-q" type="text" placeholder="e.g. tacoma, sailrite, macgregor 26" style="flex:1;min-width:220px;padding:6px 10px" onkeydown="if(event.key==='Enter')loadMarket()">
+      <select id="mkt-watch" style="padding:6px" onchange="document.getElementById('mkt-q').value='';loadMarket()"><option value="">(all data / free search)</option></select>
+      <button class="primary" onclick="loadMarket()">Look</button>
+    </div>
+    <div id="mkt-body"><div class="empty-state">Type a thing and press Look.</div></div>
+  </section>
+</div>
+
 <div id="wd-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60;align-items:center;justify-content:center" onclick="if(event.target===this)closeWatchDetails()">
   <div style="background:var(--panel,#101827);border:1px solid var(--border);border-radius:12px;max-width:640px;width:92%;max-height:82vh;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)">
@@ -1089,6 +1103,7 @@ function showTab(name, btn) {
   if (name === 'watches')  { loadWatches(); loadOversight(); startWatchesPoll(); }
   if (name === 'results')  loadResults();
   if (name === 'chats')    { loadChatThreads(); startChatsPoll(); }
+  if (name === 'market')   initMarket();
   if (name === 'live')     startLive();
   if (name === 'history')  loadHistory();
   if (name === 'claude')   loadClaudeCalls();
@@ -2544,6 +2559,73 @@ function watchRowHtml(w, isActive) {
       <button class="danger" onclick="deleteWatch('${nm}')">Delete</button>
     </div></td>
   </tr>`;
+}
+
+// ── Market Map ───────────────────────────────────────────────────────────────────
+function initMarket() {
+  const sel = document.getElementById('mkt-watch');
+  if (sel.options.length <= 1 && watchNames.length) {
+    watchNames.forEach(n => {
+      const o = document.createElement('option');
+      o.value = n; o.textContent = n; sel.appendChild(o);
+    });
+  }
+}
+
+function _bar(label, n, max, color) {
+  const w = max ? Math.max(3, Math.round(n / max * 100)) : 0;
+  return `<div style="display:flex;gap:8px;align-items:center;margin:2px 0;font-size:12px">
+    <span style="width:130px;color:var(--dim);text-align:right;overflow:hidden;white-space:nowrap">${label}</span>
+    <div style="flex:1;background:#131a2b;border-radius:4px"><div style="width:${w}%;background:${color};border-radius:4px;height:14px"></div></div>
+    <span style="width:44px">${n}</span></div>`;
+}
+
+async function loadMarket() {
+  const body = document.getElementById('mkt-body');
+  const q = document.getElementById('mkt-q').value.trim();
+  const w = document.getElementById('mkt-watch').value;
+  if (!q && !w) { body.innerHTML = '<div class="empty-state">Type a thing and press Look.</div>'; return; }
+  body.innerHTML = '<div class="empty-state">Reading the map…</div>';
+  const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  try {
+    const d = await api('/api/market?q=' + encodeURIComponent(q) + '&watch=' + encodeURIComponent(w));
+    if (!d.total) { body.innerHTML = '<div class="empty-state">Nothing recorded yet for that. The map grows as the watches sweep.</div>'; return; }
+    const pr = d.price;
+    const money = (v) => v == null ? '—' : '$' + Number(v).toLocaleString();
+    let html = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px">
+      <div><div style="font-size:22px;font-weight:700">${d.total}</div><div style="font-size:11px;color:var(--dim)">seen, ever</div></div>
+      <div><div style="font-size:22px;font-weight:700;color:#34d399">${d.matched}</div><div style="font-size:11px;color:var(--dim)">matched someone's watch</div></div>
+      <div><div style="font-size:22px;font-weight:700">${pr ? money(pr.median) : '—'}</div><div style="font-size:11px;color:var(--dim)">median price (${d.priced} priced)</div></div>
+      <div><div style="font-size:15px;padding-top:6px">${pr ? money(pr.p25) + ' – ' + money(pr.p75) : ''}</div><div style="font-size:11px;color:var(--dim)">middle half</div></div>
+      <div><div style="font-size:15px;padding-top:6px">${pr ? money(pr.min) + ' … ' + money(pr.max) : ''}</div><div style="font-size:11px;color:var(--dim)">full spread</div></div>
+    </div>`;
+    const srcMax = Math.max(...Object.values(d.by_source || {1:1}));
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">';
+    html += '<div><h3 style="font-size:13px">Where they are</h3>' +
+      Object.entries(d.by_source).map(([k,v]) => _bar(esc(k), v, srcMax, 'var(--blue)')).join('') + '</div>';
+    const decEntries = Object.entries(d.by_decade || {});
+    const decMax = Math.max(1, ...decEntries.map(e => e[1]));
+    html += '<div><h3 style="font-size:13px">How old they are</h3>' +
+      (decEntries.length ? decEntries.map(([k,v]) => _bar(esc(k), v, decMax, '#34d399')).join('') :
+       '<div style="font-size:12px;color:var(--dim)">(no years parsed)</div>') + '</div>';
+    html += '</div>';
+    const tr = Object.entries(d.by_transmission || {});
+    if (tr.length) {
+      const tmax = Math.max(...tr.map(e => e[1]));
+      html += '<h3 style="font-size:13px;margin-top:10px">Transmission</h3>' +
+        tr.map(([k,v]) => _bar(esc(k), v, tmax, '#fbbf24')).join('');
+    }
+    html += '<h3 style="font-size:13px;margin-top:14px">A look at them (matches first)</h3>';
+    html += (d.sample || []).map(r => `
+      <div style="display:flex;gap:10px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--border);font-size:13px">
+        ${r.matched ? '<span style="color:#34d399" title="matched a watch">★</span>' : '<span style="color:var(--dim)">·</span>'}
+        <a href="${esc(r.url)}" target="_blank" rel="noopener" style="flex:1;color:var(--blue);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(r.title)}</a>
+        <span style="color:var(--dim)">${r.price ? '$' + Number(r.price).toLocaleString() : ''}</span>
+        <span style="color:var(--dim);font-size:11px">${esc(r.source)}</span>
+      </div>`).join('');
+    body.innerHTML = html;
+  } catch (e) { body.innerHTML = `<div class="empty-state" style="color:var(--red)">Could not read the map: ${e.message}</div>`; }
 }
 
 // ── Watch details popup: click a name, see the whole watch, act on it ────────────

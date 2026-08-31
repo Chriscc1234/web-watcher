@@ -1085,6 +1085,23 @@ def create_app(manager: "ServiceManager") -> FastAPI:
         return FileResponse(str(p), media_type="multipart/related",
                             filename=f"{lk[:60] or 'listing'}.mhtml")
 
+    @app.get("/api/market")
+    def market(q: str = "", watch: str = ""):
+        """The Market Map: aggregate reality over EVERYTHING every watch has ever seen —
+        counts, price percentiles, year spread, per-site volume — for a free-text query or
+        one watch. The user's idea: "a kind of history map, so things can be compared...
+        knowing what kind of particular vehicle is on the market in reality"."""
+        from web_watcher import market as _market
+        wid = ""
+        if watch:
+            cfg = _load_cfg()
+            name = _resolve_watch_name(watch, cfg) or watch
+            w = next((x for x in cfg.watches if x.name == name), None)
+            if w is None:
+                raise HTTPException(404, detail=f"Watch {watch!r} not found")
+            wid = w.id or w.name
+        return _market.market_summary(q=q, watch_id=wid)
+
     @app.post("/api/audit/run")
     def audit_run(bg: BackgroundTasks):
         """Run the Watch Auditor now, in the background ("takes a long time is ok" — the

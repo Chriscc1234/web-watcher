@@ -139,3 +139,16 @@ def test_suggestions_match_the_watch_never_a_noop(monkeypatch, tmp_path):
     msg3 = sent3[0][1]
     assert "widen the FB Only Watch to 500" not in msg3
     assert "add ebay" in msg3          # no ebay url → that offer IS real
+
+
+def test_dry_sweeps_reach_the_scout():
+    """The dry sweep is the scout's whole reason to exist — and the no-listings early
+    return sat ABOVE the hook, so watches finding nothing never got the wider look.
+    Source-level pin: every no-listings return is preceded by the scout call."""
+    src = open("web_watcher/scheduler.py", encoding="utf-8").read()
+    import re
+    blocks = src.split("no listings found")
+    assert len(blocks) >= 2
+    for blk in blocks[1:]:
+        head = blk[:900]
+        assert "maybe_scout" in head, "a no-listings return skips the scout"

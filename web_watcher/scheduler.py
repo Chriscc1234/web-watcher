@@ -1812,6 +1812,15 @@ def _process_sweep_listings(
         log.info("Continuous sweep %d for %r: no listings found", sweep_index, watch.name)
         save_run(RunRecord(watch.name, run_ts, found=False,
                            summary="sweep found no listings", perception_mode_used=mode_label), db_path)
+        # THE DRY SWEEP IS THE SCOUT'S WHOLE REASON TO EXIST — and this early return sat
+        # ABOVE the scout hook, so the exact watches that needed the wider look (the ones
+        # finding nothing) were the only ones that never got it. Charlie's Sailrite ran
+        # dry all day and his scarcity note never fired.
+        try:
+            from web_watcher import scout as _scout
+            _scout.maybe_scout(watch, cfg, db_path, page, stop_event)
+        except Exception as _exc:
+            log.debug("scout hook (dry sweep) failed: %s", _exc)
         return
 
     priming = count_seen_listings(watch.name, db_path) == 0

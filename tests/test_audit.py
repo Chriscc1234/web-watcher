@@ -135,3 +135,21 @@ def test_alert_boundary_fails_open(monkeypatch, tmp_path):
     assert sch._alert_new_listings(watch, NS(notifications=NS()), [l],
                                    "2026-08-30T20:00:00", tmp_path) == 1
     assert sent
+
+
+def test_origin_budget_missing_is_flagged():
+    """"will the auditor also look back at the actual chat log?" — yes: each watch's
+    origin chat rides in the evidence, and a budget the user stated that never became a
+    cap is a deterministic finding."""
+    ev = _ev(origin_chat=["Watch craigslist for a sailrite sewing machine under $1000"],
+             instruction="Look for Sailrite sewing machines near Seattle",
+             urls=["https://x?q=sailrite"])
+    kinds = _kinds(ev)
+    assert "origin_budget_missing" in kinds
+
+
+def test_origin_budget_present_is_quiet():
+    ev = _ev(origin_chat=["under $1000 please"],
+             instruction="Sailrite sewing machines under $1000",
+             urls=["https://x?q=sailrite&max_price=1000"])
+    assert "origin_budget_missing" not in _kinds(ev)

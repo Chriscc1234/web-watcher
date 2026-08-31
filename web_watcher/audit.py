@@ -94,6 +94,27 @@ def gather_evidence(watch, db_path=None) -> dict:
     except Exception:
         ev["briefed"] = None
     try:
+        # WHAT THE USER ACTUALLY ASKED FOR, from their chat thread — so the audit can hold
+        # the watch against its origin story ("under $1000" that never became a price cap,
+        # a named site that never became a url). The 14b writes the cards; the audit reads
+        # the receipts.
+        from web_watcher import paths
+        owner = str(getattr(watch, "owner", "") or "")
+        hist_file = (paths.data_dir() /
+                     (f"watcher_history_{owner}.json" if owner else "watcher_history.json"))
+        toks = [t for t in __import__("re").findall(r"[A-Za-z0-9]{4,}", watch.name.lower())
+                if t not in ("watch", "cars", "watches")]
+        lines = []
+        if hist_file.exists():
+            hist = json.loads(hist_file.read_text(encoding="utf-8"))
+            for m in hist:
+                c = str(m.get("content") or "")
+                if m.get("role") == "user" and any(t in c.lower() for t in toks):
+                    lines.append(c[:220])
+        ev["origin_chat"] = lines[-8:]
+    except Exception:
+        ev["origin_chat"] = []
+    try:
         from web_watcher import paths
         f = paths.data_dir() / "continuous_running.json"
         desired = set(json.loads(f.read_text(encoding="utf-8")) or []) if f.exists() else None
@@ -175,6 +196,20 @@ def deterministic_findings(ev: dict) -> list[dict]:
             f"keyword(s) {stale} appear in neither the searches nor the instruction",
             "probably left over from an earlier edit")
 
+    # 8. The origin cross-check: a budget the user stated that never became a cap.
+    import re as _re
+    origin = " ".join(ev.get("origin_chat") or [])
+    m = _re.search(r"under\s+\$?(\d[\d,]*)|\$\s?(\d[\d,]*)\s*(?:or less|max|budget)",
+                   origin, _re.I)
+    if m:
+        stated = (m.group(1) or m.group(2) or "").replace(",", "")
+        cfg_text = f"{ev['instruction']} {ev['judgment_prompt']} " + " ".join(ev["urls"])
+        if stated and stated not in cfg_text:
+            add("origin_budget_missing", "high",
+                f"the user asked for under ${stated} in chat, but no such cap appears in "
+                f"the watch's instruction or urls",
+                "add the price cap — the 14b's card dropped a stated constraint")
+
     return F
 
 
@@ -191,7 +226,10 @@ def _llm_pass(evidence: list[dict], findings: list[dict]) -> str:
             "evidence bundle per watch plus the deterministic findings already made. "
             "Write up to 5 SHORT bullet findings for anything genuinely odd the rules "
             "missed — delivery gaps, config that contradicts itself, activity that makes "
-            "no sense. Skip anything already in the findings list. If nothing else is "
+            "no sense. Each watch's origin_chat holds what the user ACTUALLY asked for "
+            "in their own words — hold the config against it and flag any dropped or "
+            "twisted constraint. Skip anything already in the findings list. If nothing "
+            "else is "
             "odd, say exactly: nothing further.")
         user = json.dumps({"evidence": evidence, "existing_findings": findings},
                           ensure_ascii=False)[:24000]

@@ -78,6 +78,12 @@ _STEALTH_ARGS = [
     # rendering. Permission prompts are already handled by never granting the permission.
     "--start-maximized",
     "--lang=en-US",
+    # The app's own update-restarts (and any hard shutdown) kill Chrome mid-run, so the
+    # persistent profile records a crash and every next launch wears the "Restore pages?"
+    # bubble — the user watched it sit permanently in the corner, and a "person" whose
+    # browser crashes every twenty minutes is its own tell. Belt (this flag hides the
+    # bubble) and suspenders (_heal_profile_exit rewrites the crash flag before launch).
+    "--hide-crash-restore-bubble",
 ]
 # The launch flags for a window a PERSON is driving (Connect Facebook). No automation-hiding,
 # no engine surgery — just the two flags that stop Chrome nagging a first-run profile.
@@ -102,6 +108,27 @@ SCREENSHOT_TIMEOUT = 15_000
 # detection failure degrades to something plausible rather than crashing, and any session using
 # it says so in the log.
 _DEFAULT_CHROME_FULL = "151.0.0.0"
+
+
+def _heal_profile_exit(profile_dir) -> None:
+    """Mark the persistent profile as having exited cleanly. Chrome writes
+    exit_type/exited_cleanly into Preferences; after our update-restarts kill it mid-run it
+    records Crashed, and the restore bubble haunts every later session. Best-effort."""
+    import json as _json
+    from pathlib import Path as _P
+    try:
+        pref = _P(profile_dir) / "Default" / "Preferences"
+        if not pref.exists():
+            return
+        d = _json.loads(pref.read_text(encoding="utf-8"))
+        prof = d.setdefault("profile", {})
+        if prof.get("exit_type") != "Normal" or not prof.get("exited_cleanly", True):
+            prof["exit_type"] = "Normal"
+            prof["exited_cleanly"] = True
+            pref.write_text(_json.dumps(d), encoding="utf-8")
+            log.info("Healed the profile's crash flag (no more 'Restore pages?' bubble)")
+    except Exception as exc:
+        log.debug("could not heal profile exit flag: %s", exc)
 
 
 def _usable(browser) -> bool:
@@ -683,6 +710,7 @@ class BrowserSession:
         for channel, sandbox in attempts:
             ctx = None
             try:
+                _heal_profile_exit(user_data_dir)
                 ctx = self._pw.chromium.launch_persistent_context(
                     user_data_dir=str(self._profile_dir),
                     headless=self._headless,

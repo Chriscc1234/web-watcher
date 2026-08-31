@@ -2614,6 +2614,35 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
     return confirmed + over_cap
 
 
+def _auto_vet(watch, l, cfg, db_path, run_ts):
+    """Run Deep Inspect on a match whose critical spec is unconfirmed, BEFORE it alerts.
+    Returns (ok, one_line) or None when the vet can't run. The verdict is persisted onto
+    the observation either way — "a vet should update the entire match"."""
+    try:
+        from web_watcher.inspect import deep_inspect_listing
+        criteria = (getattr(watch, "judgment_prompt", "") or
+                    getattr(watch, "instruction", "") or "")
+        v = deep_inspect_listing(l.url, criteria, cfg)
+        if not v or v.get("deal_quality") is None:
+            return None
+        scam = str(v.get("scam_risk") or "").lower()
+        deal = v.get("deal_quality") or 0
+        line = f"deal {deal}/5, scam risk {scam or '?'}" + \
+               (f" — {v.get('summary', '')[:90]}" if v.get("summary") else "")
+        ok = scam != "high" and deal >= 2
+        try:
+            record_observation(watch.id or watch.name, watch.name, l.key, run_ts,
+                               matched=ok, rating=(getattr(l, "rating", None)
+                                                   if ok else 2),
+                               judge_reason=f"auto-vet: {line}", db_path=db_path)
+        except Exception:
+            pass
+        return (ok, line)
+    except Exception as exc:
+        log.debug("auto-vet unavailable for %s: %s", l.url[:60], exc)
+        return None
+
+
 def _cloud_confirm_match(watch, l, cfg):
     """The last check before a match interrupts a person's phone: the cloud reads what we
     know about the listing against the watch's own criteria. Returns (ok, reason) or None
@@ -2708,6 +2737,28 @@ def _alert_new_listings(
         if why:
             summary += f"\n{why}"      # the judge's one-line verdict, in the alert
         # THE ALERT BOUNDARY. Confirmed by the cloud when available; fail-open otherwise.
+        # An UNCONFIRMED-SPEC match ("manual trans unconfirmed", rating 3) gets the full
+        # vet first — the user's ask, verbatim: "the vet should auto run on stuff like
+        # this before even giving the match over... a vet should update the entire match".
+        # The vet is offline-first now (stored body, no browser), so this is one model
+        # call, and its verdict is PERSISTED onto the observation either way.
+        _why_l = (getattr(l, "judge_reason", "") or "").lower()
+        _unconfirmed = ((getattr(l, "rating", None) == 3)
+                        or any(t in _why_l for t in
+                               ("unconfirmed", "not specified", "doesn't say",
+                                "no transmission", "not stated", "unclear")))
+        if _unconfirmed:
+            _vet = _auto_vet(watch, l, cfg, db_path, run_ts)
+            if _vet is not None and not _vet[0]:
+                log.info("Auto-vet rejected %r before alert — %s",
+                         (l.title or "")[:60], _vet[1])
+                _mark_seen(l)
+                continue
+            if _vet is not None:
+                why = (why + "\n" if why else "") + f"Vet: {_vet[1]}"
+                summary = f"{star_prefix}New match: {title}" + \
+                          (f" — {price}" if price else "") + f"\n{why}"
+
         _confirm = _cloud_confirm_match(watch, l, cfg)
         if _confirm is not None and _confirm[0] is False:
             log.info("Alert boundary: cloud rejected %r — %s (not sending)",

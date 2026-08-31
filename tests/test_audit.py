@@ -153,3 +153,59 @@ def test_origin_budget_present_is_quiet():
              instruction="Sailrite sewing machines under $1000",
              urls=["https://x?q=sailrite&max_price=1000"])
     assert "origin_budget_missing" not in _kinds(ev)
+
+
+def test_data_only_watches_are_not_flagged_for_unalerted():
+    """A watch with notifications off banks matches as market data BY DESIGN — the Tacoma
+    watch after "getting a bit tired of tacoma matches. if there is any good data to still
+    be had keep it going"."""
+    ev = _ev(unalerted=[{"title": "x", "rating": 4}], notify_on=False)
+    assert "unalerted_matches" not in _kinds(ev)
+    ev2 = _ev(unalerted=[{"title": "x", "rating": 4}], notify_on=True)
+    assert "unalerted_matches" in _kinds(ev2)
+
+
+def test_unconfirmed_spec_match_is_auto_vetted_before_alerting(monkeypatch, tmp_path):
+    """"why give me a watch if it says manual trans unconfirmed. the vet should auto run on
+    stuff like this before even giving the match over" — a rating-3/unconfirmed match runs
+    the (offline-first) vet; a scam verdict blocks the alert and updates the record."""
+    import web_watcher.scheduler as sch
+    from types import SimpleNamespace as NS
+    watch = NS(name="W", id="w1", judgment_prompt="manual tacomas", instruction="",
+               continuous_max_alerts=5, notify=NS(telegram=True, email=False),
+               owner="", urls=["https://x"])
+    sketchy = sch.Listing(key="k1", url="https://x/1",
+                          title="2015 Tacoma", price="$9,000")
+    sketchy.rating = 3
+    sketchy.judge_reason = "manual transmission unconfirmed"
+
+    monkeypatch.setattr(sch, "_auto_vet",
+                        lambda w, l, cfg, db, ts: (False, "deal 1/5, scam risk high"))
+    monkeypatch.setattr(sch, "_cloud_confirm_match", lambda w, l, cfg: None)
+    sent, seen = [], []
+    monkeypatch.setattr(sch, "send_notifications", lambda *a, **k: sent.append(1))
+    monkeypatch.setattr(sch, "save_seen_listing", lambda name, key, ts, **k: seen.append(key))
+    monkeypatch.setattr(sch.time, "sleep", lambda s: None)
+    n = sch._alert_new_listings(watch, NS(notifications=NS()), [sketchy],
+                                "2026-08-30T21:00:00", tmp_path)
+    assert n == 0 and not sent and "k1" in seen
+
+
+def test_confirmed_spec_match_skips_the_auto_vet(monkeypatch, tmp_path):
+    import web_watcher.scheduler as sch
+    from types import SimpleNamespace as NS
+    watch = NS(name="W", id="w1", judgment_prompt="x", instruction="",
+               continuous_max_alerts=5, notify=NS(telegram=True, email=False),
+               owner="", urls=["https://x"])
+    good = sch.Listing(key="k2", url="https://x/2", title="clean manual", price="$5")
+    good.rating = 4
+    good.judge_reason = "manual confirmed in ad body"
+    monkeypatch.setattr(sch, "_auto_vet",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("vet must not run")))
+    monkeypatch.setattr(sch, "_cloud_confirm_match", lambda w, l, cfg: None)
+    sent = []
+    monkeypatch.setattr(sch, "send_notifications", lambda *a, **k: sent.append(1))
+    monkeypatch.setattr(sch, "save_seen_listing", lambda *a, **k: None)
+    monkeypatch.setattr(sch.time, "sleep", lambda s: None)
+    assert sch._alert_new_listings(watch, NS(notifications=NS()), [good],
+                                   "2026-08-30T21:00:00", tmp_path) == 1

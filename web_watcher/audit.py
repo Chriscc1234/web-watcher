@@ -66,6 +66,8 @@ def gather_evidence(watch, db_path=None) -> dict:
                              for u in (getattr(watch, "urls", None) or [])}),
         "url_terms": _url_terms(getattr(watch, "urls", None)),
         "keywords": list(getattr(watch, "keywords", None) or []),
+        "notify_on": bool(getattr(getattr(watch, "notify", None), "telegram", True)
+                          or getattr(getattr(watch, "notify", None), "email", False)),
         "min_rating": getattr(watch, "min_rating", None),
     }
     try:
@@ -156,8 +158,9 @@ def deterministic_findings(ev: dict) -> list[dict]:
     except Exception:
         pass
 
-    # 3. Found-but-never-pushed (the 15-MacGregor hole).
-    if ev["unalerted"]:
+    # 3. Found-but-never-pushed (the 15-MacGregor hole). A watch with notifications OFF
+    #    banks matches as market data BY DESIGN — that's not a delivery failure.
+    if ev["unalerted"] and ev.get("notify_on", True):
         add("unalerted_matches", "high",
             f"{len(ev['unalerted'])} match(es) recorded and never sent "
             f"(e.g. {ev['unalerted'][0]['title']!r})",

@@ -352,11 +352,17 @@ def test_a_long_read_does_not_mean_a_deep_scroll(fast_clock):
 def test_the_budget_ignores_an_infinite_feeds_text(fast_clock):
     """Whole-page text on a page with an endless feed says 'enormous' and would buy the
     maximum dwell for a three-line ad."""
-    from web_watcher import monitor
-    huge = monitor._read_budget(DepthPage(chars=5_000_000), "www.facebook.com")
-    capped = monitor._read_budget(DepthPage(chars=monitor._READ_TEXT_CAP), "www.facebook.com")
-    assert huge <= capped + 6.0, "an infinite feed still bought extra reading time"
+    import random as _r
+    _st = _r.getstate(); _r.seed(20260830)   # statistical bounds need a fixed die
+    try:
 
+        from web_watcher import monitor
+        huge = monitor._read_budget(DepthPage(chars=5_000_000), "www.facebook.com")
+        capped = monitor._read_budget(DepthPage(chars=monitor._READ_TEXT_CAP), "www.facebook.com")
+        assert huge <= capped + 6.0, "an infinite feed still bought extra reading time"
+
+    finally:
+        _r.setstate(_st)
 
 def test_still_scrolls_something(fast_clock):
     """The cap must not turn reading into staring at the top of the page."""

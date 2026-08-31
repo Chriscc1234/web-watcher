@@ -358,6 +358,16 @@ def _human_fill(loc, text: str) -> bool:
     first keystroke — reuse the correction from monitor.humanized_search). Returns True if the
     value landed."""
     try:
+        # ALREADY HOLDS THIS VALUE? LEAVE IT ALONE. The user watched the sweep click a
+        # craigslist filter box, retype the exact value already in it, and walk away —
+        # pointless, and re-entering your own zip every visit is a robot's habit, not a
+        # person's. Same principle as set_location's already-correct short-circuit.
+        try:
+            if (loc.input_value() or "").strip().lower() == (text or "").strip().lower() \
+                    and (text or "").strip():
+                return True
+        except Exception:
+            pass
         _human_click(getattr(loc, "page", None), loc, 3000)   # Locator carries its own Page
         _pause(0.1, 0.3)
         try:

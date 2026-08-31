@@ -628,6 +628,14 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "autonomous":       w.autonomous,
                 "max_agent_steps":  w.max_agent_steps,
                 "judgment_prompt":  w.judgment_prompt,
+                # These three were OMITTED — the API literally could not show a watch's
+                # keyword gate or rating floor, so every hand-audit read "keywords: None"
+                # while the prefilter was busily using them. The API is the single source
+                # of truth (config-file reads are untrustworthy from tooling); it must
+                # therefore show the whole watch.
+                "keywords":         list(w.keywords or []),
+                "antikeywords":     list(w.antikeywords or []),
+                "min_rating":       w.min_rating,
                 # Surfaced so you can SEE whether a supervised run is being recorded and whether
                 # it uses the saved login — both matter before starting a Facebook sweep, and
                 # both were previously invisible in the list (you had to guess).
@@ -1076,6 +1084,20 @@ def create_app(manager: "ServiceManager") -> FastAPI:
             raise HTTPException(404, detail="no frozen copy saved for this listing")
         return FileResponse(str(p), media_type="multipart/related",
                             filename=f"{lk[:60] or 'listing'}.mhtml")
+
+    @app.post("/api/audit/run")
+    def audit_run(bg: BackgroundTasks):
+        """Run the Watch Auditor now, in the background ("takes a long time is ok" — the
+        LLM pass can hold the GPU for minutes). GET /api/audit/latest for the report."""
+        from web_watcher import audit as _audit
+        bg.add_task(_audit.run_audit)
+        return {"ok": True, "started": True}
+
+    @app.get("/api/audit/latest")
+    def audit_latest():
+        from web_watcher import audit as _audit
+        return _audit.latest() or {"ran_at": None, "findings": [],
+                                   "note": "no audit has run yet"}
 
     @app.get("/api/sweep/issues")
     def sweep_issues(limit: int = 100):

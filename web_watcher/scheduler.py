@@ -2614,6 +2614,52 @@ def _verify_kept_listings(kept: list, watch: Watch, cfg: AppConfig, threshold: i
     return confirmed + over_cap
 
 
+def _cloud_confirm_match(watch, l, cfg):
+    """The last check before a match interrupts a person's phone: the cloud reads what we
+    know about the listing against the watch's own criteria. Returns (ok, reason) or None
+    when the cloud can't answer (no key, over budget, error) — FAIL-OPEN: an alert must
+    never be lost to a cloud hiccup, only to a confident rejection.
+
+    Exists because the local judge alerted a $25 "Macgregor Great-Scot MP-8" — a GOLF CLUB
+    — as a four-star sailboat. Automatic, no toggle: escalation happens exactly where a
+    mistake costs the most (the user's attention), and alerts are capped, so it's cents."""
+    try:
+        import json as _json
+        from web_watcher import llm
+        ok, _why = llm.cloud_ready(cfg, "alert_verify")
+        if not ok:
+            return None
+        criteria = (getattr(watch, "judgment_prompt", "") or
+                    getattr(watch, "instruction", "") or "").strip()
+        if not criteria:
+            return None
+        body = (getattr(l, "details", "") or "").strip()[:1200]
+        content = (f"WATCH CRITERIA: {criteria}\n\nLISTING\nTITLE: {l.title}\n"
+                   f"PRICE: {l.price or '(none shown)'}\n"
+                   + (f"AD BODY: {body}" if body else "(the ad body has not been read)"))
+        sys_p = (
+            "You confirm marketplace matches moments before they interrupt a person's "
+            "phone. Answer STRICT JSON: {\"match\": true or false, \"reason\": \"one "
+            "short line\"}. A listing that is a different KIND of thing sharing a brand "
+            "name — parts, accessories, apparel, memorabilia, a golf club against a "
+            "sailboat brand — is false. When the evidence is thin, judge the kind of thing "
+            "it plainly is.")
+        out = llm.chat_smart(
+            [{"role": "system", "content": sys_p}, {"role": "user", "content": content}],
+            role="alert_verify", local_model=cfg.models.effective_council_model, cfg=cfg,
+            skip_local=True, format_json=True, timeout=45.0,
+            validate=lambda t: '"match"' in (t or ""))
+        text = (out or {}).get("text") or ""
+        i, j = text.find("{"), text.rfind("}")
+        data = _json.loads(text[i:j + 1]) if i >= 0 <= j else {}
+        if "match" not in data:
+            return None
+        return (bool(data["match"]), str(data.get("reason", ""))[:160])
+    except Exception as exc:
+        log.debug("alert-boundary confirm unavailable: %s", exc)
+        return None
+
+
 def _alert_new_listings(
     watch: Watch, cfg: AppConfig, listings: list, run_ts: str, db_path: Optional[Path] = None,
 ) -> int:
@@ -2661,6 +2707,21 @@ def _alert_new_listings(
         summary = f"{star_prefix}New match: {title}" + (f" — {price}" if price else "")
         if why:
             summary += f"\n{why}"      # the judge's one-line verdict, in the alert
+        # THE ALERT BOUNDARY. Confirmed by the cloud when available; fail-open otherwise.
+        _confirm = _cloud_confirm_match(watch, l, cfg)
+        if _confirm is not None and _confirm[0] is False:
+            log.info("Alert boundary: cloud rejected %r — %s (not sending)",
+                     (l.title or "")[:60], _confirm[1])
+            try:
+                record_observation(watch.id or watch.name, watch.name, l.key,
+                                   run_ts, matched=False, rating=2,
+                                   judge_reason=f"alert-boundary: {_confirm[1]}",
+                                   db_path=db_path)
+            except Exception:
+                pass
+            _mark_seen(l)                       # never reconsider it every sweep
+            continue
+
         result = ReasoningResult(found=True, summary=summary, confidence="high", link=l.url)
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=ts)
         try:

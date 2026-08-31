@@ -1061,8 +1061,34 @@ class ServiceManager:
                 log.info("chat review: scheduled run starting (every %.1fh)", rc.every_hours)
                 self.review_start()
                 self._await_review_then_notify(cfg)
+                # The Watch Auditor rides the same schedule: after the chat audit, a slow
+                # deep review of every WATCH (config vs activity vs the delivery ledger).
+                # The admin's ask, verbatim: "an agent that reviews the watches and looks
+                # at issues like this... takes a long time is ok."
+                try:
+                    from web_watcher import audit as _audit
+                    self._notify_audit_findings(cfg, _audit.run_audit(cfg))
+                except Exception as _exc:
+                    log.warning("watch audit failed: %s", _exc)
             except Exception as exc:
                 log.warning("chat review scheduler: %s", exc)
+
+    def _notify_audit_findings(self, cfg, report: dict) -> None:
+        """Ping the ADMIN with the audit's serious findings — a report nobody reads is
+        a report that didn't happen. High-severity only; the full report sits at
+        /api/audit/latest."""
+        try:
+            high = [f for f in (report or {}).get("findings", [])
+                    if f.get("severity") == "high"]
+            if not high:
+                return
+            from web_watcher import notify
+            lines = ["\U0001f50e Watch audit: %d thing(s) need a look:" % len(high)]
+            for f in high[:6]:
+                lines.append("\u2022 %s: %s" % (f["watch"], f["finding"]))
+            notify.send_plain_telegram(chr(10).join(lines), cfg.notifications)
+        except Exception as exc:
+            log.debug("could not send audit findings: %s", exc)
 
     def _await_review_then_notify(self, cfg) -> None:
         """Wait for the running audit, then tell the admin if it found anything serious. A report

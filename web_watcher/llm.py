@@ -516,7 +516,12 @@ CLOUD_LADDER: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5")
 # nothing to buy. Vision is absent because the cloud vision path isn't wired. review/inspect are
 # absent because they already run the biggest local model with no time limit, for free.
 ESCALATABLE_ROLES: frozenset = frozenset(
-    {"chat", "extract", "terms", "comprehend", "vet", "stuck"})
+    {"chat", "extract", "terms", "comprehend", "vet", "stuck",
+     # alert_verify: the LAST check before a match interrupts a person's phone. Alerts are
+     # capped per sweep, so this is pennies — and it exists because a $25 MacGregor GOLF
+     # CLUB was alerted as a four-star sailboat, the rating rubric's literal worked example
+     # of what a 1 means, and the 14b still fell for the shared brand name.
+     "alert_verify"})
 
 
 def cloud_ready(cfg, role: str) -> tuple[bool, str]:

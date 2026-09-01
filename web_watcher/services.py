@@ -1073,20 +1073,55 @@ class ServiceManager:
             except Exception as exc:
                 log.warning("chat review scheduler: %s", exc)
 
+    _AUDIT_PING_MEMORY_S = 7 * 24 * 3600
+
     def _notify_audit_findings(self, cfg, report: dict) -> None:
         """Ping the ADMIN with the audit's serious findings — a report nobody reads is
         a report that didn't happen. High-severity only; the full report sits at
-        /api/audit/latest."""
+        /api/audit/latest.
+
+        With a MEMORY: the same finding pings at most once a week. Without it, the
+        identical 4-finding message hit the admin's phone at 5:47 AM and again at
+        8:07 AM the same morning — every release restart re-ran the overdue review
+        and re-broadcast findings that will stay true for as long as those watches
+        stay shelved. Keyed on (watch, kind), so a finding that CHANGES kind, or a
+        new watch developing an old problem, still gets through."""
         try:
             high = [f for f in (report or {}).get("findings", [])
                     if f.get("severity") == "high"]
             if not high:
                 return
-            from web_watcher import notify
-            lines = ["\U0001f50e Watch audit: %d thing(s) need a look:" % len(high)]
-            for f in high[:6]:
-                lines.append("\u2022 %s: %s" % (f["watch"], f["finding"]))
-            notify.send_plain_telegram(chr(10).join(lines), cfg.notifications)
+            import json as _json, time as _time
+            from web_watcher import notify, paths
+            notes_p = paths.data_dir() / "audit_ping_notes.json"
+            try:
+                notes = _json.loads(notes_p.read_text(encoding="utf-8"))
+            except Exception:
+                notes = {}
+            now = _time.time()
+            fresh = [f for f in high
+                     if now - float(notes.get(f"{f['watch']}|{f.get('kind', '?')}", 0) or 0)
+                     >= self._AUDIT_PING_MEMORY_S]
+            if not fresh:
+                log.info("watch audit: %d high finding(s), all pinged within the last "
+                         "week — staying quiet", len(high))
+                return
+            n = len(fresh)
+            lines = ["\U0001f50e Overnight watch check-up \u2014 %d %s could use a look:"
+                     % (n, "watch" if n == 1 else "watches")]
+            for f in fresh[:6]:
+                lines.append("\u2022 %s \u2014 %s" % (f["watch"], f["finding"]))
+            if n > 6:
+                lines.append("\u2026and %d more in the dashboard." % (n - 6))
+            lines.append("")
+            lines.append("The full report is in the app; ask me about any of these.")
+            if notify.send_plain_telegram(chr(10).join(lines), cfg.notifications):
+                for f in fresh:
+                    notes[f"{f['watch']}|{f.get('kind', '?')}"] = now
+                try:
+                    notes_p.write_text(_json.dumps(notes), encoding="utf-8")
+                except Exception:
+                    pass
         except Exception as exc:
             log.debug("could not send audit findings: %s", exc)
 
@@ -1108,7 +1143,7 @@ class ServiceManager:
             try:
                 from web_watcher.notify import send_plain_telegram
                 send_plain_telegram(
-                    f"🔎 Chat self-review: {highs} thing(s) worth a look across "
+                    f"🔎 Chat self-review: {highs} {'item' if highs == 1 else 'items'} worth a look across "
                     f"{report.get('turns_reviewed', 0)} messages.\n\n"
                     "Open the app → Settings → Self-review for the details.",
                     cfg.notifications)

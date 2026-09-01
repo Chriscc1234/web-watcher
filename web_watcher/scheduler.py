@@ -2829,9 +2829,14 @@ def _alert_new_listings(
         time.sleep(_ALERT_PACE_SECONDS)
 
     if extra:
-        summary = f"+{len(extra)} more new listing(s) this sweep (showing first {len(head)})."
+        _x = len(extra)
+        summary = (f"+{_x} more new listing{'s' if _x != 1 else ''} this sweep "
+                   f"(showing the first {len(head)}).")
         result = ReasoningResult(found=True, summary=summary, confidence="medium", link=watch.urls[0])
         payload = NotificationPayload(watch_name=watch.name, result=result, timestamp=ts)
+        # This is a ROUNDUP, not a listing: its link is the watch's own search page. The
+        # formatter must not offer to "open the listing" or vet a search page.
+        payload.is_roundup = True
         try:
             send_notifications(
                 payload, cfg.notifications,

@@ -114,7 +114,13 @@ def send_telegram(payload: NotificationPayload, cfg: NotificationsConfig,
     # Tap-to-vet: a button on the alert runs Deep Inspect on this listing (deal + scam risk) and
     # replies with the verdict, so a find can be judged from the phone without opening the app.
     body: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if payload.result.link:
+    if payload.result.link and getattr(payload, "is_roundup", False):
+        # A roundup's link is the watch's SEARCH PAGE — offer it as exactly that, and
+        # never a vet button (vetting a search page is nonsense).
+        body["reply_markup"] = {"inline_keyboard": [[
+            {"text": "🔎 See them all", "url": payload.result.link},
+        ]]}
+    elif payload.result.link:
         tok = remember_vet_link(payload.result.link, _listing_title(payload))
         # Two matching buttons: open it, or have The Watcher vet it. A url button looks and taps
         # the same as the callback one, so the pair reads as one control strip.
@@ -378,7 +384,7 @@ def _format_telegram(payload: NotificationPayload) -> str:
     # field is hardcoded HIGH for those and just adds noise, so show it only when there's no
     # rating (e.g. a yes/no watch like a weather warning, where confidence is meaningful).
     has_rating = "★" in summary
-    if conf and not has_rating:
+    if conf and not has_rating and not getattr(payload, "is_roundup", False):
         lines += ["", f"<b>{conf}</b> confidence"]
 
     # WHERE it came from. "Is this Craigslist or Facebook?" changes how you read a listing and
@@ -394,7 +400,9 @@ def _format_telegram(payload: NotificationPayload) -> str:
         lines += ["", "  ".join(bits)]
 
     if r.link:
-        lines.append(f'🔗 <a href="{_tg(r.link, quote=True)}">Open listing</a>')
+        label = ("See them all" if getattr(payload, "is_roundup", False) else "Open listing")
+        icon2 = "\U0001f50e" if getattr(payload, "is_roundup", False) else "\U0001f517"
+        lines.append(f'{icon2} <a href="{_tg(r.link, quote=True)}">{label}</a>')
     return "\n".join(lines)
 
 

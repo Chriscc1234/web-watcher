@@ -774,3 +774,20 @@ def test_listing_image_uses_stored_url_then_never_og_on_facebook(monkeypatch):
     monkeypatch.setattr(N, "og_image_for",
                         lambda url: (_ for _ in ()).throw(AssertionError("no og on fb")))
     assert N.image_bytes_for_listing("", "https://www.facebook.com/marketplace/item/9/") is None
+
+
+def test_a_roundup_never_wears_a_listing_costume():
+    """The '+1 more this sweep' summary rendered with 'MEDIUM confidence' and an 'Open
+    listing' link that opened the WHOLE SEARCH PAGE ('It looks like the whole watch?').
+    A roundup says what its link really is and drops the meaningless confidence."""
+    r = _result(summary="+1 more new listing this sweep (showing the first 1).",
+                confidence="medium", link="https://www.facebook.com/marketplace/x/search?query=y")
+    p = _payload(result=r)
+    p.is_roundup = True
+    msg = _format_telegram(p)
+    assert "See them all" in msg
+    assert "Open listing" not in msg
+    assert "confidence" not in msg.lower()
+    # the same payload WITHOUT the marker keeps the classic listing rendering
+    msg2 = _format_telegram(_payload(result=r))
+    assert "Open listing" in msg2 and "MEDIUM" in msg2

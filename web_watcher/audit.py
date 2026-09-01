@@ -161,8 +161,9 @@ def deterministic_findings(ev: dict) -> list[dict]:
     # 3. Found-but-never-pushed (the 15-MacGregor hole). A watch with notifications OFF
     #    banks matches as market data BY DESIGN — that's not a delivery failure.
     if ev["unalerted"] and ev.get("notify_on", True):
+        _n = len(ev["unalerted"])
         add("unalerted_matches", "high",
-            f"{len(ev['unalerted'])} match(es) recorded and never sent "
+            f"{_n} match{'es' if _n != 1 else ''} recorded and never sent "
             f"(e.g. {ev['unalerted'][0]['title']!r})",
             "the per-sweep drip should drain these; if it isn't, something upstream "
             "is gating it")

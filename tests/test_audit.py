@@ -282,3 +282,36 @@ def test_deep_inspect_labels_the_seller_as_a_fact(monkeypatch):
     assert "SELLER: Joined Facebook in 2024" in seen["user"]
     assert "solid truck" in seen["user"]
     assert SELLER_MARK not in seen["user"]                     # split, not leaked raw
+
+
+def test_audit_ping_speaks_human_and_remembers_for_a_week(monkeypatch, tmp_path):
+    """The identical 4-finding message hit the phone at 5:47 AM and again at 8:07 the
+    same morning (every restart re-ran the overdue review). The ping now keys each
+    (watch, kind) with a 7-day memory, and says 'watches', never '4 thing(s)'."""
+    from web_watcher import services as SV
+    mgr = SV.ServiceManager.__new__(SV.ServiceManager)
+    monkeypatch.setattr("web_watcher.paths.data_dir", lambda: tmp_path)
+    sent = []
+    monkeypatch.setattr("web_watcher.notify.send_plain_telegram",
+                        lambda msg, notif, chat_id_override=None: sent.append(msg) or True)
+    report = {"findings": [
+        {"watch": "A Watch", "kind": "unalerted_matches", "severity": "high",
+         "finding": "15 matches recorded and never sent (e.g. 'Hyundai')"},
+        {"watch": "B Watch", "kind": "dry_watch", "severity": "high",
+         "finding": "ran 40 times and never matched"}]}
+    from types import SimpleNamespace as _NS
+    cfg = _NS(notifications=_NS())
+    mgr._notify_audit_findings(cfg, report)
+    assert len(sent) == 1
+    assert "2 watches could use a look" in sent[0]
+    assert "thing(s)" not in sent[0] and "match(es)" not in sent[0]
+    # the same report again — silence, not a re-broadcast
+    mgr._notify_audit_findings(cfg, report)
+    assert len(sent) == 1
+    # a NEW finding on a new watch still gets through, alone
+    report["findings"].append({"watch": "C Watch", "kind": "never_ran",
+                               "severity": "high", "finding": "has never run"})
+    mgr._notify_audit_findings(cfg, report)
+    assert len(sent) == 2
+    assert "C Watch" in sent[1] and "A Watch" not in sent[1]
+    assert "1 watch could use a look" in sent[1]

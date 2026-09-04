@@ -4785,6 +4785,41 @@ def _ensure_named_site_urls(card: dict, latest: str) -> dict:
     return card
 
 
+_RADIUS_PARAMS = ("radius", "search_distance", "_sadis")
+
+
+def _collapse_superseded_urls(urls: list) -> list:
+    """Drop any url that is a pure NARROWER twin of another in the list — same search,
+    smaller radius/distance. "Broaden the fiat watch" merged widened copies of every url
+    ONTO the originals (additive protection working as designed), leaving 19 urls where
+    10 do the job and sweeping every search twice. A widening supersedes its narrow twin;
+    urls that differ in anything but a radius param are never touched."""
+    from urllib.parse import urlparse, parse_qsl
+    def _key_and_radius(u):
+        try:
+            pu = urlparse(u)
+            q = dict(parse_qsl(pu.query, keep_blank_values=True))
+            radius = None
+            for k in _RADIUS_PARAMS:
+                v = q.pop(k, None)
+                if v is not None and str(v).strip().lstrip("-").isdigit():
+                    radius = int(v)
+            key = (pu.netloc.lower(), pu.path, tuple(sorted(q.items())))
+            return key, radius
+        except Exception:
+            return (u, None, None), None
+    best: dict = {}
+    order: list = []
+    for u in urls:
+        key, radius = _key_and_radius(u)
+        if key not in best:
+            best[key] = (u, radius)
+            order.append(key)
+        elif radius is not None and (best[key][1] is None or radius > best[key][1]):
+            best[key] = (u, radius)
+    return [best[k][0] for k in order]
+
+
 def _protect_additive_update(card: dict, latest: str, cfg) -> dict:
     """Deterministic guard: an ADDITIVE request must never shrink a watch's coverage.
 
@@ -4805,6 +4840,7 @@ def _protect_additive_update(card: dict, latest: str, cfg) -> dict:
             existing = list(getattr(w, "urls", None) or [])
             proposed = [u for u in (card.get("urls") or []) if isinstance(u, str)]
             merged = existing + [u for u in proposed if u not in existing]
+            merged = _collapse_superseded_urls(merged)
             low = (latest or "").lower()
             hay = " ".join(merged).lower()
             for site, build in _SITE_URL_BUILDERS.items():
@@ -5189,6 +5225,17 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
 
         _VALID_ACTIONS = {"delete", "enable", "disable", "start", "stop", "reset"}
         latest_user = _latest_user_text(messages)
+        # The assistant's own previous reply, when it was a QUESTION — "start the whole
+        # Watcher, or just one watch?". The user's next message answers it by naming the
+        # watch, so the action's verb lives one turn UP, in our own words. Live failure:
+        # 'Start' → bot asks which → 'The fiat watch' → the model's correct start action
+        # was dropped as ungrounded and the watch never started.
+        _prev_assist = ""
+        for _m in reversed(messages or []):
+            if isinstance(_m, dict) and _m.get("role") == "assistant":
+                _prev_assist = _prose(_m.get("content")) or ""
+                break
+        _pending_q = _prev_assist if "?" in _prev_assist else ""
         watch_actions = []
         for a in (data.get("watch_actions") or []):
             act = a.get("action") if isinstance(a, dict) else None
@@ -5196,11 +5243,19 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 continue
             # Grounding: the user's OWN message must use this action's verb — otherwise the eager
             # extractor can surface an action (worst case a DELETE) card the user never asked for.
+            # The one exception: the verb appears in the assistant's own pending QUESTION and the
+            # user's reply names this watch — answering "which one?" is asking for it. (Still
+            # confirm-gated like every watch_action, so the tap remains the final word.)
             verb = _ACTION_VERB_RE.get(act)
             if verb and not verb.search(latest_user):
-                log.info("chat: dropped ungrounded '%s' action for %r — user didn't ask for it",
+                _answering = bool(_pending_q and verb.search(_pending_q)
+                                  and _watch_named_in(latest_user, cfg, owner))
+                if not _answering:
+                    log.info("chat: dropped ungrounded '%s' action for %r — user didn't ask "
+                             "for it", act, a.get("name"))
+                    continue
+                log.info("chat: '%s' on %r grounded by the assistant's own pending question",
                          act, a.get("name"))
-                continue
             real = _resolve_watch_name(a.get("name", ""), cfg)   # tolerate model name drift
             if real and not _is_owned(real, cfg, owner):
                 log.info("chat: dropped '%s' on %r — not owned by %s", act, real, owner)

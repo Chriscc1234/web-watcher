@@ -692,3 +692,57 @@ def test_extract_validator_accepts_empty_on_a_no_action_turn():
         return True
 
     assert _extract_usable('{}') is True                  # correctly-empty → stay local, do not pay
+
+
+def test_answering_the_bots_own_which_watch_question_grounds_the_action(monkeypatch):
+    """Live log 2026-09-04 12:10: 'Start' → bot asks which → 'The fiat watch' → the model's
+    correct start action was dropped as ungrounded ('user didn't ask for it') and the watch
+    never started. The verb lives one turn UP, in the assistant's own pending question —
+    answering it IS asking."""
+    import types
+    from web_watcher.dashboard import server as S
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    cfg = AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+        watches=[Watch(name="Fiat X19 Cars Watch", urls=["https://x?query=fiat"],
+                       instruction="x", interval_minutes=30, owner="111")])
+    convo = [
+        {"role": "user", "content": "Start"},
+        {"role": "assistant",
+         "content": "Do you want me to start the whole Watcher, or just one of your watches?"},
+        {"role": "user", "content": "The fiat watch"},
+    ]
+    _mock_two_phase(monkeypatch, "Starting the Fiat X19 Cars Watch now.",
+                    {"intent": "actions",
+                     "watch_actions": [{"action": "start", "name": "Fiat X19 Cars Watch"}]})
+    out = S._complete_assistant_turn("sys", convo, cfg, "m")
+    assert out.get("watch_actions") == [{"action": "start", "name": "Fiat X19 Cars Watch"}]
+
+    # But WITHOUT a pending question, a naked action on a merely-mentioned watch stays dropped.
+    convo2 = [{"role": "user", "content": "The fiat watch"}]
+    _mock_two_phase(monkeypatch, "Here's the Fiat X19 Cars Watch.",
+                    {"intent": "actions",
+                     "watch_actions": [{"action": "start", "name": "Fiat X19 Cars Watch"}]})
+    out2 = S._complete_assistant_turn("sys", convo2, cfg, "m")
+    assert not out2.get("watch_actions")
+
+
+def test_a_widened_url_supersedes_its_narrow_twin():
+    """'Broaden the fiat watch' merged widened copies ONTO the originals: 19 urls where 10
+    do the job, every search swept twice. Same search + bigger radius replaces; a url that
+    differs in anything else survives."""
+    from web_watcher.dashboard.server import _collapse_superseded_urls
+    out = _collapse_superseded_urls([
+        "https://offerup.com/search?q=Fiat+X19&radius=150",
+        "https://offerup.com/search?q=Fiat+X19&radius=300",         # widens the one above
+        "https://offerup.com/search?q=Bertone+X19&radius=150",      # different query — stays
+        "https://skagit.craigslist.org/search/cta?query=fiat&postal=98221&search_distance=150",
+        "https://skagit.craigslist.org/search/cta?query=fiat&postal=98221&search_distance=300",
+        "https://www.facebook.com/marketplace/search?query=fiat",   # no radius — untouched
+    ])
+    assert out == [
+        "https://offerup.com/search?q=Fiat+X19&radius=300",
+        "https://offerup.com/search?q=Bertone+X19&radius=150",
+        "https://skagit.craigslist.org/search/cta?query=fiat&postal=98221&search_distance=300",
+        "https://www.facebook.com/marketplace/search?query=fiat",
+    ]

@@ -818,3 +818,46 @@ def test_bare_start_remembers_the_watch_through_a_vet_detour(monkeypatch):
     _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
     out2 = S._complete_assistant_turn("sys", convo2, cfg, "m", owner="111")
     assert out2.get("watch_actions") == [{"action": "stop", "name": "Fiat X19 Cars Watch"}]
+
+
+def test_whats_running_and_is_that_mine_answer_from_real_state():
+    """Live 12:43: 'What's running?' fell past the status fast-path to the 14b, which
+    called Charlie's watch the admin's own, counted a DISABLED watch as 'active', and
+    invented its radius and price cap; 'Is that all mine?' got a confident 'Yes'. Both
+    phrasings now hit the deterministic path."""
+    from web_watcher.dashboard.server import _is_watch_status_request, _pure_status_request
+    for t in ("What’s running?", "what's running", "Is that all mine?",
+              "which ones are mine", "anything running?"):
+        assert _is_watch_status_request(t) and _pure_status_request(t), t
+    for t in ("start running the fiat watch", "show me the matches",
+              "what's running up the tree in my yard"):
+        assert not _pure_status_request(t), t
+
+
+def test_status_renderer_tells_running_from_merely_enabled():
+    """An enabled continuous watch that is NOT in the rotation used to render as
+    '🟢 on — watching (between sweeps)' — the stopped Fiat watch shown green. Enabled
+    is not running: it renders yellow with the exact words that start it, and the
+    header counts running / stopped / off separately."""
+    import types
+    from web_watcher.dashboard.server import _render_watch_status
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    cfg = AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+        watches=[Watch(name="Running Watch", urls=["https://x"], instruction="x",
+                       interval_minutes=30, mode="continuous", owner="111"),
+                 Watch(name="Stopped Watch", urls=["https://x"], instruction="x",
+                       interval_minutes=30, mode="continuous", owner="111"),
+                 Watch(name="Off Watch", urls=["https://x"], instruction="x",
+                       interval_minutes=30, mode="continuous", owner="111",
+                       enabled=False)])
+    mgr = types.SimpleNamespace(
+        is_paused=lambda: False,
+        get_job_info=lambda: [],
+        runtime_map=lambda: {"Running Watch": {"running": True},
+                             "Stopped Watch": {"running": False},
+                             "Off Watch": {"running": False}})
+    msg = _render_watch_status(cfg, mgr, "111")
+    assert "1 running, 1 set up but stopped, 1 off" in msg
+    assert "set up but STOPPED" in msg and "start the Stopped Watch watch" in msg
+    assert "between sweeps" not in msg

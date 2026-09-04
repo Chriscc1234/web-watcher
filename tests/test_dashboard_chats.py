@@ -675,15 +675,21 @@ def _on(name):
 
 
 def test_all_off_says_nothing_is_watching():
+    # v0.191 reworded the prompt STATUS to name what's ACTUALLY RUNNING (the 14b called a
+    # disabled watch "active" and another person's watch the admin's own).
     ctx = _ctx([_off("Boats"), _off("Cars")])
-    assert "ALL are turned OFF" in ctx and "nothing is being watched" in ctx
+    assert "ACTUALLY RUNNING right now: none" in ctx
+    assert "Turned off: 2" in ctx
     assert "OFF — not watching" in ctx
-    assert "are ON" not in ctx        # nothing is claimed to be on
 
 
 def test_some_on_is_counted_exactly():
-    ctx = _ctx([_on("Boats"), _off("Cars")], running=["Boats"])
-    assert "1 of 2 watch(es) are ON" in ctx
+    # v0.191: the STATUS line NAMES the running watches instead of a bare count, and
+    # separates enabled-but-stopped from running (enabled is not running).
+    ctx = _ctx([_on("Boats"), _on("Stalled"), _off("Cars")], running=["Boats"])
+    assert "ACTUALLY RUNNING right now: Boats." in ctx
+    assert "Enabled but STOPPED" in ctx and "Stalled" in ctx
+    assert "Turned off: 1" in ctx
 
 
 def test_paused_master_switch_overrides_watch_state():
@@ -758,12 +764,14 @@ def test_each_watch_is_its_own_bolded_block():
 
 def test_all_off_status_reads_nothing_running():
     out = _status([_off("Boats"), _off("Cars")])
-    assert "Nothing is running" in out and "all turned off" in out
+    assert "Nothing is actually running" in out
 
 
 def test_some_on_status_counts_them():
+    # v0.191: running / set-up-but-stopped / off counted separately — the header used to
+    # call every enabled watch "running" (the stopped Fiat rendered green).
     out = _status([_on("Boats"), _off("Cars")], running=["Boats"])
-    assert "1 of 2 watch(es) running" in out
+    assert "1 running, 1 off" in out
 
 
 def test_paused_status_says_paused():

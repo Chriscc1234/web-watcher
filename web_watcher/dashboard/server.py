@@ -3151,8 +3151,17 @@ _WATCH_STATUS_RE = re.compile(
     r"is\s+(it|this)\s+(still\s+)?(working|running|going|on)|"
     r"are\s+you\s+(still\s+)?(looking|watching|searching|working|running)|"
     r"(you|u)\s+still\s+there|still\s+watching|"
-    r"what'?s\s+the\s+status"
-    r")\b", re.I)
+    r"what'?s\s+the\s+status|"
+    # Run-state questions with no "watch" in them at all — "What's running?" went to the
+    # 14b, which called another person's watch the admin's own and invented its details.
+    r"what(?:'|\u2019)?s\s+(?:currently\s+)?(?:running|active|going)(?:\s+right\s+now)?\s*[?!.]*$|"
+    r"what\s+is\s+(?:currently\s+)?(?:running|active)\b|"
+    r"(?:is\s+)?anything\s+(?:running|active|being\s+watched)\b|"
+    # Ownership check-questions — the grouped status (Yours / Unassigned / by person) IS
+    # the honest answer; the model answered "yes, all yours" about Charlie's watch.
+    r"(?:is|are)\s+(?:that|those|these|they)\s+(?:all\s+)?(?:mine|my\s+watches)\b|"
+    r"which\s+(?:ones?\s+|watches\s+)?are\s+mine\b"
+    r")", re.I)
 
 
 def _is_watch_status_request(text: str) -> bool:
@@ -3372,16 +3381,35 @@ def _render_watch_status(cfg, manager, owner: str | None) -> str:
         if not getattr(w, "enabled", True):
             return ("⚪", "off — not watching")
         if getattr(w, "mode", "") == "continuous" and not job_map.get(w.name, {}).get("continuous_running"):
-            return ("🟢", "on — watching (between sweeps)")
+            # Enabled but deliberately STOPPED is not "between sweeps" — that fiction let
+            # the status call the stopped Fiat watch green. Say the truth and the fix.
+            return ("🟡", f"set up but STOPPED — say “start the {w.name} watch”")
         return ("🟢", "on — watching now")
 
-    on = sum(1 for w in mine if getattr(w, "enabled", True)) if not paused else 0
+    def _is_running(w):
+        if paused or not getattr(w, "enabled", True):
+            return False
+        if getattr(w, "mode", "") == "continuous":
+            return bool(job_map.get(w.name, {}).get("continuous_running"))
+        return True                                # a scheduled watch runs on its schedule
+    running = sum(1 for w in mine if _is_running(w))
+    stopped = sum(1 for w in mine
+                  if getattr(w, "enabled", True) and not paused and not _is_running(w))
+    off = len(mine) - running - stopped
+    def _n(k):
+        return f"{k} watch{'' if k == 1 else 'es'}"
     if paused:
-        head = f"⏸ <b>Watching is paused.</b> You have {len(mine)} watch(es), none running:"
-    elif on == 0:
-        head = f"⚪ <b>Nothing is running.</b> You have {len(mine)} watch(es), all turned off:"
+        head = f"⏸ <b>Watching is paused.</b> You have {_n(len(mine))}, none running:"
+    elif running == 0:
+        head = (f"⚪ <b>Nothing is actually running.</b> You have {_n(len(mine))}"
+                + (f" ({stopped} set up but stopped)" if stopped else "") + ":")
     else:
-        head = f"🟢 <b>{on} of {len(mine)} watch(es) running:</b>"
+        bits = [f"{running} running"]
+        if stopped:
+            bits.append(f"{stopped} set up but stopped")
+        if off:
+            bits.append(f"{off} off")
+        head = f"🟢 <b>{', '.join(bits)}:</b>"
 
     blocks = [head]
     from web_watcher.storage import watch_stats
@@ -3897,23 +3925,54 @@ def _build_watches_context(cfg, manager, owner: str | None = None) -> str:
     # A pre-computed status line the model can read back verbatim, instead of inferring run-state
     # from per-watch detail (which it got wrong — calling turned-off watches "running"). Facts,
     # counted here, stated plainly.
-    on = sum(1 for w in scoped if w.enabled)
     paused = False
     try:
         paused = manager.is_paused()
     except Exception:
         pass
+    _rt = {}
+    try:
+        rm = manager.runtime_map()
+        if isinstance(rm, dict):
+            _rt = {n: bool((v or {}).get("running")) for n, v in rm.items()}
+    except Exception:
+        pass
+    if not _rt:
+        try:
+            _rt = {j.get("watch_name"): bool(j.get("continuous_running"))
+                   for j in (manager.get_job_info() or []) if isinstance(j, dict)}
+        except Exception:
+            pass
+    def _runs(w):
+        if paused or not w.enabled:
+            return False
+        if getattr(w, "mode", "") == "continuous":
+            return _rt.get(w.name, False)
+        return True
+    running_names = [w.name for w in scoped if _runs(w)]
+    stopped_names = [w.name for w in scoped
+                     if w.enabled and not paused and not _runs(w)]
+    off_n = len(scoped) - len(running_names) - len(stopped_names)
     if scoped:
         if paused:
             status = (f"STATUS: the master switch is PAUSED, so NOTHING is being watched right now "
-                      f"(you have {len(scoped)} watch(es); {on} would be on if resumed).")
-        elif on == 0:
-            status = (f"STATUS: {len(scoped)} watch(es) exist but ALL are turned OFF — nothing is "
-                      f"being watched right now.")
+                      f"({len(scoped)} watches exist).")
         else:
-            status = (f"STATUS: {on} of {len(scoped)} watch(es) are ON and being watched right now"
-                      + (f"; {len(scoped) - on} are turned off." if len(scoped) > on else "."))
-        status += " Read this back when asked what's running; do NOT call a running watch 'off' or an off one 'running'.\n\n"
+            status = (f"STATUS: ACTUALLY RUNNING right now: "
+                      f"{', '.join(running_names) or 'none'}."
+                      + (f" Enabled but STOPPED (need a 'start'): {', '.join(stopped_names)}."
+                         if stopped_names else "")
+                      + (f" Turned off: {off_n}." if off_n else ""))
+        status += (" Read this back when asked what's running; enabled is NOT running — "
+                   "never call a stopped or off watch 'running' or 'active'.")
+        _others = [w for w in scoped
+                   if _owner_label_for(w, owner, cfg) not in ("yours", "you")]
+        if _others and _is_admin_owner(owner, cfg):
+            status += (f" OWNERSHIP: you are the admin seeing EVERYONE's watches — "
+                       f"{len(_others)} of these belong to other people or are unassigned "
+                       f"(see each watch's owner line). NEVER call those the user's own; "
+                       f"when asked 'is that all mine', separate them by owner.")
+        status += "\n\n"
     else:
         status = ""
 

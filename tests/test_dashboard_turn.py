@@ -746,3 +746,75 @@ def test_a_widened_url_supersedes_its_narrow_twin():
         "https://skagit.craigslist.org/search/cta?query=fiat&postal=98221&search_distance=300",
         "https://www.facebook.com/marketplace/search?query=fiat",
     ]
+
+
+def test_bare_start_honors_the_bots_own_standing_offer(monkeypatch):
+    """'The flow was: Start, but just a few messages before it asked if I wanted me to
+    start it and said, say start if you want to start it.' The bot offered — a bare
+    'Start' takes the offer; it never answers its own offer with 'start what?'."""
+    import types
+    from web_watcher.dashboard import server as S
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    cfg = AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+        watches=[Watch(name="Fiat X19 Cars Watch", urls=["https://x?query=fiat"],
+                       instruction="x", interval_minutes=30, owner="111"),
+                 Watch(name="Other Watch", urls=["https://x?query=o"],
+                       instruction="x", interval_minutes=30, owner="111")])
+    convo = [
+        {"role": "user", "content": "Broaden the fiat watch"},
+        {"role": "assistant",
+         "content": "✅ Done — “Fiat X19 Cars Watch”.\n"
+                    "\U0001f4a4 “Fiat X19 Cars Watch” isn't running right now — "
+                    "say “start the Fiat X19 Cars Watch watch” and I'll get hunting."},
+        {"role": "user", "content": "Start"},
+    ]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out = S._complete_assistant_turn("sys", convo, cfg, "m", owner="111")
+    assert out.get("watch_actions") == [{"action": "start", "name": "Fiat X19 Cars Watch"}]
+    assert "Starting" in out["message"] and "Fiat X19" in out["message"]
+
+    # No standing offer in sight → the admin still gets the honest which-one question.
+    convo2 = [{"role": "user", "content": "Start"}]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out2 = S._complete_assistant_turn("sys", convo2, cfg, "m")
+    assert not out2.get("watch_actions")
+    assert "?" in out2["message"]
+
+
+def test_bare_start_remembers_the_watch_through_a_vet_detour(monkeypatch):
+    """'i asked it somthing, clicked vet, the vet returned and then it should still know
+    that saying just start should start the one we were just literaly taling about' —
+    and 'it needs to be able to look back further and know what it said'. The watch talk
+    sits many messages back, behind a vet verdict and small talk; a bare 'Start' still
+    resolves to it instead of quizzing."""
+    import types
+    from web_watcher.dashboard import server as S
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    cfg = AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+        watches=[Watch(name="Fiat X19 Cars Watch", urls=["https://x?query=fiat"],
+                       instruction="x", interval_minutes=30, owner="111"),
+                 Watch(name="Other Watch", urls=["https://x?query=o"],
+                       instruction="x", interval_minutes=30, owner="111")])
+    convo = [
+        {"role": "user", "content": "Tell me about the fiat watch"},
+        {"role": "assistant", "content": "“Fiat X19 Cars Watch” searches OfferUp, "
+                                         "craigslist, eBay and Facebook."},
+        {"role": "user", "content": "Vet the newest one"},
+        {"role": "assistant", "content": "🔍 Vet verdict: deal 4/5, scam risk low — "
+                                         "clean title, fair price for the miles."},
+        {"role": "user", "content": "Nice"},
+        {"role": "assistant", "content": "Happy hunting!"},
+        {"role": "user", "content": "Start"},
+    ]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out = S._complete_assistant_turn("sys", convo, cfg, "m", owner="111")
+    assert out.get("watch_actions") == [{"action": "start", "name": "Fiat X19 Cars Watch"}]
+    assert "Starting" in out["message"]
+
+    # A bare stop mid-conversation about one watch stops THAT watch, no quiz.
+    convo2 = convo[:-1] + [{"role": "user", "content": "stop"}]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out2 = S._complete_assistant_turn("sys", convo2, cfg, "m", owner="111")
+    assert out2.get("watch_actions") == [{"action": "stop", "name": "Fiat X19 Cars Watch"}]

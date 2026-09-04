@@ -4253,7 +4253,10 @@ _CHAT_CONTEXT_MESSAGES = 14
 # loses focus and eventually overflows when fed more. A cloud model (Claude, 200k context)
 # has neither problem, so when the chat role is routed there we remember far more of the
 # conversation. Kept bounded (not "everything") so cost + latency stay predictable.
-_CHAT_CONTEXT_MESSAGES_CLOUD = 60
+# Cloud handles long context fine - this is only cost control, and a stingy cap made
+# the bot forget its own words. Deterministic scans (standing offers, bare-verb focus)
+# read the FULL history regardless; this cap only shapes what the model re-reads.
+_CHAT_CONTEXT_MESSAGES_CLOUD = 120
 
 
 def _chat_context_limit(cfg) -> int:
@@ -4493,6 +4496,37 @@ def _classify_lifecycle(text: str):
     if _ALL_MINE_RE.search(t):
         return (verb, "all_mine")
     return (verb, "bare")
+
+
+_STANDING_OFFER_RE = re.compile(
+    "say\\s+[\u201c\"']start(?:\\s+the)?\\s+(?P<name>[^\u201d\"'\n]{2,80}?)"
+    "(?:\\s+watch)?[\u201d\"']", re.I)
+
+
+def _standing_start_offer(messages: list, cfg, owner) -> str | None:
+    """The watch the BOT itself just offered to start. After an edit lands on a stopped
+    watch, the bot says: say \u201cstart the X watch\u201d and I'll get hunting. When the
+    user then says exactly that \u2014 or just \u201cStart\u201d \u2014 the referent is OUR
+    OWN LAST OFFER, not a mystery to quiz them about ('The flow was: Start, but just a few
+    messages before it asked... and said, say start if you want to start it'). Scans the
+    recent assistant turns for the newest offer, resolves its watch, checks ownership."""
+    try:
+        recent = [m for m in (messages or [])[-30:]
+                  if isinstance(m, dict) and m.get("role") == "assistant"]
+        for m in reversed(recent):
+            text = _prose(m.get("content")) or ""
+            if "start" not in text.lower():
+                continue
+            hit = _STANDING_OFFER_RE.search(text)
+            if not hit:
+                continue
+            real = _resolve_watch_name(hit.group("name").strip(), cfg)
+            if real and _is_owned(real, cfg, owner):
+                return real
+            return None                            # newest offer wins, even when unresolvable
+        return None
+    except Exception:
+        return None
 
 
 def _named_lifecycle_action(text: str, cfg, owner):
@@ -5137,6 +5171,7 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
     # far back (stale focus — it grabs a watch mentioned 20 messages ago — and eventually overflows
     # context). Keep the last _CHAT_CONTEXT_MESSAGES so "it"/"that one" resolve to the current
     # thread, not ancient history.
+    full_messages = list(messages or [])
     messages = (messages or [])[-_chat_context_limit(cfg):]
     # Clean the replayed context: older assistant turns may be raw JSON envelopes, which
     # otherwise confuse the model about which watch is in play.
@@ -5450,7 +5485,31 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                         message = (f"{gerund} all {len(watch_actions)} of your watches."
                                    if watch_actions else "You don't have any watches yet.")
             elif scope == "bare" and not already_named:
-                if is_admin:
+                # A bare verb resolves, in order: the bot's own standing offer ("say
+                # start and I'll get hunting"), then the FOCUSED watch — the one the
+                # conversation is literally about, vet clicks and all. Only when neither
+                # points at a single watch does anyone get quizzed.
+                _offered = (_standing_start_offer(full_messages, cfg, owner)
+                            if act == "start" else None)
+                _via = "the standing offer"
+                _bare_focus = focus
+                if not _offered and not _bare_focus:
+                    # The capped window can lose the thread (a vet verdict + replies push
+                    # the watch talk out); for a bare verb, remember further back.
+                    _wide = [({**m, "content": _prose(m.get("content"))}
+                              if isinstance(m, dict) and m.get("role") == "assistant" else m)
+                             for m in full_messages[-30:]]
+                    _bare_focus = _focused_watch_name(_wide, cfg)
+                if not _offered and _bare_focus and _bare_focus != PENDING_CREATE:
+                    _fw = _resolve_watch_name(_bare_focus, cfg)
+                    if _fw and _is_owned(_fw, cfg, owner):
+                        _offered, _via = _fw, "conversation focus"
+                if _offered:
+                    watch_actions = [{"action": act, "name": _offered}]
+                    _g = {"stop": "Stopping", "start": "Starting"}.get(act, act.title() + "ing")
+                    message = f"{_g} \u201c{_offered}\u201d now."
+                    log.info("chat: bare %s resolves to %r via %s", act, _offered, _via)
+                elif is_admin:
                     message = (f"Do you mean {verb} the **whole Watcher** (everything, for everyone), "
                                f"or just your own watches?")     # ask when it's not obvious
                 else:

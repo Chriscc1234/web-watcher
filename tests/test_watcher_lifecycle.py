@@ -481,3 +481,41 @@ def test_send_a_watch_to_someone_is_a_transfer():
     for t in ("send the matches to Jordan", "send the watch list to my email",
               "send me the watch list"):
         assert not S._TRANSFER_RE.search(t), t
+
+
+def test_transfer_note_tells_the_recipient_whether_it_is_running(monkeypatch, tmp_path):
+    """Jordan received a disabled, non-running watch with no hint it was idle. The note
+    now states run-state and hands over the exact start words."""
+    import json as _json
+    from web_watcher.dashboard import server as S
+    sent = []
+    monkeypatch.setattr("web_watcher.notify.send_plain_telegram",
+                        lambda msg, notif, chat_id_override=None:
+                        sent.append((chat_id_override, msg)) or True)
+    cfg = _cfg_test_fleet()
+    cfg.notifications.telegram.allowed_chat_ids = ["222"]   # the recipient must be known
+    cfg.watches[2].enabled = False                     # the MacGregor, shelved
+    cfg.watches[2].mode = "continuous"
+    monkeypatch.setattr("web_watcher.config.load", lambda path=None: cfg)
+    monkeypatch.setattr("web_watcher.config.save", lambda c, path=None: None)
+    monkeypatch.setattr("web_watcher.scheduler._remembered_running_set", lambda: set())
+    import contextlib
+    monkeypatch.setattr("web_watcher.config.lock",
+                        lambda: contextlib.nullcontext(), raising=False)
+    ok, err = S._perform_transfer("Anacortes MacGregor Sailboats Watch", "222", None)
+    assert ok, err
+    chat, msg = sent[0]
+    assert chat == "222"
+    assert "isn't running yet" in msg and "want me to start hunting?" in msg
+    assert "start the Anacortes MacGregor Sailboats Watch watch" in msg
+
+    # A RUNNING watch says so instead of offering a pointless start.
+    sent.clear()
+    cfg.watches[3].enabled = True
+    cfg.watches[3].mode = "continuous"
+    monkeypatch.setattr("web_watcher.scheduler._remembered_running_set",
+                        lambda: {"Sailrite Sewing Machine Watch"})
+    ok, err = S._perform_transfer("Sailrite Sewing Machine Watch", "111", None)
+    assert ok, err
+    assert "already watching" in sent[0][1]
+    assert "isn't running" not in sent[0][1]

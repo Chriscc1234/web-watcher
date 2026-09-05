@@ -4711,10 +4711,35 @@ def _perform_transfer(watch_name: str, new_owner: str, actor: str | None,
             names = _load_owner_names()
             giver = names.get(str(actor or ""), "") or ("the owner" if actor is None
                                                         else "another user")
-            send_plain_telegram(
-                f"📬 {giver} transferred the watch “{watch_name}” to you. "
-                f"Say “what am I watching?” to see it.",
-                load().notifications, chat_id_override=new_owner)
+            # Tell the recipient whether their new watch is actually DOING anything —
+            # a transferred stopped watch used to arrive with no hint it was idle, nor
+            # the words that start it ("Does the watcher bot follow up by asking if
+            # they want to start the watch?" — it didn't).
+            state = ""
+            try:
+                from web_watcher.scheduler import _remembered_running_set
+                _des = _remembered_running_set()
+                _w2 = next((x for x in load().watches if x.name == watch_name), None)
+                if _w2 is not None:
+                    _runs = (_w2.enabled and
+                             (_des is None or _w2.name in _des
+                              or getattr(_w2, "mode", "") != "continuous"))
+                    state = (" It's already watching — alerts will come to you here."
+                             if _runs else
+                             f" It isn't running yet — want me to start hunting? "
+                             f"Just say “start the {watch_name} watch”.")
+            except Exception:
+                pass
+            _note = (f"📬 {giver} transferred the watch “{watch_name}” to you."
+                     + (state or f" Say “what am I watching?” to see it."))
+            if send_plain_telegram(_note, load().notifications, chat_id_override=new_owner):
+                # Mirror into their chat thread so the conversation remembers the offer:
+                # a bare "start" reply resolves via the standing-offer memory (v0.190).
+                try:
+                    from web_watcher.notify import _mirror_to_thread
+                    _mirror_to_thread(new_owner, _note)
+                except Exception:
+                    pass
         except Exception as exc:
             log.debug("transfer notice not sent: %s", exc)
     log.info("Watch %r transferred: %r → %r (by %s)", watch_name, old_owner,

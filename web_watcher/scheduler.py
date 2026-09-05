@@ -1517,8 +1517,12 @@ def _drip_unalerted(watch, cfg, db_path, run_ts: str) -> int:
         from web_watcher.storage import unalerted_matches
         cap = max(1, watch.continuous_max_alerts)
         floor = watch.min_rating if getattr(watch, "min_rating", None) else _DRIP_MIN_RATING
-        rows = unalerted_matches(watch.id or watch.name, min_rating=floor,
-                                 limit=cap, db_path=db_path)
+        # Fetch past the cap so the batch can say how many MORE are waiting — the drip
+        # used to fetch exactly cap rows and a 25-match backlog went silent after 8,
+        # indistinguishable from "that's everything".
+        rows_all = unalerted_matches(watch.id or watch.name, min_rating=floor,
+                                     limit=cap + 100, db_path=db_path)
+        rows, extra = rows_all[:cap], max(0, len(rows_all) - cap)
         if not rows:
             return 0
         batch = []
@@ -1529,9 +1533,29 @@ def _drip_unalerted(watch, cfg, db_path, run_ts: str) -> int:
             l.judge_reason = r.get("judge_reason") or ""
             l.image = r.get("image") or ""
             batch.append(l)
-        log.info("Continuous watch %r: %d earlier match(es) were never sent — pushing now "
-                 "(paced at %d/sweep)", watch.name, len(batch), cap)
-        return _alert_new_listings(watch, cfg, batch, run_ts, db_path)
+        log.info("Continuous watch %r: %d earlier match(es) never sent (%d more queued) — "
+                 "pushing now (paced at %d/sweep)", watch.name, len(batch), extra, cap)
+        sent_n = _alert_new_listings(watch, cfg, batch, run_ts, db_path)
+        if sent_n and extra:
+            # Say how many more are waiting, and the words that show them all now.
+            try:
+                from web_watcher.notify import send_plain_telegram, _mirror_to_thread
+                more = "100+" if extra >= 100 else str(extra)
+                note = (f"\U0001f4da {more} more earlier find{'' if extra == 1 else 's'} "
+                        f"{'is' if extra == 1 else 'are'} queued for this watch — "
+                        f"I'll keep sending a few each sweep, or say “show me the "
+                        f"matches for the {watch.name}” to see everything now.")
+                owner = str(getattr(watch, "owner", "") or "")
+                if send_plain_telegram(note, cfg.notifications,
+                                       chat_id_override=owner or None):
+                    try:
+                        _mirror_to_thread(owner or
+                                          str(cfg.notifications.telegram.chat_id or ""), note)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                log.debug("drip backlog note failed for %r: %s", watch.name, exc)
+        return sent_n
     except Exception as exc:
         log.debug("drip of unalerted matches failed for %r: %s", watch.name, exc)
         return 0

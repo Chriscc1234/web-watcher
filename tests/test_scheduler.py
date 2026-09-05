@@ -1335,3 +1335,42 @@ def test_night_wake_slots_differ_by_date_but_hold_within_one():
     b = sch._night_wake_slots(datetime(2026, 8, 31, 1, 0))
     assert a1 == a2
     assert a1 != b
+
+
+def test_drip_says_how_many_more_are_waiting(monkeypatch, tmp_path):
+    """"Does it say how many other matches there are besides the ones shown?" — it
+    didn't: the drip fetched exactly cap rows, so a 25-match backlog went silent after
+    8, indistinguishable from 'that's everything'. Now the batch is followed by a
+    backlog note with the exact words that show the rest."""
+    from types import SimpleNamespace as NS
+    from web_watcher import scheduler as sch
+
+    rows = [{"listing_key": f"k{i}", "url": f"https://x/{i}", "title": f"Find {i}",
+             "price_text": "$5", "rating": 4, "judge_reason": "", "image": ""}
+            for i in range(11)]
+    monkeypatch.setattr("web_watcher.storage.unalerted_matches",
+                        lambda wid, min_rating=None, limit=None, db_path=None:
+                        rows[:limit])
+    sent_batches, notes = [], []
+    monkeypatch.setattr(sch, "_alert_new_listings",
+                        lambda w, c, batch, ts, db: sent_batches.append(batch) or len(batch))
+    monkeypatch.setattr("web_watcher.notify.send_plain_telegram",
+                        lambda msg, notif, chat_id_override=None:
+                        notes.append((chat_id_override, msg)) or True)
+    monkeypatch.setattr("web_watcher.notify._mirror_to_thread",
+                        lambda chat, text, url="", image="": None)
+    w = NS(name="Manual Transmission Cars near Anacortes", id="w1", owner="8708818228",
+           continuous_max_alerts=8, min_rating=3)
+    cfg = NS(notifications=NS(telegram=NS(chat_id="111")))
+    n = sch._drip_unalerted(w, cfg, None, "2026-09-04T21:00:00")
+    assert n == 8 and len(sent_batches[0]) == 8
+    chat, note = notes[0]
+    assert chat == "8708818228"                        # the OWNER hears about the backlog
+    assert "3 more earlier finds are queued" in note
+    assert "show me the matches for the Manual Transmission Cars near Anacortes" in note
+
+    # Backlog smaller than the cap → everything went out, no note to send.
+    notes.clear(); sent_batches.clear()
+    del rows[4:]
+    n2 = sch._drip_unalerted(w, cfg, None, "2026-09-04T21:05:00")
+    assert n2 == 4 and not notes

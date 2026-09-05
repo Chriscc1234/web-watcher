@@ -987,9 +987,11 @@ class TelegramBridge:
         self._send(text, chat, html=True, buttons=buttons)
 
     @staticmethod
-    def _watch_card_text(w) -> str:
-        """One watch as one Telegram message: full name (never truncated), state, owner-ish
-        detail and stats. HTML — every dynamic value escaped."""
+    def _watch_card_text(w, owner_line: str = "") -> str:
+        """One watch as one Telegram message: full name (never truncated), state, owner and
+        stats. HTML — every dynamic value escaped. owner_line is set only for the ADMIN's
+        view ("whose watch is this?" was unanswerable from a scrolled stack of cards); a
+        buddy's cards are always their own, so theirs stay clean."""
         import html as _h
         running = bool(w.get("continuous_running"))
         state = ("\U0001f441 checking now" if w.get("sweeping_now")
@@ -997,6 +999,8 @@ class TelegramBridge:
                  else "\u26aa off \u2014 not watching" if w.get("enabled")
                  else "\u26ab inactive")
         lines = [f"<b>{_h.escape(w.get('name') or '')}</b>", state]
+        if owner_line:
+            lines.append(f"\U0001f464 {_h.escape(owner_line)}")
         st = w.get("stats") or {}
         if st.get("observations"):
             lines.append(f"{st.get('matches', 0)} matched of {st['observations']} seen")
@@ -1015,6 +1019,14 @@ class TelegramBridge:
         mine = {w.get("name"): w for w in watches
                 if admin or str(w.get("owner") or "") == str(chat_id)}
         hit = [mine[n] for n in names if n in mine][:8]
+        people = {}
+        if admin:
+            try:
+                pr = _hx.get(f"{self.dashboard_url}/api/people", timeout=10.0)
+                people = {str(x.get("chat_id")): (x.get("label") or x.get("name") or "")
+                          for x in (pr.json() or [])}
+            except Exception:
+                pass
         if not hit:
             return
         self._wd_names[str(chat_id)] = [w["name"] for w in hit]
@@ -1031,7 +1043,13 @@ class TelegramBridge:
                 row.append({"text": ("\u23f9 Stop" if running else "\u25b6 Start"),
                             "callback_data": f"wact:{'stop' if running else 'start'}:{i}"})
             row.append({"text": "\U0001f50d Details", "callback_data": f"wdet:{i}"})
-            self._send(self._watch_card_text(w), chat_id, html=True, buttons=[row])
+            oline = ""
+            if admin:
+                _o = str(w.get("owner") or "")
+                oline = ("Yours" if _o == str(self.chat_id)
+                         else "Unassigned (managed by you)" if not _o
+                         else f"{people.get(_o) or 'chat ' + _o}\u2019s")
+            self._send(self._watch_card_text(w, oline), chat_id, html=True, buttons=[row])
             if i < len(hit) - 1:
                 time.sleep(0.3)
 

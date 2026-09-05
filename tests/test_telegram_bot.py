@@ -1043,3 +1043,19 @@ def test_a_pending_action_is_claimed_only_once(monkeypatch):
     b._handle_message("yes", "111", "Chris")
     b._handle_message("yes", "111", "Chris")           # a second, stray yes
     assert len(applied) == 1                            # applied exactly once
+
+
+def test_watch_card_says_whose_watch_it_is():
+    """"For the individual watch message bubble. How do you know whose watch it is?" —
+    the admin's per-watch cards carried no owner line, so a scrolled stack of cards was
+    anonymous. The admin's cards name the owner; a buddy's (always their own) stay clean."""
+    from web_watcher.telegram_bot import TelegramBridge
+    w = {"name": "Anacortes MacGregor Sailboats Watch", "enabled": True,
+         "continuous_running": False,
+         "stats": {"matches": 15, "observations": 1295}}
+    admin_card = TelegramBridge._watch_card_text(w, "Jordan’s")
+    assert "Anacortes MacGregor Sailboats Watch" in admin_card
+    assert "👤 Jordan’s" in admin_card
+    assert "15 matched of 1295 seen" in admin_card
+    buddy_card = TelegramBridge._watch_card_text(w)
+    assert "👤" not in buddy_card                  # a buddy's own card carries no owner tag

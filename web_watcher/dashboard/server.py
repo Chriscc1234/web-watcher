@@ -4725,8 +4725,12 @@ def _perform_transfer(watch_name: str, new_owner: str, actor: str | None,
 # "transfer/give/hand the <X> watch to <person>". The recipient phrase is whatever follows the
 # final " to " — names are free text, so parsing keeps it simple and resolution does the work.
 _TRANSFER_RE = re.compile(
-    r"\b(?:transfer|reassign|hand (?:over |off )?|give|pass)\b.{0,60}?\bwatch\b.{0,40}?"
-    r"\bto\s+(?P<who>[A-Za-z0-9@._' -]{2,32})\s*[.!]?\s*$", re.I)
+    # "Send the macgregor watch to Jordan" fell through to the model (which asked a
+    # clarifying question) because "send" wasn't a transfer verb. Requiring "watch"
+    # between verb and recipient keeps "send the matches to Jordan" out of this path.
+    r"\b(?:transfer|reassign|hand (?:over |off )?|give|pass|send|assign|move|share)\b"
+    r".{0,60}?\bwatch(?:es)?\b(?!\s*list).{0,40}?"
+    r"\b(?:to|with)\s+(?P<who>[A-Za-z0-9@._' -]{2,32})\s*[.!]?\s*$", re.I)
 
 
 def _resolve_person(phrase: str, cfg, actor: str | None) -> tuple[str | None, str]:

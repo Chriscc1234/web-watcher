@@ -4697,6 +4697,36 @@ def _named_delete_actions(text: str, cfg, owner):
     return [{"action": "delete", "name": n} for n in targets]
 
 
+_COPY_WORD_RE = re.compile("\\b(copy|duplicate|clone)\\b", re.I)
+
+# The bot’s own transfer-confirm question, parseable back on the next turn so a bare
+# "yes" executes exactly what was asked — same pattern as the standing start offer.
+_TRANSFER_CONFIRM_RE = re.compile(
+    'this MOVES [“"](?P<watch>[^”"]+)[”"] to (?P<who>[^:]+):')
+
+
+def _copy_card_for(w_src, new_owner: str, who_label: str, cfg) -> dict:
+    """A create-suggestion duplicating w_src's CONFIG for another person: same searches
+    and judgment, fresh history and dedup, alerts to them. Named uniquely, because watch
+    names key everything and a copy must never collide with the original."""
+    base = f"{who_label}'s {w_src.name}"
+    name, n = base, 2
+    existing = {x.name for x in getattr(cfg, "watches", [])}
+    while name in existing:
+        name, n = f"{base} {n}", n + 1
+    card = {"action": "create", "name": name,
+            "urls": list(getattr(w_src, "urls", None) or []),
+            "instruction": getattr(w_src, "instruction", "") or "",
+            "mode": getattr(w_src, "mode", "continuous") or "continuous",
+            "owner": str(new_owner)}
+    for f in ("judgment_prompt", "interval_minutes", "min_rating", "keywords",
+              "antikeywords", "use_login_profile", "max_agent_steps"):
+        v = getattr(w_src, f, None)
+        if v not in (None, "", []):
+            card[f] = v
+    return card
+
+
 def _perform_transfer(watch_name: str, new_owner: str, actor: str | None,
                       owner_name: str = "") -> tuple[bool, str]:
     """Move a watch to another person. Returns (ok, error-detail). Shared by the API endpoint
@@ -4845,6 +4875,16 @@ def _is_bare_confirmation(text: str) -> bool:
     """True for a message that is ONLY a yes/no with no content of its own. Such a turn answers
     the assistant's previous question — it can't be a request to watch something new."""
     return bool(_BARE_CONFIRM_RE.match(text or ""))
+
+
+_BARE_REFUSAL_RE = re.compile(
+    r"^\s*(n|no|nope|nah|never ?mind|cancel|keep it|don'?t)\b[\s.!,]*$", re.I)
+
+
+def _is_bare_refusal(text: str) -> bool:
+    """The NO half of a bare confirmation — 'no', 'never mind', 'keep it'. Lets a
+    confirm-gated action (a transfer) be declined as naturally as it's accepted."""
+    return bool(_BARE_REFUSAL_RE.match(text or ""))
 
 
 def _is_hard_chat_turn(messages: list, focus: str | None) -> bool:
@@ -5500,7 +5540,53 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # Handing a watch to another person is exact business — a name, a recipient, a
         # permission — which is precisely where the 14b drifts, so the whole thing is code.
         # Ambiguity in either the watch or the person becomes a QUESTION, never a guess.
+        # A bare "yes" answering OUR OWN transfer-confirm question executes it; a bare
+        # "no" keeps the watch. Parsed from the previous assistant message — no new state.
+        _tc = (_TRANSFER_CONFIRM_RE.search(_prev_assist or "")
+               if _is_bare_confirmation(latest_user) else None)
+        if _tc:
+            _wname = _resolve_watch_name(_tc.group("watch"), cfg)
+            _to, _why = _resolve_person(_tc.group("who").strip(), cfg, owner)
+            if _is_bare_refusal(latest_user):
+                message = f"Okay — “{_tc.group('watch')}” stays where it is."
+            elif not _wname or _to is None:
+                message = ("I lost track of that transfer — tell me again which watch "
+                           "and who it's for.")
+            else:
+                ok, err = _perform_transfer(_wname, _to, owner)
+                message = (f"Done — “{_wname}” now belongs to {_why} and they’ve been told."
+                           if ok else f"I couldn't transfer it: {err}")
+            return {"message": message, "watch_suggestion": None, "watch_suggestions": None,
+                    "listings": None, "watch_actions": None, "program_action": None,
+                    "tokens": 0, "prompt_tokens": 0, "duration_ms": 0, "raw": message}
+
         _tm = _TRANSFER_RE.search(latest_user or "")
+        if _tm and _COPY_WORD_RE.search(latest_user or ""):
+            # A COPY, not a move: duplicate the config for the recipient (fresh history,
+            # their alerts) through the normal create-card confirm flow. Checked before
+            # the transfer path so "copy" can never silently become a move.
+            _remainder = (latest_user or "")[:_tm.start("who")]
+            _wname = _resolve_watch_name(_watch_named_in(_remainder, cfg, owner) or "", cfg)
+            _to, _why = _resolve_person(_tm.group("who"), cfg, owner)
+            _src = next((x for x in cfg.watches if x.name == _wname), None)
+            if _src is None:
+                mine = _watches_for_owner(cfg, owner)
+                message = ("Which watch should I copy? "
+                           + ", ".join(f"“{w.name}”" for w in mine[:8]))
+                card = None
+            elif _to is None:
+                message = f"I couldn't work out who the copy is for ({_why})."
+                card = None
+            else:
+                card = _copy_card_for(_src, _to, _why, cfg)
+                message = (f"Here's a copy for {_why}: “{card['name']}” — same searches "
+                           f"and rules, fresh history, alerts to them. Your “{_wname}” "
+                           f"stays yours, untouched.")
+            return {"message": message, "watch_suggestion": card,
+                    "watch_suggestions": [card] if card else None,
+                    "listings": None, "watch_actions": None, "program_action": None,
+                    "tokens": 0, "prompt_tokens": 0, "duration_ms": 0, "raw": message}
+
         if _tm:
             _remainder = (latest_user or "")[:_tm.start("who")]
             _wname = _resolve_watch_name(_watch_named_in(_remainder, cfg, owner) or "", cfg)
@@ -5519,10 +5605,15 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                            f"People I know: {', '.join(dict.fromkeys(known)) or 'nobody yet — '
                            'add them to the allowed Telegram users first'}.")
             else:
-                ok, err = _perform_transfer(_wname, _to, owner)
-                message = (f"Done — “{_wname}” now belongs to {_why if _to else 'you (the desktop)'}"
-                           f"{' and they’ve been told' if _to else ''}."
-                           if ok else f"I couldn't transfer it: {err}")
+                # CONFIRM BEFORE MOVING. Transfers executed instantly and messaged the
+                # recipient before the sender could blink — and "send"/"share" sound
+                # like copying ("Oh so sending Jordan the watch is not giving him a
+                # copy but actually transferring the watch?"). State the semantics,
+                # wait for the yes; deletes always worked this way.
+                message = (f"⚖ Just so it's clear — this MOVES “{_wname}” "
+                           f"to {_why}: it leaves your list and its alerts go to them "
+                           f"instead of you. Say “yes” to transfer it — or "
+                           f"say “give them a copy” if you both want one.")
             suggestions, watch_actions, listings = [], None, None
             return {"message": message, "watch_suggestion": None, "watch_suggestions": None,
                     "listings": None, "watch_actions": None, "program_action": None,

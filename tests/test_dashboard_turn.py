@@ -861,3 +861,72 @@ def test_status_renderer_tells_running_from_merely_enabled():
     assert "1 running, 1 set up but stopped, 1 off" in msg
     assert "set up but STOPPED" in msg and "start the Stopped Watch watch" in msg
     assert "between sweeps" not in msg
+
+
+def _transfer_cfg():
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    return AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+        watches=[Watch(name="Fiat X19 Cars Watch", urls=["https://x?query=fiat"],
+                       instruction="fiats", interval_minutes=30, mode="continuous",
+                       min_rating=3, keywords=["fiat"], owner="111")])
+
+
+def test_a_transfer_asks_before_moving_and_a_yes_executes(monkeypatch):
+    """'Oh so sending Jordan the watch is not giving him a copy but actually
+    transferring the watch?' — transfers executed instantly, no confirm, messaging the
+    recipient before the sender could blink. Now: state the semantics, wait for yes."""
+    from web_watcher.dashboard import server as S
+    cfg = _transfer_cfg()
+    moved = []
+    monkeypatch.setattr(S, "_resolve_person",
+                        lambda who, cfg, owner: ("222", "Jordan") if "jordan" in who.lower()
+                        else (None, "?"))
+    monkeypatch.setattr(S, "_perform_transfer",
+                        lambda w, to, actor: moved.append((w, to)) or (True, ""))
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "send the fiat watch to Jordan"}], cfg, "m")
+    assert "this MOVES “Fiat X19 Cars Watch” to Jordan" in out["message"]
+    assert "copy" in out["message"]                    # the alternative is offered
+    assert not moved                                   # NOTHING executed yet
+
+    # The bare yes, with the bot's question as the previous message → executes.
+    convo = [{"role": "user", "content": "send the fiat watch to Jordan"},
+             {"role": "assistant", "content": out["message"]},
+             {"role": "user", "content": "yes"}]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out2 = S._complete_assistant_turn("sys", convo, cfg, "m")
+    assert moved == [("Fiat X19 Cars Watch", "222")]
+    assert "now belongs to Jordan" in out2["message"]
+
+    # A bare no declines cleanly.
+    moved.clear()
+    convo2 = convo[:-1] + [{"role": "user", "content": "no"}]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out3 = S._complete_assistant_turn("sys", convo2, cfg, "m")
+    assert not moved and "stays where it is" in out3["message"]
+
+
+def test_a_copy_builds_a_fresh_watch_for_the_recipient_not_a_move(monkeypatch):
+    """'give Jordan a copy' duplicates the CONFIG (their alerts, fresh history) via the
+    normal create-card confirm flow — and never silently becomes a transfer."""
+    from web_watcher.dashboard import server as S
+    cfg = _transfer_cfg()
+    moved = []
+    monkeypatch.setattr(S, "_resolve_person",
+                        lambda who, cfg, owner: ("222", "Jordan"))
+    monkeypatch.setattr(S, "_perform_transfer",
+                        lambda w, to, actor: moved.append(w) or (True, ""))
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "give the fiat watch to Jordan as a copy"}],
+        cfg, "m")
+    assert not moved                                   # a copy is never a move
+    card = out["watch_suggestion"]
+    assert card and card["action"] == "create"
+    assert card["name"] == "Jordan's Fiat X19 Cars Watch"
+    assert card["owner"] == "222"
+    assert card["urls"] == ["https://x?query=fiat"]
+    assert card["min_rating"] == 3 and card["keywords"] == ["fiat"]
+    assert "fresh history" in out["message"]

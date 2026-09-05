@@ -1415,7 +1415,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                       # Explicit list for the bridge's tappable buttons — matching names
                       # against reply TEXT attached buttons to anything that mentioned a
                       # watch (a nudge sentence produced a Cars button under a boat list).
-                      "watch_buttons": [w.name for w in _watches_for_owner(cfg, owner)][:6],
+                      "watch_buttons": _status_button_order(cfg, manager, owner)[:6],
                       # A button-capable surface shows THIS instead of the full list — the
                       # buttons carry the per-watch info, the text just summarises.
                       "tg_message": _render_watch_status_compact(cfg, manager, owner)}
@@ -3309,6 +3309,23 @@ def _fmt_hours(h: float) -> str:
     return f"every {h:g}h"
 
 
+def _status_button_order(cfg, manager, owner: str | None) -> list:
+    """Watch names for the status buttons: running first, then set-up-but-stopped, then
+    off — config order within each tier. Buttons cap at six; config order alone put both
+    RUNNING watches past the cut, so the admin saw '2 running' and no way to see which."""
+    mine = _watches_for_owner(cfg, owner)
+    rt = {}
+    try:
+        rt = manager.runtime_map() or {}
+    except Exception:
+        pass
+    def _tier(w):
+        if (rt.get(w.name) or {}).get("running"):
+            return 0
+        return 1 if getattr(w, "enabled", True) else 2
+    return [w.name for w in sorted(mine, key=_tier)]
+
+
 def _render_watch_status_compact(cfg, manager, owner: str | None) -> str:
     """The SHORT status header for surfaces with tappable watch buttons (Telegram). The full
     list next to a column of buttons repeating every name read as a dupe — the user's words:
@@ -3338,6 +3355,12 @@ def _render_watch_status_compact(cfg, manager, owner: str | None) -> str:
     else:
         head = f"\U0001f7e2 <b>{running} of {len(mine)} running</b> \u2014 tap a watch:"
     lines = [head]
+    if not paused and running:
+        # NAME the running ones — a count with no names sent the admin hunting ("How is
+        # there 2 watches running but I don't see what they are?"): the running watches
+        # sat past the six-button cut in config order.
+        _run_names = [w.name for w in mine if (rt.get(w.name) or {}).get("running")]
+        lines.append("\U0001f7e2 Running: " + ", ".join(_h.escape(n) for n in _run_names))
     groups: dict = {}
     for w in mine:
         groups.setdefault(_owner_label_for(w, owner, cfg), []).append(w)

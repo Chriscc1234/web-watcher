@@ -845,3 +845,23 @@ def test_page_reloads_itself_when_the_server_version_changes():
     assert "_bootVersion" in html
     assert "location.reload();" in html
     assert "if (document.hidden) return;" in html, "would reload a window nobody is watching"
+
+
+def test_compact_status_names_the_running_watches_and_buttons_lead_with_them():
+    """'How is there 2 watches running but I don't see what they are?' — the phone got
+    '2 of 8 running' plus six buttons in CONFIG order, and both running watches sat 7th
+    and 8th. The compact text names them; the button order puts running first."""
+    from unittest.mock import MagicMock
+    mgr = MagicMock()
+    mgr.is_paused.return_value = False
+    watches = [_off("A"), _off("B"), _off("C"), _off("D"), _off("E"), _on("F-stopped"),
+               _on("G-running"), _on("H-running")]
+    mgr.runtime_map.return_value = {"G-running": {"running": True},
+                                    "H-running": {"running": True}}
+    cfg = AppConfig(watches=watches)
+    txt = S._render_watch_status_compact(cfg, mgr, None)
+    assert "2 of 8 running" in txt
+    assert "Running: G-running, H-running" in txt
+    order = S._status_button_order(cfg, mgr, None)
+    assert order[:3] == ["G-running", "H-running", "F-stopped"]
+    assert set(order[:6]) >= {"G-running", "H-running"}    # never past the button cap

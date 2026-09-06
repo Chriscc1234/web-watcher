@@ -1059,3 +1059,32 @@ def test_watch_card_says_whose_watch_it_is():
     assert "15 matched of 1295 seen" in admin_card
     buddy_card = TelegramBridge._watch_card_text(w)
     assert "👤" not in buddy_card                  # a buddy's own card carries no owner tag
+
+
+def test_stale_card_taps_can_never_hit_the_wrong_watch(monkeypatch):
+    """Charlie's running Sailrite watch was stopped 10s after a 'Watches' re-send: card
+    buttons carried POSITIONAL indexes resolved against the NEWEST list, so a tap on an
+    older card acted on whatever watch now sat at that position. Buttons now carry a
+    name-hash token; a pre-token (numeric) tap is answered 'out of date', never acted on."""
+    import httpx as _hx
+    b = _bridge("111")
+    watches = [{"name": "Sailrite Sewing Machine Watch", "owner": "111"},
+               {"name": "Fiat X19 Cars Watch", "owner": "111"}]
+
+    class _R:
+        def json(self): return watches
+    monkeypatch.setattr(_hx, "get", lambda *a, **k: _R())
+
+    tok = b._wtok("Fiat X19 Cars Watch")
+    w = b._watch_for_callback("111", tok)
+    assert w and w["name"] == "Fiat X19 Cars Watch"     # token → exactly that watch
+    assert b._watch_for_callback("111", "0") is None    # positional ref: inert, never wrong
+    assert b._watch_for_callback("111", b._wtok("Deleted Watch")) is None
+
+    acted, answered = [], []
+    monkeypatch.setattr(b, "_answer_callback",
+                        lambda cb_id, text="": answered.append(text))
+    monkeypatch.setattr(_hx, "post", lambda *a, **k: acted.append(a) or None)
+    b._handle_watch_callback({"id": "cb1"}, "111", "wact:stop:0")
+    assert not acted                                    # the old card did NOTHING
+    assert "out of date" in answered[0]

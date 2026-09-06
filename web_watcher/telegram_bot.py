@@ -1031,6 +1031,7 @@ class TelegramBridge:
             return
         self._wd_names[str(chat_id)] = [w["name"] for w in hit]
         for i, w in enumerate(hit):
+            tok = self._wtok(w.get("name") or "")
             running = bool(w.get("continuous_running"))
             row = []
             if not w.get("enabled"):
@@ -1038,11 +1039,11 @@ class TelegramBridge:
                 # or activate button on the deactivated ones?" Activate = the action
                 # endpoint's start: enable + start in one tap.
                 row.append({"text": "\u26a1 Activate",
-                            "callback_data": f"wact:start:{i}"})
+                            "callback_data": f"wact:start:{tok}"})
             elif w.get("mode") == "continuous":
                 row.append({"text": ("\u23f9 Stop" if running else "\u25b6 Start"),
-                            "callback_data": f"wact:{'stop' if running else 'start'}:{i}"})
-            row.append({"text": "\U0001f50d Details", "callback_data": f"wdet:{i}"})
+                            "callback_data": f"wact:{'stop' if running else 'start'}:{tok}"})
+            row.append({"text": "\U0001f50d Details", "callback_data": f"wdet:{tok}"})
             oline = ""
             if admin:
                 _o = str(w.get("owner") or "")
@@ -1074,22 +1075,34 @@ class TelegramBridge:
         self._wd_names[str(chat_id)] = [w["name"] for w in hit]
         rows = []
         for i, w in enumerate(hit):
+            tok = self._wtok(w.get("name") or "")
             dot = "\U0001f7e2" if w.get("continuous_running") else "\u26aa"
             st = w.get("stats") or {}
             found = st.get("matches") or 0
             # The button IS the list row now: state dot, name, and the match count.
             label = f"{dot} {w['name'][:34]} \u00b7 {found}\u2713"
-            rows.append([{"text": label, "callback_data": f"wdet:{i}"}])
+            rows.append([{"text": label, "callback_data": f"wdet:{tok}"}])
         return rows
 
+    @staticmethod
+    def _wtok(name: str) -> str:
+        """Stable per-watch button token: hash of the NAME, so it survives restarts and
+        re-sends with no stored state, and a stale card can never point at the wrong
+        watch — at worst its watch no longer exists and the tap answers 'gone'."""
+        import hashlib
+        return "t" + hashlib.sha1((name or "").encode("utf-8")).hexdigest()[:12]
+
     def _watch_for_callback(self, chat: str, idx_text: str):
-        """Resolve a wdet:/wact: index back to a live watch row, owner-checked."""
+        """Resolve a wdet:/wact: token back to a live watch row, owner-checked. Legacy
+        NUMERIC refs (pre-token cards) resolve to None — positional lookup against the
+        newest list is exactly the stale-tap bug this replaced."""
         try:
             import httpx as _hx
-            names = self._wd_names.get(str(chat)) or []
-            name = names[int(idx_text)]
+            if not str(idx_text).startswith("t"):
+                return None                        # a pre-token card: inert, never wrong
             r = _hx.get(f"{self.dashboard_url}/api/watches", timeout=10.0)
-            w = next((x for x in (r.json() or []) if x.get("name") == name), None)
+            w = next((x for x in (r.json() or [])
+                      if self._wtok(x.get("name") or "") == idx_text), None)
             if w is None:
                 return None
             admin = str(chat) == str(self.chat_id)
@@ -1104,6 +1117,14 @@ class TelegramBridge:
         import httpx as _hx
         import html as _h
         _esc = _h.escape
+        log.info("Telegram tap from %s: %s", chat, data[:40])
+        if data.startswith(("wdet:", "wact:")) and not data.split(":")[-1].startswith("t"):
+            # A card from before button tokens (positional index). Acting on it through
+            # the NEWEST list is how a stale tap stopped the wrong watch — refuse kindly.
+            self._answer_callback(cb.get("id"),
+                                  "That card is out of date \u2014 say \u201cWatches\u201d "
+                                  "for fresh ones.")
+            return True
         if data.startswith("wdet:"):
             w = self._watch_for_callback(chat, data[5:])
             if w is None:
@@ -1125,7 +1146,7 @@ class TelegramBridge:
             if lr.get("summary"):
                 lines.append(f"last: {_esc(str(lr['summary'])[:120])}")
             lines.append(f"{len(w.get('urls') or [])} search url(s)")
-            idx = data[5:]
+            idx = data[5:]                       # the incoming token, passed straight back
             label = ("\u23f9 Stop" if running
                      else "\u25b6 Start" if w.get("enabled")
                      else "\u26a1 Activate")

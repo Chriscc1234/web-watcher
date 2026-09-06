@@ -1415,7 +1415,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                       # Explicit list for the bridge's tappable buttons — matching names
                       # against reply TEXT attached buttons to anything that mentioned a
                       # watch (a nudge sentence produced a Cars button under a boat list).
-                      "watch_buttons": _status_button_order(cfg, manager, owner)[:6],
+                      "watch_buttons": _status_button_order(cfg, manager, owner)[:12],
                       # A button-capable surface shows THIS instead of the full list — the
                       # buttons carry the per-watch info, the text just summarises.
                       "tg_message": _render_watch_status_compact(cfg, manager, owner)}
@@ -3154,7 +3154,7 @@ _WATCH_STATUS_RE = re.compile(
     r"what'?s\s+the\s+status|"
     # Run-state questions with no "watch" in them at all — "What's running?" went to the
     # 14b, which called another person's watch the admin's own and invented its details.
-    r"what(?:'|\u2019)?s\s+(?:currently\s+)?(?:running|active|going)(?:\s+right\s+now)?\s*[?!.]*$|"
+    r"what(?:(?:'|\u2019)?s|\s+is)?\s*(?:currently\s+)?(?:running|active|going)(?:\s+right\s+now)?\s*[?!.]*$|"
     r"what\s+is\s+(?:currently\s+)?(?:running|active)\b|"
     r"(?:is\s+)?anything\s+(?:running|active|being\s+watched)\b|"
     # Ownership check-questions — the grouped status (Yours / Unassigned / by person) IS

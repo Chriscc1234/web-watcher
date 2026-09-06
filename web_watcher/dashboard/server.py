@@ -4699,6 +4699,12 @@ def _named_delete_actions(text: str, cfg, owner):
 
 _COPY_WORD_RE = re.compile("\\b(copy|duplicate|clone)\\b", re.I)
 
+# "give <person> a copy of <watch>" — the natural word order puts the person BEFORE the
+# copy word, which the transfer regex ("...watch to <person>") never matches.
+_COPY_FOR_RE = re.compile(
+    "\\b(?:give|make|send|get)\\s+(?P<who>[^,.!?]{1,40}?)\\s+a\\s+(?:copy|duplicate|clone)\\b",
+    re.I)
+
 # The bot’s own transfer-confirm question, parseable back on the next turn so a bare
 # "yes" executes exactly what was asked — same pattern as the standing start offer.
 _TRANSFER_CONFIRM_RE = re.compile(
@@ -5565,13 +5571,25 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                     "tokens": 0, "prompt_tokens": 0, "duration_ms": 0, "raw": message}
 
         _tm = _TRANSFER_RE.search(latest_user or "")
-        if _tm and _COPY_WORD_RE.search(latest_user or ""):
+        _cm = _COPY_FOR_RE.search(latest_user or "")
+        if _cm or (_tm and _COPY_WORD_RE.search(latest_user or "")):
             # A COPY, not a move: duplicate the config for the recipient (fresh history,
             # their alerts) through the normal create-card confirm flow. Checked before
-            # the transfer path so "copy" can never silently become a move.
-            _remainder = (latest_user or "")[:_tm.start("who")]
+            # the transfer path so "copy" can never silently become a move. Two word
+            # orders: "...copy of the X watch to <person>" and "give <person> a copy
+            # of the X watch".
+            if _tm and _COPY_WORD_RE.search(latest_user or ""):
+                # the "...watch to <person>" order parses the person precisely — prefer
+                # it when both shapes match ("give the fiat watch to Jordan as a copy"
+                # made the lazy who-group of the other shape eat the whole sentence)
+                _who_phrase = _tm.group("who")
+                _remainder = (latest_user or "")[:_tm.start("who")]
+            else:
+                _who_phrase = _cm.group("who")
+                _remainder = ((latest_user or "")[:_cm.start("who")]
+                              + (latest_user or "")[_cm.end("who"):])
             _wname = _resolve_watch_name(_watch_named_in(_remainder, cfg, owner) or "", cfg)
-            _to, _why = _resolve_person(_tm.group("who"), cfg, owner)
+            _to, _why = _resolve_person(_who_phrase, cfg, owner)
             _src = next((x for x in cfg.watches if x.name == _wname), None)
             if _src is None:
                 mine = _watches_for_owner(cfg, owner)

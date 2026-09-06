@@ -969,3 +969,57 @@ def test_transfer_to_me_is_a_self_claim_no_confirm_no_gibberish(monkeypatch):
     out2 = S._complete_assistant_turn("sys", convo, cfg, "m", owner="111")
     assert moved == [("Facebook Miata Watch", "111")]
     assert "lost track" not in out2["message"]
+
+
+def test_the_transfer_and_copy_flows_work_scoped_for_a_buddy(monkeypatch):
+    """"And all this works as a non admin user?" — the same flows, owner-scoped: a buddy
+    can move/copy/claim only their OWN watches, can never reach another person's, and
+    gets the same confirm semantics the admin gets."""
+    from web_watcher.dashboard import server as S
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    cfg = AppConfig(
+        notifications=NotificationsConfig(
+            telegram=TelegramConfig(chat_id="111", allowed_chat_ids=["222", "333"])),
+        watches=[Watch(name="Jordans Cars Watch", urls=["https://x?query=cars"],
+                       instruction="cars", interval_minutes=30, mode="continuous",
+                       owner="222"),
+                 Watch(name="Charlies Sailrite Watch", urls=["https://x?query=sailrite"],
+                       instruction="sailrite", interval_minutes=30, mode="continuous",
+                       owner="333")])
+    moved = []
+    monkeypatch.setattr(S, "_load_owner_names",
+                        lambda: {"111": "Chris", "222": "Jordan", "333": "Charlie"})
+    monkeypatch.setattr(S, "_perform_transfer",
+                        lambda w, to, actor: moved.append((w, to, actor)) or (True, ""))
+
+    # Jordan moves HIS OWN watch to Charlie: confirm question first, yes executes.
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "give my cars watch to Charlie"}],
+        cfg, "m", owner="222")
+    assert "this MOVES “Jordans Cars Watch” to Charlie" in out["message"]
+    assert not moved
+    convo = [{"role": "user", "content": "give my cars watch to Charlie"},
+             {"role": "assistant", "content": out["message"]},
+             {"role": "user", "content": "yes"}]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    S._complete_assistant_turn("sys", convo, cfg, "m", owner="222")
+    assert moved == [("Jordans Cars Watch", "333", "222")]
+
+    # Jordan can NOT reach Charlie's watch — the scoped name lookup never finds it.
+    moved.clear()
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out2 = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "give the sailrite watch to me"}],
+        cfg, "m", owner="222")
+    assert not moved
+    assert "Which watch" in out2["message"]            # asked, never guessed, never acted
+
+    # Jordan's copy-gift builds a card owned by the recipient, sourced from HIS watch.
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out3 = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "give Charlie a copy of my cars watch"}],
+        cfg, "m", owner="222")
+    card = out3["watch_suggestion"]
+    assert card and card["owner"] == "333" and card["name"] == "Charlie's Jordans Cars Watch"
+    assert not moved                                   # a copy is never a move

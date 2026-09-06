@@ -472,14 +472,14 @@ def test_send_a_watch_to_someone_is_a_transfer():
     """Live 20:26: 'Send the macgregor watch to Jordan' fell past the deterministic
     transfer path ('send' wasn't a verb) and the model answered with a clarifying
     question instead. Natural transfer verbs all trigger; 'watch list' never does."""
+    # v0.201: "share" left this list — it means CO-WATCHING now, not a move.
     for t, who in [("Send the macgregor watch to Jordan", "Jordan"),
                    ("move the fiat watch to Charlie", "Charlie"),
-                   ("share the boats watch with Jordan", "Jordan"),
                    ("give my watches to Steve", "Steve")]:
         m = S._TRANSFER_RE.search(t)
         assert m and m.group("who") == who, t
     for t in ("send the matches to Jordan", "send the watch list to my email",
-              "send me the watch list"):
+              "send me the watch list", "share the boats watch with Jordan"):
         assert not S._TRANSFER_RE.search(t), t
 
 

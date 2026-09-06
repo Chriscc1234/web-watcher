@@ -1816,6 +1816,7 @@ def _baseline_batch(watch, cfg, batch: list, run_ts: str, db_path, mode_label: s
         best = sorted(matched, key=lambda l: -(getattr(l, "rating", 0) or 0))[:3]
         send_baseline_briefing(watch.name, len(batch), len(matched_keys), cfg.notifications,
                                owner_chat_id=getattr(watch, "owner", "") or "",
+                extra_chat_ids=list(getattr(watch, "shared_with", []) or []),
                                instruction=watch.instruction or "", top=best)
     except Exception as exc:
         log.debug("baseline briefing not sent for %r: %s", watch.name, exc)
@@ -2837,6 +2838,7 @@ def _alert_new_listings(
                 payload, cfg.notifications,
                 use_telegram=watch.notify.telegram, use_email=watch.notify.email,
                 owner_chat_id=getattr(watch, "owner", "") or "",
+                extra_chat_ids=list(getattr(watch, "shared_with", []) or []),
             )
             _mark_seen(l)   # only after a send attempt that didn't raise
             # Distinct from 'seen': this one was actually PUSHED. A baseline marks its
@@ -2866,6 +2868,7 @@ def _alert_new_listings(
                 payload, cfg.notifications,
                 use_telegram=watch.notify.telegram, use_email=watch.notify.email,
                 owner_chat_id=getattr(watch, "owner", "") or "",
+                extra_chat_ids=list(getattr(watch, "shared_with", []) or []),
             )
             # Overflow items were surfaced via the summary — record them so they don't
             # re-summarise every sweep.
@@ -2921,7 +2924,8 @@ def _handle_fb_checkpoint(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Op
         try:
             send_notifications(payload, cfg.notifications,
                                use_telegram=watch.notify.telegram, use_email=watch.notify.email,
-                               owner_chat_id=getattr(watch, "owner", "") or "")
+                               owner_chat_id=getattr(watch, "owner", "") or "",
+                               extra_chat_ids=list(getattr(watch, "shared_with", []) or []))
         except Exception as exc:
             log.warning("Checkpoint notification failed for %r: %s", watch.name, exc)
 
@@ -2948,7 +2952,8 @@ def _handle_login_wall(watch: Watch, cfg: AppConfig, run_ts: str, db_path: Optio
         try:
             send_notifications(payload, cfg.notifications,
                                use_telegram=watch.notify.telegram, use_email=watch.notify.email,
-                               owner_chat_id=getattr(watch, "owner", "") or "")
+                               owner_chat_id=getattr(watch, "owner", "") or "",
+                               extra_chat_ids=list(getattr(watch, "shared_with", []) or []))
         except Exception as exc:
             log.warning("Login-wall notification failed for %r: %s", watch.name, exc)
 
@@ -3042,7 +3047,8 @@ def _run_goal_check(
         try:
             send_notifications(payload, cfg.notifications,
                                use_telegram=watch.notify.telegram, use_email=watch.notify.email,
-                               owner_chat_id=getattr(watch, "owner", "") or "")
+                               owner_chat_id=getattr(watch, "owner", "") or "",
+                               extra_chat_ids=list(getattr(watch, "shared_with", []) or []))
         except Exception as exc:
             log.warning("Restock alert send failed for %r (%s)", watch.name, exc)
 
@@ -3156,6 +3162,7 @@ def _run_pipeline(
                 use_telegram=notify_cfg.telegram,
                 use_email=notify_cfg.email,
                 owner_chat_id=getattr(watch, "owner", "") or "",
+                extra_chat_ids=list(getattr(watch, "shared_with", []) or []),
             )
 
         # 6. Storage

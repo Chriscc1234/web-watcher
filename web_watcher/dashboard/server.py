@@ -636,6 +636,7 @@ def create_app(manager: "ServiceManager") -> FastAPI:
                 "keywords":         list(w.keywords or []),
                 "antikeywords":     list(w.antikeywords or []),
                 "min_rating":       w.min_rating,
+                "shared_with":      [str(x) for x in (w.shared_with or [])],
                 # Surfaced so you can SEE whether a supervised run is being recorded and whether
                 # it uses the saved login — both matter before starting a Facebook sweep, and
                 # both were previously invisible in the list (you had to guess).
@@ -3851,7 +3852,9 @@ def _watches_for_owner(cfg, owner: str | None):
     or touch anyone else's."""
     if not owner or _is_admin_owner(owner, cfg):
         return list(cfg.watches)
-    return [w for w in cfg.watches if str(getattr(w, "owner", "") or "") == str(owner)]
+    return [w for w in cfg.watches
+            if str(getattr(w, "owner", "") or "") == str(owner)
+            or str(owner) in [str(x) for x in (getattr(w, "shared_with", []) or [])]]
 
 
 def _owner_label_for(w, asker: str | None, cfg) -> str:
@@ -3864,10 +3867,18 @@ def _owner_label_for(w, asker: str | None, cfg) -> str:
         asker_id = str(asker) if asker is not None else main
         if not wid:
             return "unassigned (managed by you)" if _is_admin_owner(asker, cfg) else "unassigned"
+        names = _load_owner_names()
+        shared = [str(x) for x in (getattr(w, "shared_with", []) or [])]
         if wid == asker_id or (asker is None and wid == main):
+            if shared:
+                who = ", ".join(names.get(c, f"chat {c}") for c in shared)
+                return f"yours — shared with {who}"
             return "yours"
-        name = _load_owner_names().get(wid, "")
-        return f"{name} (chat {wid})" if name else f"chat {wid}"
+        if asker_id in shared:
+            return f"shared with you by {names.get(wid, f'chat {wid}')}"
+        name = names.get(wid, "")
+        base = f"{name} (chat {wid})" if name else f"chat {wid}"
+        return base + (" — shared" if shared else "")
     except Exception:
         return ""
 
@@ -4733,6 +4744,62 @@ def _copy_card_for(w_src, new_owner: str, who_label: str, cfg) -> dict:
     return card
 
 
+_SHARE_RE = re.compile(
+    "\\bshare\\b.{0,60}?\\bwatch(?:es)?\\b(?!\\s*list).{0,40}?"
+    "\\bwith\\s+(?P<who>[A-Za-z0-9@._' -]{2,32})\\s*[.!]?\\s*$", re.I)
+_UNSHARE_RE = re.compile(
+    "\\b(?:stop\\s+sharing|unshare|un-share)\\b.{0,60}?\\bwatch(?:es)?\\b"
+    "(?:.{0,40}?\\bwith\\s+(?P<who>[A-Za-z0-9@._' -]{2,32}))?\\s*[.!]?\\s*$|"
+    "\\bleave\\b.{0,40}?\\bshared\\s+watch\\b", re.I)
+
+
+def _perform_share(watch_name: str, other: str, actor: str | None,
+                   remove: bool = False) -> tuple[bool, str]:
+    """Add (or remove) a co-watcher on a watch. Sharing is additive — nothing leaves the
+    owner's list — so unlike a transfer it executes without a confirm; the new co-watcher
+    is told what they got and how to leave."""
+    from web_watcher.config import load, save, lock as _cfg_lock
+    other = str(other or "").strip()
+    if not other:
+        return (False, "no person to share with")
+    with _cfg_lock():
+        cfg = load()
+        w = next((x for x in cfg.watches if x.name == watch_name), None)
+        if w is None:
+            return (False, f"no watch called {watch_name!r}")
+        if other == str(getattr(w, "owner", "") or ""):
+            return (False, "they already own that watch")
+        cur = [str(x) for x in (getattr(w, "shared_with", []) or [])]
+        if remove:
+            if other not in cur:
+                return (False, "it isn't shared with them")
+            w.shared_with = [c for c in cur if c != other]
+        else:
+            if other in cur:
+                return (False, "it's already shared with them")
+            allowed = {str(cfg.notifications.telegram.chat_id or "")} | {
+                str(c) for c in (cfg.notifications.telegram.allowed_chat_ids or [])}
+            if other not in allowed:
+                return (False, f"{other} isn't a known person")
+            w.shared_with = cur + [other]
+        save(cfg)
+    if not remove:
+        try:
+            from web_watcher.notify import send_plain_telegram
+            names = _load_owner_names()
+            giver = names.get(str(actor or ""), "") or "The owner"
+            send_plain_telegram(
+                f"\U0001f91d {giver} shared the watch \u201c{watch_name}\u201d with you "
+                f"\u2014 you'll get its alerts too, and either of you can adjust it. "
+                f"Say \u201cstop sharing {watch_name} with me\u201d to leave.",
+                load().notifications, chat_id_override=other)
+        except Exception as exc:
+            log.debug("share notice not sent: %s", exc)
+    log.info("Watch %r %s %r (by %s)", watch_name,
+             "unshared from" if remove else "shared with", other, actor or "admin")
+    return (True, "")
+
+
 def _perform_transfer(watch_name: str, new_owner: str, actor: str | None,
                       owner_name: str = "") -> tuple[bool, str]:
     """Move a watch to another person. Returns (ok, error-detail). Shared by the API endpoint
@@ -4812,7 +4879,7 @@ _TRANSFER_RE = re.compile(
     # "Send the macgregor watch to Jordan" fell through to the model (which asked a
     # clarifying question) because "send" wasn't a transfer verb. Requiring "watch"
     # between verb and recipient keeps "send the matches to Jordan" out of this path.
-    r"\b(?:transfer|reassign|hand (?:over |off )?|give|pass|send|assign|move|share)\b"
+    r"\b(?:transfer|reassign|hand (?:over |off )?|give|pass|send|assign|move)\b"
     r".{0,60}?\bwatch(?:es)?\b(?!\s*list).{0,40}?"
     r"\b(?:to|with)\s+(?P<who>[A-Za-z0-9@._' -]{2,32})\s*[.!]?\s*$", re.I)
 
@@ -5310,6 +5377,17 @@ def _is_owned(name: str, cfg, owner: str | None) -> bool:
     if not owner or _is_admin_owner(owner, cfg):
         return True                       # desktop, or the owner on their phone: full control
     w = next((x for x in cfg.watches if x.name == name), None)
+    return bool(w and (str(getattr(w, "owner", "") or "") == str(owner)
+                       or str(owner) in [str(x) for x in
+                                         (getattr(w, "shared_with", []) or [])]))
+
+
+def _is_primary_owner(name: str, cfg, owner: str | None) -> bool:
+    """Stricter than _is_owned: delete / transfer / un-share belong to the watch's
+    PRIMARY owner (or the admin) — a sharer may use a shared watch, not destroy it."""
+    if not owner or _is_admin_owner(owner, cfg):
+        return True
+    w = next((x for x in cfg.watches if x.name == name), None)
     return bool(w and str(getattr(w, "owner", "") or "") == str(owner))
 
 
@@ -5452,6 +5530,10 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
             if real and not _is_owned(real, cfg, owner):
                 log.info("chat: dropped '%s' on %r — not owned by %s", act, real, owner)
                 continue
+            if real and act == "delete" and not _is_primary_owner(real, cfg, owner):
+                log.info("chat: dropped delete of %r — %s shares it but doesn't own it",
+                         real, owner)
+                continue
             if real:
                 watch_actions.append({"action": act, "name": real})
 
@@ -5546,6 +5628,50 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
         # Handing a watch to another person is exact business — a name, a recipient, a
         # permission — which is precisely where the 14b drifts, so the whole thing is code.
         # Ambiguity in either the watch or the person becomes a QUESTION, never a guess.
+        # ── SHARE / UNSHARE ("share my cars watch with Jordan") — co-watching, not a
+        # move: additive, so it executes without a confirm. Checked before the transfer
+        # block, which no longer owns the word "share".
+        _um = _UNSHARE_RE.search(latest_user or "")
+        _sm = None if _um else _SHARE_RE.search(latest_user or "")
+        if _um or _sm:
+            _m = _um or _sm
+            _who_txt = (_m.group("who") or "me") if "who" in _m.groupdict() else "me"
+            _scope_txt = (latest_user or "")[:_m.start("who")] if _m.group("who") \
+                else (latest_user or "")
+            _wname = _resolve_watch_name(_watch_named_in(_scope_txt, cfg, owner) or "", cfg)
+            _to, _why = _resolve_person(_who_txt, cfg, owner)
+            if not _wname:
+                mine = _watches_for_owner(cfg, owner)
+                message = ("Which watch do you mean? "
+                           + ", ".join(f"\u201c{w.name}\u201d" for w in mine[:8]))
+            elif _to is None:
+                message = f"I couldn't work out who you mean ({_why})."
+            elif _um:
+                # Leaving is a sharer's right; removing someone else is the owner's.
+                _leaver = str(_to) == str(owner or "")
+                if not _leaver and not _is_primary_owner(_wname, cfg, owner):
+                    message = f"Only the owner of \u201c{_wname}\u201d can change who it's shared with."
+                else:
+                    ok, err = _perform_share(_wname, _to, owner, remove=True)
+                    message = ((f"Done \u2014 you've left \u201c{_wname}\u201d." if _leaver else
+                                f"Done \u2014 \u201c{_wname}\u201d is no longer shared with {_why}.")
+                               if ok else f"I couldn't do that: {err}")
+            else:
+                if not _is_primary_owner(_wname, cfg, owner):
+                    message = f"Only the owner of \u201c{_wname}\u201d can share it."
+                elif str(_to) == str(owner or ""):
+                    message = f"\u201c{_wname}\u201d is already yours \u2014 nothing to share."
+                else:
+                    ok, err = _perform_share(_wname, _to, owner)
+                    message = (f"Done \u2014 \u201c{_wname}\u201d is now shared with {_why}: "
+                               f"you both get its alerts, and either of you can adjust it. "
+                               f"It stays yours \u2014 say \u201cstop sharing {_wname} with "
+                               f"{_why}\u201d to end it."
+                               if ok else f"I couldn't share it: {err}")
+            return {"message": message, "watch_suggestion": None, "watch_suggestions": None,
+                    "listings": None, "watch_actions": None, "program_action": None,
+                    "tokens": 0, "prompt_tokens": 0, "duration_ms": 0, "raw": message}
+
         # A bare "yes" answering OUR OWN transfer-confirm question executes it; a bare
         # "no" keeps the watch. Parsed from the previous assistant message — no new state.
         _tc = (_TRANSFER_CONFIRM_RE.search(_prev_assist or "")

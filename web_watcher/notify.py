@@ -267,6 +267,7 @@ def send_notifications(
     use_telegram: bool = True,
     use_email:    bool = True,
     owner_chat_id: str = "",
+    extra_chat_ids: list | None = None,
 ) -> dict[str, bool]:
     """
     Fire all enabled notification channels.
@@ -279,7 +280,18 @@ def send_notifications(
     results: dict[str, bool] = {}
 
     if use_telegram:
-        results["telegram"] = send_telegram(payload, cfg, chat_id_override=owner_chat_id)
+        # Fan out to the owner AND everyone the watch is shared with — one watch,
+        # everyone's alert. De-duped; "" (the main chat) counts as one target.
+        targets, seen = [], set()
+        for c in [owner_chat_id] + [str(x) for x in (extra_chat_ids or [])]:
+            k = str(c or "")
+            if k not in seen:
+                seen.add(k)
+                targets.append(c)
+        ok = False
+        for c in targets:
+            ok = send_telegram(payload, cfg, chat_id_override=c) or ok
+        results["telegram"] = ok
 
     if use_email:
         results["email"] = send_email(payload, cfg)

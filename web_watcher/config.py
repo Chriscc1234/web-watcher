@@ -198,6 +198,10 @@ class Watch(BaseModel):
     # dashboard is the admin view and shows every watch regardless of owner. See
     # server._watches_for_owner / telegram_bot.
     owner: str = ""
+    # Chat_ids this watch is SHARED with (co-watchers): they get its alerts, see it in
+    # their list, and may edit/start/stop it — one watch, so a change is instantly live
+    # for everyone. Delete/transfer/un-share remain the primary owner's alone.
+    shared_with: list[str] = Field(default_factory=list)
     urls: list[str] = Field(min_length=1)
     click_path: list[ClickStep] = Field(default_factory=list)
     interval_minutes: int | None = None  # mutually exclusive with cron_expression

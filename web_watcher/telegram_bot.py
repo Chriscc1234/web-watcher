@@ -1017,7 +1017,8 @@ class TelegramBridge:
             return
         admin = str(chat_id) == str(self.chat_id)
         mine = {w.get("name"): w for w in watches
-                if admin or str(w.get("owner") or "") == str(chat_id)}
+                if admin or str(w.get("owner") or "") == str(chat_id)
+                or str(chat_id) in [str(c) for c in (w.get("shared_with") or [])]}
         hit = [mine[n] for n in names if n in mine][:8]
         people = {}
         if admin:
@@ -1045,11 +1046,18 @@ class TelegramBridge:
                             "callback_data": f"wact:{'stop' if running else 'start'}:{tok}"})
             row.append({"text": "\U0001f50d Details", "callback_data": f"wdet:{tok}"})
             oline = ""
+            _shared = [str(c) for c in (w.get("shared_with") or [])]
             if admin:
                 _o = str(w.get("owner") or "")
                 oline = ("Yours" if _o == str(self.chat_id)
                          else "Unassigned (managed by you)" if not _o
                          else f"{people.get(_o) or 'chat ' + _o}\u2019s")
+                if _shared:
+                    oline += " \u00b7 shared"
+            elif str(chat_id) in _shared:
+                oline = "Shared with you"
+            elif _shared:
+                oline = "Yours \u2014 shared"
             self._send(self._watch_card_text(w, oline), chat_id, html=True, buttons=[row])
             if i < len(hit) - 1:
                 time.sleep(0.3)
@@ -1068,7 +1076,8 @@ class TelegramBridge:
             return None
         admin = str(chat_id) == str(self.chat_id)
         mine = {w.get("name"): w for w in watches
-                if admin or str(w.get("owner") or "") == str(chat_id)}
+                if admin or str(w.get("owner") or "") == str(chat_id)
+                or str(chat_id) in [str(c) for c in (w.get("shared_with") or [])]}
         hit = [mine[n] for n in names if n in mine][:6]
         if not hit:
             return None
@@ -1106,7 +1115,8 @@ class TelegramBridge:
             if w is None:
                 return None
             admin = str(chat) == str(self.chat_id)
-            if not admin and str(w.get("owner") or "") != str(chat):
+            shared = str(chat) in [str(c) for c in (w.get("shared_with") or [])]
+            if not admin and not shared and str(w.get("owner") or "") != str(chat):
                 return None                        # never another person's watch
             return w
         except Exception:

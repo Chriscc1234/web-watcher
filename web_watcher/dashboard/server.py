@@ -5546,7 +5546,11 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                if _is_bare_confirmation(latest_user) else None)
         if _tc:
             _wname = _resolve_watch_name(_tc.group("watch"), cfg)
-            _to, _why = _resolve_person(_tc.group("who").strip(), cfg, owner)
+            _who_txt = _tc.group("who").strip()
+            if _who_txt.lower() in ("you", "me", "yourself", "you (the desktop)"):
+                _to, _why = (str(owner or ""), "you")
+            else:
+                _to, _why = _resolve_person(_who_txt, cfg, owner)
             if _is_bare_refusal(latest_user):
                 message = f"Okay — “{_tc.group('watch')}” stays where it is."
             elif not _wname or _to is None:
@@ -5604,6 +5608,13 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 message = (f"I couldn't work out who to give it to ({_why}). "
                            f"People I know: {', '.join(dict.fromkeys(known)) or 'nobody yet — '
                            'add them to the allowed Telegram users first'}.")
+            elif str(_to) == str(owner or ""):
+                # A SELF-CLAIM ("transfer the miata watch to me") touches no other
+                # human — confirming it is pure friction, and the third-party wording
+                # ("its alerts go to them instead of you") read as gibberish. Just do it.
+                ok, err = _perform_transfer(_wname, _to, owner)
+                message = (f"Done — “{_wname}” is yours now; its alerts come to you."
+                           if ok else f"I couldn't transfer it: {err}")
             else:
                 # CONFIRM BEFORE MOVING. Transfers executed instantly and messaged the
                 # recipient before the sender could blink — and "send"/"share" sound
@@ -5611,8 +5622,8 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                 # copy but actually transferring the watch?"). State the semantics,
                 # wait for the yes; deletes always worked this way.
                 message = (f"⚖ Just so it's clear — this MOVES “{_wname}” "
-                           f"to {_why}: it leaves your list and its alerts go to them "
-                           f"instead of you. Say “yes” to transfer it — or "
+                           f"to {_why}: it leaves your list and its alerts go to "
+                           f"{_why} instead of you. Say “yes” to transfer it — or "
                            f"say “give them a copy” if you both want one.")
             suggestions, watch_actions, listings = [], None, None
             return {"message": message, "watch_suggestion": None, "watch_suggestions": None,

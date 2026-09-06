@@ -930,3 +930,42 @@ def test_a_copy_builds_a_fresh_watch_for_the_recipient_not_a_move(monkeypatch):
     assert card["urls"] == ["https://x?query=fiat"]
     assert card["min_rating"] == 3 and card["keywords"] == ["fiat"]
     assert "fresh history" in out["message"]
+
+
+def test_transfer_to_me_is_a_self_claim_no_confirm_no_gibberish(monkeypatch):
+    """'Transfer the Miata watch to me' → '…its alerts go to them instead of you' →
+    'Yes' → 'I lost track of that transfer' (the resolver hunted a person named 'you').
+    A self-claim touches no other human: it executes immediately, plainly worded."""
+    from web_watcher.dashboard import server as S
+    from web_watcher.config import AppConfig, NotificationsConfig, TelegramConfig, Watch
+    cfg = AppConfig(
+        notifications=NotificationsConfig(telegram=TelegramConfig(chat_id="111")),
+        watches=[Watch(name="Facebook Miata Watch", urls=["https://x?query=miata"],
+                       instruction="miatas", interval_minutes=30, mode="continuous",
+                       owner="")])
+    moved = []
+    monkeypatch.setattr(S, "_resolve_person",
+                        lambda who, cfg, owner: ("111", "you") if who.lower() in ("me", "you")
+                        else (None, "?"))
+    monkeypatch.setattr(S, "_perform_transfer",
+                        lambda w, to, actor: moved.append((w, to)) or (True, ""))
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out = S._complete_assistant_turn(
+        "sys", [{"role": "user", "content": "Transfer the Miata watch to me"}],
+        cfg, "m", owner="111")
+    assert moved == [("Facebook Miata Watch", "111")]   # immediate — no confirm round-trip
+    assert "is yours now" in out["message"]
+    assert "them" not in out["message"]
+
+    # And a stale third-party confirm mentioning "you" still resolves on a yes.
+    moved.clear()
+    convo = [{"role": "user", "content": "transfer the miata watch to me"},
+             {"role": "assistant",
+              "content": "⚖ Just so it's clear — this MOVES “Facebook Miata Watch” "
+                         "to you: it leaves your list and its alerts go to you instead "
+                         "of you. Say “yes” to transfer it."},
+             {"role": "user", "content": "Yes"}]
+    _mock_two_phase(monkeypatch, "Sure.", {"intent": "none"})
+    out2 = S._complete_assistant_turn("sys", convo, cfg, "m", owner="111")
+    assert moved == [("Facebook Miata Watch", "111")]
+    assert "lost track" not in out2["message"]

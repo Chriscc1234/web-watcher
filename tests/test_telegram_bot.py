@@ -1088,3 +1088,19 @@ def test_stale_card_taps_can_never_hit_the_wrong_watch(monkeypatch):
     b._handle_watch_callback({"id": "cb1"}, "111", "wact:stop:0")
     assert not acted                                    # the old card did NOTHING
     assert "out of date" in answered[0]
+
+
+def test_a_mid_sweep_card_still_reads_as_running():
+    """'it says 2 are running but I only see one' — the Miata card said '👁 checking now'
+    (mid-sweep) with nothing marking that as a RUNNING state, so the admin counted one
+    green card where the header said two. Every running state is green and says 'on'."""
+    from web_watcher.telegram_bot import TelegramBridge
+    sweeping = {"name": "Facebook Miata Watch", "enabled": True,
+                "continuous_running": True, "sweeping_now": True, "stats": {}}
+    card = TelegramBridge._watch_card_text(sweeping)
+    assert "🟢" in card and "on" in card and "checking right now" in card
+    stopped = {"name": "Fiat X19 Cars Watch", "enabled": True,
+               "continuous_running": False, "stats": {}}
+    card2 = TelegramBridge._watch_card_text(stopped)
+    assert "set up but stopped" in card2 and "🟡" in card2
+    assert "off" not in card2                     # 'off' is for DISABLED watches only

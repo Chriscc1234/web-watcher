@@ -994,9 +994,12 @@ class TelegramBridge:
         buddy's cards are always their own, so theirs stay clean."""
         import html as _h
         running = bool(w.get("continuous_running"))
-        state = ("\U0001f441 checking now" if w.get("sweeping_now")
+        # One vocabulary with the status list. 'checking now' used to stand alone with an
+        # eye icon — a RUNNING watch mid-sweep looked like some third ambiguous state, and
+        # the admin counted one green card where the header said two running.
+        state = ("\U0001f7e2 on \u2014 checking right now" if w.get("sweeping_now")
                  else "\U0001f7e2 on \u2014 watching" if running
-                 else "\u26aa off \u2014 not watching" if w.get("enabled")
+                 else "\U0001f7e1 set up but stopped \u2014 tap Start" if w.get("enabled")
                  else "\u26ab inactive")
         lines = [f"<b>{_h.escape(w.get('name') or '')}</b>", state]
         if owner_line:
@@ -1144,9 +1147,9 @@ class TelegramBridge:
             st = w.get("stats") or {}
             lr = w.get("last_run") or {}
             running = bool(w.get("continuous_running"))
-            state = ("\U0001f441 checking now" if w.get("sweeping_now")
+            state = ("\U0001f7e2 running \u2014 checking right now" if w.get("sweeping_now")
                      else "\U0001f7e2 running" if running
-                     else "\u26aa stopped" if w.get("enabled") else "inactive")
+                     else "\U0001f7e1 set up but stopped" if w.get("enabled") else "inactive")
             lines = [f"<b>{_esc(w['name'])}</b>", state]
             if w.get("instruction"):
                 lines.append(_esc(w["instruction"]))

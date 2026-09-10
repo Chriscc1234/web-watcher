@@ -25,8 +25,11 @@ def test_watch_summary_omits_notify_secrets():
 
 
 def test_bug_report_zip_has_report_and_no_secrets(tmp_path, monkeypatch):
-    # Desktop → tmp; data root → tmp (so we read no real config).
+    # Desktop → tmp; data root → tmp (so we read no real config). OneDrive too: it is
+    # checked FIRST by _desktop_dir, and leaving it unpatched put ~280 test zips on the
+    # user's real (OneDrive-redirected) Desktop across two months of suite runs.
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("OneDrive", raising=False)
     (tmp_path / "Desktop").mkdir()
     monkeypatch.setenv("WW_DATA_DIR", str(tmp_path / "data"))
 
@@ -37,6 +40,7 @@ def test_bug_report_zip_has_report_and_no_secrets(tmp_path, monkeypatch):
 
     path = _write_bug_report("My title", "It broke")
     assert path.exists() and path.suffix == ".zip"
+    assert "Desktop" not in str(path) or str(tmp_path) in str(path)   # never the real one
     with zipfile.ZipFile(path) as z:
         report = z.read("report.txt").decode()
     assert "My title" in report and "It broke" in report

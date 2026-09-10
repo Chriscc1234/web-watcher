@@ -3669,7 +3669,13 @@ def _list_conversation_threads(cfg) -> list[dict]:
 
 def _desktop_dir():
     """The user's Desktop (OneDrive-redirected or local), else the data dir — wherever the bug
-    report is easiest for the tester to find and send."""
+    report is easiest for the tester to find and send.
+
+    NEVER under pytest: the test suite redirected USERPROFILE but this checks OneDrive
+    FIRST, so on an OneDrive-redirected desktop every full test run for two months wrote
+    a real 'WebWatcher-bug-*.zip' onto the user's actual Desktop — ~280 of them."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return paths.data_dir()
     for env in ("OneDrive", "USERPROFILE"):
         base = os.environ.get(env, "")
         if base:

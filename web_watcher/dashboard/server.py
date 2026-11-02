@@ -3863,6 +3863,54 @@ def _watches_for_owner(cfg, owner: str | None):
             or str(owner) in [str(x) for x in (getattr(w, "shared_with", []) or [])]]
 
 
+def _bulk_lifecycle_message(act: str, watches: list, cfg, asker) -> str:
+    """The reply to "stop all watches" / "start all watches".
+
+    It used to be "Stopping all 7 of your watches." — counting five that were already off and
+    calling other people's watches "yours", so the admin couldn't tell what had really
+    stopped. Name what actually changes, whose each one is, and how many needed nothing."""
+    try:
+        from web_watcher.scheduler import _remembered_running_set
+        desired = _remembered_running_set()
+    except Exception:
+        desired = None
+
+    def _runs(w) -> bool:
+        if not getattr(w, "enabled", True):
+            return False
+        if getattr(w, "mode", "") != "continuous" or desired is None:
+            return True                          # scheduled watch, or a pre-desired-state install
+        return w.name in desired
+
+    changing = [w for w in watches if _runs(w)] if act == "stop" else \
+               [w for w in watches if not _runs(w)]
+    already = "stopped" if act == "stop" else "running"
+    if not changing:
+        return (f"Nothing to {act} \u2014 none of the {len(watches)} watches is running."
+                if act == "stop" else
+                f"Nothing to start \u2014 all {len(watches)} watches are already running.")
+
+    main = str(cfg.notifications.telegram.chat_id or "")
+    me = str(asker) if asker is not None else main
+    names = _load_owner_names()
+
+    def _label(w) -> str:
+        wid = str(getattr(w, "owner", "") or "")
+        if not wid or wid == me:
+            return f"\u201c{w.name}\u201d"
+        return f"\u201c{w.name}\u201d ({names.get(wid) or 'another user'}\u2019s)"
+
+    shown = [_label(w) for w in changing[:6]]
+    if len(changing) > 6:
+        shown.append(f"{len(changing) - 6} more")
+    listed = shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+    gerund = "Stopping" if act == "stop" else "Starting"
+    rest = len(watches) - len(changing)
+    tail = (f" The other {rest} {'was' if rest == 1 else 'were'} already {already}."
+            if rest else "")
+    return f"{gerund} {listed}.{tail}"
+
+
 def _owner_label_for(w, asker: str | None, cfg) -> str:
     """Whose watch is this, from the ASKER's seat. The admin sees every watch, and neither
     the model context nor the status list said anything about ownership — so "what is mine
@@ -5845,7 +5893,7 @@ def _complete_assistant_turn(system: str, messages: list, cfg, model: str,
                         message = (f"{gerund} {len(watch_actions)} of your watches — "
                                    f"keeping “{spared}” as it is.")
                     else:
-                        message = (f"{gerund} all {len(watch_actions)} of your watches."
+                        message = (_bulk_lifecycle_message(act, acted, cfg, owner)
                                    if watch_actions else "You don't have any watches yet.")
             elif scope == "bare" and not already_named:
                 # A bare verb resolves, in order: the bot's own standing offer ("say

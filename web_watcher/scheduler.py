@@ -1574,6 +1574,133 @@ def _wants_deep_read(watch) -> bool:
     return bool(watch.judgment_prompt or (watch.instruction or "").strip())
 
 
+_LISTING_TAB_WAIT_S = 6.0          # how long a Ctrl+click gets to produce its tab
+
+
+def _listing_link(page, url: str):
+    """The results-page anchor that leads to this listing, or None. Found by the URL's PATH
+    (hrefs are often relative or carry tracking params) and then confirmed EXACTLY against
+    the anchor's resolved pathname — a bare substring would let "/itm/123" grab the
+    "/itm/1234567" card and open the wrong ad."""
+    try:
+        path = urlparse(url).path or ""
+    except Exception:
+        return None
+    want = path.rstrip("/")
+    if len(want) < 6 or '"' in want or "\\" in want:
+        return None                    # "/", "/item": too vague to single out one ad
+    try:
+        loc = page.locator(f'a[href*="{want}"]')
+        n = min(int(loc.count()), 8)
+    except Exception:
+        return None
+    for i in range(n):
+        cand = loc.nth(i)
+        try:
+            got = cand.evaluate("a => new URL(a.href, location.href).pathname")
+            if (got or "").rstrip("/") == want and cand.is_visible():
+                return cand
+        except Exception:
+            continue
+    return None
+
+
+def _wait_for_listing_document(tab, stop_event=None) -> bool:
+    """A tab opened by a click starts on its own about:blank and only THEN navigates — and
+    Playwright reports that placeholder as loaded, with tab.url still ''. Measured: switching
+    to the tab at that moment showed the user an 'Untitled' blank page. Wait for the ad's own
+    document, and for Playwright to learn its URL (human_read paces by the host), first."""
+    deadline = time.monotonic() + NAV_TIMEOUT / 1000
+    real = False
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        try:
+            href, state = tab.evaluate("[location.href, document.readyState]")
+        except Exception:
+            href, state = "", ""            # its context was swapped mid-navigation
+        real = bool(href) and href != "about:blank" and state in ("interactive", "complete")
+        if real and (tab.url or "") not in ("", "about:blank"):
+            return True
+        try:
+            tab.wait_for_timeout(250)
+        except Exception:
+            return False
+    return real
+
+
+def _open_listing_tab(page, ctx, url: str, stop_event=None):
+    """Open one listing for a deep-read the way a person does: Ctrl+click its card on the
+    results page, let it load in a BACKGROUND tab, switch to it once it has loaded.
+
+    This replaced new_page()+goto(), which put an empty 'about:blank' tab in front of the user
+    for every ad read — seconds at a time on a slow site ("every once in a while it opens an
+    about blank page"). The click is also the more human act: a real referrer and a real
+    click origin, rather than a tab that materialises and is then pointed somewhere.
+
+    No card links to it (paginated away, virtualised list, a backfill of older matches):
+    fall back to a new tab + goto with the results page as referer, keeping the results page
+    in front while the ad loads behind it, so even the fallback shows no blank page.
+    Returns the tab, or None if a stop was requested while it loaded."""
+    from web_watcher import humanize
+    link = _listing_link(page, url)
+    if link is not None:
+        try:
+            before = page.url
+        except Exception:
+            before = ""
+        try:
+            known = list(ctx.pages)
+        except Exception:
+            known = []
+        tab = None
+        if humanize.click(page, link, timeout=4_000, modifiers=["Control"]):
+            deadline = time.monotonic() + _LISTING_TAB_WAIT_S
+            while tab is None and time.monotonic() < deadline:
+                try:
+                    page.wait_for_timeout(200)     # also lets Playwright deliver the new tab
+                    fresh = [p for p in ctx.pages if p not in known]
+                except Exception:
+                    fresh = []
+                tab = fresh[0] if fresh else None
+        if tab is not None:
+            if _wait_for_listing_document(tab, stop_event):
+                try:
+                    tab.bring_to_front()           # the person switches to the tab they opened
+                except Exception:
+                    pass
+                return tab
+            try:
+                tab.close()
+            except Exception:
+                pass
+            if stop_event is not None and stop_event.is_set():
+                return None
+            log.info("Ctrl+click tab never loaded %s — opening it directly", url[:70])
+        else:
+            # Some sites swallow the modifier and navigate in place. Put the results back.
+            try:
+                if before and page.url != before:
+                    page.go_back(timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+            except Exception:
+                pass
+    tab = ctx.new_page()
+    try:
+        page.bring_to_front()                  # results stay in view while the ad loads
+    except Exception:
+        pass
+    try:
+        ref = page.url or None
+    except Exception:
+        ref = None
+    tab.goto(url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded", referer=ref)
+    try:
+        tab.bring_to_front()
+    except Exception:
+        pass
+    return tab
+
+
 def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
     """
     Deep-read each NEW listing: open its ad page in a background tab (the agent's main
@@ -1588,6 +1715,10 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
         ctx = page.context
     except Exception:
         return
+    try:
+        tabs_before = list(ctx.pages)
+    except Exception:
+        tabs_before = None
     fetched = 0
     for i, l in enumerate(listings):
         if stop_event is not None and stop_event.is_set():
@@ -1602,18 +1733,11 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
                 break
         tab = None
         try:
-            tab = ctx.new_page()
-            # OPEN LIKE A CTRL-CLICK, NOT A COLD LOAD. A bare goto in a fresh tab arrives
-            # with NO referrer — no click origin, no browsing context — which was the biggest
-            # remaining tell on Facebook: the "user" reads a results page in one tab while
-            # listing pages materialise from nowhere in others. With the results page sent as
-            # the referer, each tab reads as "opened in a new tab from the search results" —
-            # exactly how a person actually browses a marketplace.
-            try:
-                ref = page.url or None
-            except Exception:
-                ref = None
-            tab.goto(l.url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded", referer=ref)
+            # Opened like a person: Ctrl+click the card, read it in its own tab (see
+            # _open_listing_tab — the referrer and click origin come with it for free).
+            tab = _open_listing_tab(page, ctx, l.url, stop_event)
+            if tab is None:
+                break                           # stop requested while it loaded
             dismiss_popups(tab, settle_ms=0)
             # Spend a believable amount of time ON the ad — scrolling the description,
             # looking at the photos — BEFORE scraping it. Reading first also means the
@@ -1654,6 +1778,18 @@ def _capture_listing_bodies(page, listings: list, stop_event=None) -> None:
                     tab.close()
                 except Exception:
                     pass
+                try:
+                    page.bring_to_front()       # back to the results, like closing a tab
+                except Exception:
+                    pass
+    # A Ctrl+click tab that turned up AFTER its wait gave up is still open — never leave a
+    # stray tab behind (a lingering blank-looking tab is the very thing this replaced).
+    if tabs_before is not None:
+        try:
+            for stray in [p for p in ctx.pages if p not in tabs_before]:
+                stray.close()
+        except Exception:
+            pass
     log.info("Deep-read %d/%d new listing(s) for their ad details", fetched, len(listings))
 
 
@@ -1982,13 +2118,17 @@ def _process_sweep_listings(
     for l in reposts:
         save_seen_listing(watch.name, l.key, run_ts, summary=l.title, link=l.url, db_path=db_path)
 
-    alerted = _alert_new_listings(watch, cfg, matched, run_ts, db_path) if matched else 0
+    alerted = (_alert_new_listings(watch, cfg, matched, run_ts, db_path, stop_event=stop_event)
+               if matched else 0)
 
     # Cross-watch matching: a listing THIS watch stumbled on (e.g. a Corvette the truck
     # watch loaded) may be exactly what ANOTHER watch wants. Offer the fresh listings to
     # the user's other watches so a good find isn't lost just because the "wrong" watch
     # surfaced it. Opt-out via cfg.cross_watch_matching.
-    if fresh and getattr(cfg, "cross_watch_matching", True):
+    # ...but not on the way out of a stop: offering this sweep's finds to other watches
+    # sends alerts too, and 'stop' has to mean nothing more goes out from this sweep.
+    if (fresh and getattr(cfg, "cross_watch_matching", True)
+            and not (stop_event is not None and stop_event.is_set())):
         try:
             _cross_watch_match(watch, cfg, db_path, fresh, run_ts)
         except Exception as exc:
@@ -2768,8 +2908,26 @@ def _boundary_vet(watch, l, cfg, db_path, run_ts):
         return None
 
 
+def _hold_for_restart(watch: Watch, listings: list, run_ts: str, db_path) -> None:
+    """A stop arrived before these matches went out. Don't send them — the user just said
+    stop, and an alert 20 seconds later read as 'it didn't stop'. Don't lose them either:
+    a match with its ad already read is marked seen-but-not-alerted, which is exactly what
+    _drip_unalerted delivers when the watch is started again; one with no body yet stays
+    unseen, so the next sweep re-reads and alerts it."""
+    held = 0
+    for l in listings:
+        if (getattr(l, "details", "") or "").strip():
+            save_seen_listing(watch.name, l.key, run_ts, summary=l.title, link=l.url,
+                              db_path=db_path)
+        held += 1
+    if held:
+        log.info("Stop requested — holding %d match(es) for %r; they'll be sent when it's "
+                 "started again", held, watch.name)
+
+
 def _alert_new_listings(
     watch: Watch, cfg: AppConfig, listings: list, run_ts: str, db_path: Optional[Path] = None,
+    stop_event=None,
 ) -> int:
     """
     Send a notification per new listing, capped at watch.continuous_max_alerts and
@@ -2804,7 +2962,10 @@ def _alert_new_listings(
 
     _stars = lambda r: ("★" * r + "☆" * (5 - r)) if r else ""
 
-    for l in head:
+    for _i, l in enumerate(head):
+        if stop_event is not None and stop_event.is_set():
+            _hold_for_restart(watch, head[_i:] + extra, run_ts, db_path)
+            return sent
         # Keep the summary RAW here — each notification channel escapes for its own format
         # (email HTML, Telegram HTML). Pre-escaping here caused Telegram to double-escape.
         title = l.title or "(listing)"

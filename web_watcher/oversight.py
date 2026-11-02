@@ -224,9 +224,20 @@ class OversightAgent:
                     err = str(last["error"])[:160]
             except Exception:
                 pass
-            running = bool(job_map.get(w.name, {}).get("continuous_running"))
-            if orchestrating and w.enabled and w.mode == "continuous":
-                running = True
+            # Ask the engine (watch_runtime), never infer. The old inference — orchestrator
+            # up + enabled + continuous => running — announced "'Sailrite' is running now"
+            # at startup while the rotation was deliberately HOLDING it stopped.
+            running = None
+            try:
+                rt = self._manager.watch_runtime(w.name, cfg)
+                if isinstance(rt, dict):
+                    running = bool(rt.get("running"))
+            except Exception:
+                running = None
+            if running is None:                  # an engine that can't answer: legacy guess
+                running = bool(job_map.get(w.name, {}).get("continuous_running"))
+                if orchestrating and w.enabled and w.mode == "continuous":
+                    running = True
             out.append({
                 "name": w.name,
                 "enabled": w.enabled,

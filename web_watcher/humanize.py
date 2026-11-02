@@ -28,7 +28,7 @@ lands on nothing is worse than one that's a shade too tidy.
 
 ── KEY LOCATIONS ─────────────────────────────────────────────────────────────
   move          curved multi-segment approach with overshoot; per-page memory
-  click         move near, hover (actionability), press with human delay
+  click         move near, hover (actionability), press with human delay (+ Ctrl etc.)
   type_text     per-keystroke timing + think-pauses + occasional typo/fix
   _TYPO_NEIGHBOURS   QWERTY adjacency used for realistic wrong keys
 ──────────────────────────────────────────────────────────────────────────────
@@ -128,11 +128,15 @@ def move(page, tx: float, ty: float) -> None:
     _remember(page, tx, ty)
 
 
-def click(page, loc, timeout: int = 5_000) -> bool:
+def click(page, loc, timeout: int = 5_000, modifiers=None) -> bool:
     """Approach with move(), land with Playwright. The approach aims slightly off the element's
     dead center (people don't click centroids); hover() then re-verifies actionability and the
     press carries a human hold time. Falls back to a plain click when there's no page or no
-    stable box. Returns True if a click was delivered."""
+    stable box. Returns True if a click was delivered.
+
+    `modifiers` (e.g. ["Control"]) rides on EVERY press below, fallbacks included: a
+    Ctrl+click that silently degraded to a plain click would navigate the results page away."""
+    mods = {"modifiers": modifiers} if modifiers else {}
     try:
         loc.scroll_into_view_if_needed(timeout=timeout)
     except Exception:
@@ -144,7 +148,7 @@ def click(page, loc, timeout: int = 5_000) -> bool:
         box = None
     if page is None or not box or box.get("width", 0) < 1 or box.get("height", 0) < 1:
         try:
-            loc.click(timeout=timeout)
+            loc.click(timeout=timeout, **mods)
             return True
         except Exception:
             return False
@@ -168,11 +172,11 @@ def click(page, loc, timeout: int = 5_000) -> bool:
         except Exception:
             pass
         time.sleep(max(0.06, random.gauss(0.20, 0.05)))     # hover dwell before pressing
-        loc.click(timeout=timeout, delay=random.randint(60, 130))
+        loc.click(timeout=timeout, delay=random.randint(60, 130), **mods)
         return True
     except Exception:
         try:
-            loc.click(timeout=timeout)
+            loc.click(timeout=timeout, **mods)
             return True
         except Exception:
             return False
